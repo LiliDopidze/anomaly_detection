@@ -68,95 +68,99 @@ the underlying dataset.
 Open `00_NATIVE_DATA_EXPLORATION.ipynb` first and choose
 **Runtime → Run all**. It defaults to telecom.
 
-The notebook acts as a statistical intake audit:
+Notebook 00 is deliberately limited to data exploration and statistical assessment:
 
-1. Counts source files and Parquet rows from exact metadata.
-2. Deterministically seals cold-entity and future/unseen-instance holdouts before
-   analysing any feature.
-3. Prints a dictionary for every native field: meaning, unit, measurement kind,
-   inference availability, treatment, nuisance modes and evidence status.
-4. Prints actual operational rows three ways: time-ordered, deterministic random,
-   and one transposed observation so every selected feature is readable.
-5. Takes a reproducible bounded sample only from the sealed exploration frame and
-   checks whether that sample represents its entities, months or file durations.
-6. Calculates count, missingness, zeros, robust quantiles, Bowley skew, medcouple
-   skew and boundary concentration without deleting apparent outliers.
-7. Examines entity-level and co-occurring missingness, bulk distributions and three
-   dependence views: pooled rows, equal-entity weighting and first differences.
-8. Loads complete selected histories and measures cadence, gaps, frozen values,
-   effective sample size, drift, robust change screens and gap-aware recurrence.
-9. Screens where variance sits across entities and native peer groups. For 3W it
-   explicitly records that manifold topology is unavailable rather than inventing it.
-10. Examines valve-state transitions and dwell times for 3W, and counter resets for
-    telecom.
-11. Runs a simple label-free robust score over several thresholds and persistence
-    rules to expose likely alert-volume problems. This is a feasibility screen, not
-    the final detector.
-12. Hash-freezes every pre-label table and figure. Only then does an optional
-    evaluation section reopen the exact sampled positions, and it proves the frozen
-    artifacts did not change.
-13. Writes small reports and figures to Drive. It does not copy sampled telemetry or
-    create `SPEC-CORE`.
+1. Counts files, observations, entities, fields, date ranges and instance lengths.
+2. Prints every feature with its meaning, unit, physical type and statistical type.
+3. Shows first rows, deterministic random rows and one complete observation
+   vertically.
+4. Uses exact Parquet metadata to count missing and frozen variables where possible.
+5. Calculates counts, missingness, zeros, mean, standard deviation, robust
+   quantiles, IQR, median absolute deviation, moment skew and Bowley skew.
+6. Plots feature distributions without modifying the underlying values.
+7. Loads complete selected histories and plots the measurements and labels over
+   time.
+8. Measures cadence, duration, duplicate timestamps, gaps and regular-grid coverage.
+9. Reports exact-lag autocorrelations, Theil–Sen trends, periodogram peaks, ADF
+   statistics and KPSS statistics on contiguous observed segments.
+10. Compares pooled Spearman dependence with dependence after first differencing.
+11. Counts labels and continuous label periods.
+12. For 3W, identifies exactly which real instances satisfy the anomaly-detection
+    benchmark in Vargas et al. (2019).
+
+It does not fit a detector, create train/test folds, select thresholds, define
+holdouts, score alerts, write a decision register or make product interpretations.
 
 Default telecom output:
 
 ```text
 MyDrive/anomaly_detection/outputs/exploration/telecom/<timestamped_run_id>/
-├── artifact_hashes_prelabel.json
-├── eda_final_report.json
-├── prelabel/
-│   ├── prelabel_manifest.json
-│   ├── holdout_seal.csv
-│   ├── feature_dictionary.csv
-│   ├── sample_manifest.csv
-│   ├── sampling_validity.csv
-│   ├── numeric_summary_sample.csv
-│   ├── variance_structure.csv
-│   ├── effective_sample_size.csv
-│   ├── drift_and_change_screen.csv
-│   ├── recurrence_screen.csv
-│   ├── alert_feasibility_summary.csv
-│   ├── decision_register.csv
-│   └── figures/
-└── label_audit/                       # absent when EDA_INCLUDE_TRUTH=0
-    └── label_audit_summary.csv
+├── eda_report.json
+├── dataset_dimensions.csv
+├── source_inventory.csv
+├── feature_dictionary.csv
+├── sample_manifest.csv
+├── descriptive_statistics.csv
+├── variable_quality.csv
+├── series_variable_quality.csv
+├── temporal_summary.csv
+├── autocorrelation_summary.csv
+├── trend_summary.csv
+├── spectrum_summary.csv
+├── stationarity_tests.csv
+├── correlation_pooled_spearman.csv
+├── correlation_first_difference_spearman.csv
+├── label_distribution.csv
+├── label_periods_selected_series.csv
+└── figures/
 ```
 
-The exact shape and file composition are not estimates. Distributions,
-correlations, missingness prevalence and label prevalence are estimates for the
-explicitly recorded exploration frame. Complete-series temporal checks describe only
-the deterministically selected histories. Synthetic telecom and event-conditioned 3W
-cannot estimate deployment incident prevalence.
+Dataset dimensions and Parquet-metadata counts are exact. Distribution statistics
+come from the bounded sample whose composition is stored in `sample_manifest.csv`.
+Time-series statistics use the complete histories listed in
+`complete_series_manifest.csv`.
 
 Useful telecom controls:
 
 ```python
 %env EDA_SECTOR=telecom
 %env EDA_SAMPLE_ROWS=200000
-%env EDA_LONGITUDINAL_ENTITY_COUNT=12
-%env EDA_SERIES_PLOT_COUNT=2
-%env EDA_DEV_ENTITY_FRACTION=0.70
-%env EDA_DEV_TIME_FRACTION=0.60
+%env EDA_SERIES_COUNT=4
+%env EDA_FOCUS_FEATURES=rx_power_dbm,temperature_c,ber,fec_count,crc_errors,throughput_mbps
 ```
 
 To inspect Petrobras 3W instead:
 
 ```python
 %env EDA_SECTOR=petrobras_3w
-%env EDA_THREEW_FILE_COUNT=20
-%env EDA_THREEW_ROWS_PER_FILE=10000
-%env EDA_LONGITUDINAL_FILE_COUNT=6
-%env EDA_THREEW_DEV_FILE_FRACTION=0.60
+%env EDA_THREEW_SAMPLE_FILES=30
+%env EDA_THREEW_ROWS_PER_FILE=5000
+%env EDA_SERIES_COUNT=4
+%env EDA_FULL_LABEL_SCAN=1
 ```
 
 The 3W exact inventory counts all real, simulated and hand-drawn files separately.
-Its primary exploration draws only from filenames beginning with `WELL-`. It does
-not use `SIMULATED_` or `DRAWN_` files, and it does not expose event-directory or
-row-label values until the post-freeze audit.
+Numerical feature statistics use a stratified bounded sample of real `WELL-`
+instances because the 2019 anomaly-detection benchmark is defined on real instances.
+Simulated and hand-drawn instances remain visible in the exact inventory and label
+counts.
 
-Use `EDA_INCLUDE_TRUTH=0` for a purely operational run. By default the notebook makes
-a UTC-timestamped immutable run directory. If you set `EDA_RUN_ID` yourself, it must
-be new: the notebook refuses to overwrite a prior evidence set.
+For the downloaded 3W 2.0.0 source, the notebook reproduces the exact totals
+published in the [3W 2.0.0 data paper](https://arxiv.org/abs/2507.01048):
+41,109 completely missing variables, 6,095 fully observed frozen variables and
+4,028,400 unlabeled observations. It also writes:
+
+```text
+threew_anomaly_benchmark_protocol.csv
+threew_anomaly_benchmark_eligibility.csv
+threew_anomaly_benchmark_summary.csv
+```
+
+The strict [2019 anomaly-detection benchmark](https://doi.org/10.1016/j.petrol.2019.106223)
+uses real event types 1, 2, 5, 6, 7 and 8 with at least one continuous normal
+period of 20 minutes. Event type 9 was introduced later in 3W 2.0.0, so the notebook
+reports it separately as an extension rather than silently changing the original
+benchmark.
 
 ### 1. Telecom contract and locked truth
 
