@@ -1,41 +1,61 @@
 # Architecture and trust boundary
 
-## Dependency direction
+## Logical flow
 
 ```text
-telemetry_contract
-        ↑
-telemetry_packs
-        ↑
-telemetry_adapters ──> telemetry_eval_contract
+telecom source ──> telecom.py ──┐
+                               ├──> core.py ──> runtime.py
+3W source ───────> oil_well.py ─┘
+                         │
+                         └────────> evaluation.py (offline only)
 
-telemetry_runtime     # no internal package dependency
+packs.py ──> translator configuration
+workflows.py ──> orchestration and evidence
+cli.py ──> clean child-process materialisation
 ```
 
-`telemetry_contract` is sector-neutral and has no internal dependency. Packs depend
-only on the generic contract. Adapters are offline translation components and may
-depend on both contracts. Runtime scoring accepts only a SPEC-CORE directory.
+`core.py` and `evaluation.py` are dependency roots. `runtime.py` has no dependency on
+evaluation, either sector translator, or notebook workflows. Tests assert the
+internal graph is acyclic.
+
+## Why there are modules instead of notebook implementations
+
+The eight modules separate responsibilities that change for different reasons. The
+notebooks stay readable because they call `materialise_telecom`,
+`run_week1_acceptance`, or `challenge_threew`; a bug fix is made and tested once in
+the package.
+
+This is not a runtime bundle embedded in a notebook. Colab installs the GitHub
+package. A signed-off run records the resolved commit so the exact implementation can
+be recovered.
 
 ## Three distinct absence states
 
 The canonical representation distinguishes:
 
-1. an observation row exists but its value is null;
-2. an expected observation is missing inside an entity validity window;
-3. the entity is outside its validity window and no observation is expected.
+1. a row exists but its value is null (`quality_code = invalid`);
+2. an expected observation is absent inside an entity validity window
+   (`collection_gaps`);
+3. the entity is outside its validity window, so no observation is expected.
 
-These map respectively to an `invalid` telemetry quality code, a collection-gap
-interval, and no gap.
+The third case must never be labelled as a collection gap.
 
 ## Evaluation shapes
 
-SPEC-EVAL contains both event truth and condition-state truth. Petrobras 3W forced the
-addition of `gt_condition_states`; it did not justify a severity field because the
-source provides state codes rather than graded severity.
+SPEC-EVAL supports event truth and condition-state truth. Petrobras 3W required
+`gt_condition_states`; it did not justify `severity_ordinal`, because the source
+provides state codes rather than graded severity.
 
-## Artifact boundaries
+## Physical data interface
 
-The current alpha release builds one Python distribution while enforcing the boundary
-through package imports and tests. A production deployment should split runtime-safe
-core from offline translation/evaluation tooling into separate distributions or
-container images.
+The logical telemetry schema is long. Physical materialisation is partitioned
+Parquet, and consumers must read batches rather than loading the entire long table.
+Each telecom run records row expansion, stored bytes, and storage extrapolations in
+`representation_report.json`.
+
+## Deployment boundary
+
+The alpha repository builds one Python distribution while enforcing the runtime
+boundary through imports and tests. A production release can split runtime-safe code
+from offline translation/evaluation tooling into separate distributions or images
+without changing the contract.

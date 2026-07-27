@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sector-agnostic-telemetry"
-version = "0.3.0"
+version = "0.3.1"
 description = "Sector-agnostic telemetry contracts, sector packs, source adapters and truth-isolation tests"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,16 +30,17 @@ dev = [
 ]
 
 [project.scripts]
-telemetry-adapt = "telemetry_adapters.cli:main"
+telemetry-adapt = "anomaly_detection.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"telemetry_contract" = ["schemas/spec-core/*.json"]
-"telemetry_eval_contract" = ["schemas/spec-eval/*.json"]
-"telemetry_packs.telecom" = ["*.json"]
-"telemetry_packs.oil_well" = ["*.json"]
+"anomaly_detection" = [
+  "data/schemas/spec_core/*.json",
+  "data/schemas/spec_eval/*.json",
+  "data/packs/telecom/*.json",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

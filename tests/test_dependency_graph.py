@@ -5,45 +5,32 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-PREFIXES = (
-    "telemetry_contract",
-    "telemetry_eval_contract",
-    "telemetry_packs",
-    "telemetry_adapters",
-    "telemetry_runtime",
-)
-
-
-def package_name(path: Path) -> str:
-    relative = path.relative_to(SRC)
-    parts = list(relative.with_suffix("").parts)
-    if parts[-1] == "__init__":
-        parts.pop()
-    return ".".join(parts)
-
-
-def package_root(module: str) -> str | None:
-    return next((prefix for prefix in PREFIXES if module.startswith(prefix)), None)
+PACKAGE = ROOT / "src" / "anomaly_detection"
+MODULES = {
+    "core",
+    "evaluation",
+    "packs",
+    "telecom",
+    "oil_well",
+    "runtime",
+    "workflows",
+    "cli",
+}
 
 
 def dependency_graph() -> dict[str, set[str]]:
-    graph = {prefix: set() for prefix in PREFIXES}
-    for path in SRC.rglob("*.py"):
-        origin = package_root(package_name(path))
-        if origin is None:
+    graph = {name: set() for name in MODULES}
+    for origin in MODULES:
+        path = PACKAGE / f"{origin}.py"
+        if not path.is_file():
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            names: list[str] = []
-            if isinstance(node, ast.Import):
-                names = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                names = [node.module]
-            for name in names:
-                target = package_root(name)
-                if target is not None and target != origin:
-                    graph[origin].add(target)
+            if not isinstance(node, ast.ImportFrom) or node.level != 1 or not node.module:
+                continue
+            target = node.module.split(".", 1)[0]
+            if target in MODULES and target != origin:
+                graph[origin].add(target)
     return graph
 
 
@@ -73,17 +60,21 @@ def find_cycle(graph: dict[str, set[str]]) -> list[str]:
 
 
 class DependencyGraphTests(unittest.TestCase):
-    def test_internal_package_graph_is_acyclic(self):
+    def test_internal_module_graph_is_acyclic(self):
         graph = dependency_graph()
         self.assertEqual(find_cycle(graph), [], graph)
 
-    def test_contract_does_not_depend_on_pack_adapter_runtime_or_eval(self):
+    def test_contract_modules_are_dependency_roots(self):
         graph = dependency_graph()
-        self.assertEqual(graph["telemetry_contract"], set())
+        self.assertEqual(graph["core"], set())
+        self.assertEqual(graph["evaluation"], set())
 
-    def test_runtime_depends_on_no_other_internal_package(self):
+    def test_runtime_never_depends_on_evaluation_or_sector_modules(self):
         graph = dependency_graph()
-        self.assertEqual(graph["telemetry_runtime"], set())
+        self.assertFalse(
+            graph["runtime"] & {"evaluation", "telecom", "oil_well", "workflows"},
+            graph,
+        )
 
 
 if __name__ == "__main__":

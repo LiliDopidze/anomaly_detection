@@ -1,0 +1,15 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:telemetry:spec-core:0.3.0:collection-gaps",
+  "title": "SPEC-CORE observable collection gap row",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entity_id", "gap_start", "gap_end", "known_at", "source"],
+  "properties": {
+    "entity_id": {"type": "string"},
+    "gap_start": {"type": "string", "format": "date-time"},
+    "gap_end": {"type": "string", "format": "date-time"},
+    "known_at": {"type": "string", "format": "date-time"},
+    "source": {"type": "string"}
+  }
+}
