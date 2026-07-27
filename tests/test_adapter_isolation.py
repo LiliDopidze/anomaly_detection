@@ -8,11 +8,38 @@ from pathlib import Path
 import pandas as pd
 from pandas.testing import assert_frame_equal
 
-from telemetry_adapters import SyntheticGponAdapter
-from telemetry_contract import validate_core_bundle
-from telemetry_runtime import DetectorConfig, RobustHistoryDetector, score_core_directory
+from anomaly_detection.telecom import SyntheticGponAdapter
+from anomaly_detection.core import (
+    ContractViolation,
+    assert_event_as_of,
+    validate_core_bundle,
+)
+from anomaly_detection.runtime import (
+    DetectorConfig,
+    RobustHistoryDetector,
+    score_core_directory,
+)
+from anomaly_detection.workflows import (
+    materialise_telecom,
+    run_week1_acceptance,
+)
 
 from .fixtures import evaluation_frames, native_frames
+
+
+def write_native_fixture(root: Path) -> None:
+    panel, topology, windows, tickets, engineering = native_frames()
+    registry, intervals, groups = evaluation_frames()
+    panel.to_parquet(root / "reference_dataset.parquet", index=False)
+    topology.to_csv(root / "topology.csv", index=False)
+    windows.to_csv(root / "entity_service_windows.csv", index=False)
+    engineering.to_csv(root / "engineering_events.csv", index=False)
+    tickets.to_csv(root / "tickets.csv", index=False)
+    evaluation = root / "evaluation"
+    evaluation.mkdir()
+    registry.to_csv(evaluation / "gt_fault_registry.csv", index=False)
+    intervals.to_csv(evaluation / "fault_entity_intervals.csv", index=False)
+    groups.to_csv(evaluation / "gt_fault_groups.csv", index=False)
 
 
 class AdapterIsolationTests(unittest.TestCase):
@@ -47,6 +74,75 @@ class AdapterIsolationTests(unittest.TestCase):
         self.assertNotIn("ticket_id", " ".join(
             " ".join(map(str, frame.columns)) for frame in core.values()
         ))
+
+    def test_quality_and_exposure_sensitive_branches_are_exercised(self):
+        telemetry = self.adapter.adapt_telemetry(self.panel, cadence_seconds=3600)
+        clipped = telemetry.loc[
+            telemetry["metric_id"].eq("telecom.link.fec_count")
+            & telemetry["quality_code"].eq("clipped")
+        ]
+        invalid = telemetry.loc[telemetry["quality_code"].eq("invalid")]
+        self.assertGreater(len(clipped), 0, "fixture must exercise clipped values")
+        self.assertGreater(len(invalid), 0, "fixture must exercise invalid values")
+
+        fec_exposure = telemetry.loc[
+            telemetry["metric_id"].eq("telecom.link.fec_count"), "exposure"
+        ]
+        self.assertEqual(fec_exposure.nunique(), 1)
+        self.assertEqual(float(fec_exposure.iloc[0]), 2_488_000_000.0 * 3600)
+
+        crc = telemetry.loc[
+            telemetry["metric_id"].eq("telecom.link.crc_errors")
+        ].sort_values(["event_ts", "entity_id"])
+        self.assertGreater(crc["exposure"].nunique(), 1)
+        first = crc.iloc[0]
+        native = self.panel.loc[
+            pd.to_datetime(self.panel["timestamp_utc"], utc=True).eq(first["event_ts"])
+            & self.panel["ont_id"].astype(str).eq(first["entity_id"])
+        ].iloc[0]
+        expected = float(native["throughput_mbps"]) * 1_000_000 * 3600 / (1500 * 8)
+        self.assertAlmostEqual(float(first["exposure"]), expected)
+
+    def test_truth_timestamp_canary_never_reaches_core_values(self):
+        canary = pd.Timestamp("2099-12-31T23:59:59.123456Z")
+        tickets = self.tickets.copy()
+        tickets["reported_ts"] = canary
+        tickets["resolved_ts"] = canary
+        core = self.adapter.adapt_core_frames(
+            self.panel,
+            self.topology,
+            self.service_windows,
+            tickets=tickets,
+            engineering_events=self.engineering,
+        )
+        for table_name, frame in core.items():
+            for column in frame.columns:
+                if "ts" not in str(column).lower() and "time" not in str(column).lower():
+                    continue
+                values = pd.to_datetime(frame[column], utc=True, errors="coerce")
+                self.assertFalse(values.eq(canary).any(), f"{table_name}.{column}")
+
+        leaky = {name: frame.copy() for name, frame in core.items()}
+        leaky["operational_events"]["event_end"] = pd.to_datetime(
+            leaky["operational_events"]["event_end"], utc=True
+        )
+        leaky["operational_events"].loc[:, "event_end"] = canary
+        leaked_values = pd.to_datetime(
+            leaky["operational_events"]["event_end"], utc=True, errors="coerce"
+        )
+        self.assertTrue(
+            leaked_values.eq(canary).any(),
+            "negative control must prove the value-level harness can observe a leak",
+        )
+
+    def test_as_of_guard_rejects_delayed_event_until_known(self):
+        event = {
+            "event_start": pd.Timestamp("2026-01-01T10:00:00Z"),
+            "known_at": pd.Timestamp("2026-01-01T10:05:00Z"),
+        }
+        with self.assertRaises(ContractViolation):
+            assert_event_as_of(event, pd.Timestamp("2026-01-01T10:02:00Z"))
+        assert_event_as_of(event, pd.Timestamp("2026-01-01T10:06:00Z"))
 
     def test_missingness_is_derived_without_truth_reason_file(self):
         core = self.adapter.adapt_core_frames(
@@ -156,6 +252,31 @@ class AdapterIsolationTests(unittest.TestCase):
         self.assertTrue(inventory.core_ready, inventory.notes)
         self.assertTrue(inventory.evaluation_ready, inventory.notes)
         self.assertIn("Data/reference_dataset.parquet", inventory.tables)
+
+    def test_named_workflows_materialise_and_accept_a_sensitive_fixture(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            source = root / "native"
+            source.mkdir()
+            write_native_fixture(source)
+            run_root = root / "run"
+            materialisation = materialise_telecom(
+                source,
+                run_root,
+                batch_native_rows=5,
+                memory_budget_gib=8,
+            )
+            acceptance = run_week1_acceptance(source, run_root)
+
+        self.assertTrue(materialisation["memory"]["budget_pass"])
+        self.assertTrue(acceptance["translator_invariance"]["passed"])
+        self.assertTrue(acceptance["value_level_leakage"]["negative_control_detected"])
+        self.assertGreater(
+            acceptance["materialised_telemetry"]["quality_counts"]["clipped"], 0
+        )
+        self.assertGreater(
+            acceptance["materialised_telemetry"]["quality_counts"]["invalid"], 0
+        )
 
 
 if __name__ == "__main__":

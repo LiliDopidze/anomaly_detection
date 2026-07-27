@@ -1,42 +1,36 @@
 # Sector-agnostic telemetry anomaly platform
 
-Milestone 1 establishes a sector-neutral telemetry contract, sector-pack interface,
-source adapters and a tested boundary between production observables and evaluation
-truth.
-
-The repository currently includes a synthetic telecom fixture adapter and a Petrobras
-3W 2.0.0 contract challenge. Modelling is deliberately deferred until the contract
-and leakage boundary are stable.
-
-## Architecture
+Milestone 1 establishes a neutral telemetry contract, sector packs, source
+translators, and a tested boundary between production observables and evaluation
+truth. Modelling starts only after that boundary is proven.
 
 ```text
-Native source ──> sector adapter ──> SPEC-CORE ──> detector runtime
+Native source ──> sector translator ──> SPEC-CORE ──> detector
                          │
-                         └────────> SPEC-EVAL ──> offline evaluation only
+                         └────────────> SPEC-EVAL ──> offline evaluation only
 ```
 
-`SPEC-CORE` contains telemetry, metric semantics, entities, relationships, observable
-operational events and collection gaps. `SPEC-EVAL` contains fault IDs, true
-intervals, cause groups, condition states, ticket linkage and evaluation-only gap
-reasons.
+`SPEC-CORE` contains only information available to a production detector.
+`SPEC-EVAL` contains fault truth, condition truth, true causes, intervals, and ticket
+links. The translator is the only component allowed to see both.
 
-The translator is the only component allowed to see both sides. Runtime code imports
-no evaluation package.
+## Clean source layout
 
-## Packages
+There is one public package, `anomaly_detection`, with eight meaningful modules:
 
-- `telemetry_contract`: sector-neutral SPEC-CORE models, schemas and interfaces.
-- `telemetry_eval_contract`: physically separate evaluation schemas.
-- `telemetry_packs.telecom`: telecom metric and relationship phrasebook.
-- `telemetry_packs.oil_well`: minimal Petrobras 3W phrasebook.
-- `telemetry_adapters`: telecom and Petrobras 3W translators.
-- `telemetry_runtime`: deterministic Week 1 baseline used for isolation evidence.
-- `telemetry_synth`: frozen synthetic telecom generator source.
+| Module | Responsibility |
+|---|---|
+| `core.py` | Neutral SPEC-CORE vocabulary, interfaces, validation, and hashing |
+| `evaluation.py` | Physically separate SPEC-EVAL vocabulary and validation |
+| `packs.py` | Generic sector-pack loader plus telecom and oil-well phrasebooks |
+| `telecom.py` | Synthetic telecom translator |
+| `oil_well.py` | Petrobras 3W translator and contract challenge |
+| `runtime.py` | Runtime-safe baseline that reads only SPEC-CORE |
+| `workflows.py` | Named end-to-end workflows called by notebooks |
+| `cli.py` | Small automation/child-process command line |
 
-Tickets from the synthetic telecom fixture are evaluation-only. Entity validity is
-stored once in `entity_registry.valid_from` and `valid_to`; there is no duplicate
-canonical service-window table.
+The telemetry generator is frozen under `legacy/telemetry_synth_v4/`. It is not part
+of the installed product package.
 
 ## Install and test
 
@@ -47,62 +41,42 @@ python -m pip install -e ".[dev]"
 python -m pytest
 ```
 
-Build the wheel and source distribution:
+## Three Milestone 1 notebooks
 
-```bash
-python -m build
-python -m twine check dist/*
-```
-
-## Milestone 1 notebooks
-
-The maintained Google Drive/Colab notebooks are in
+The maintained Colab notebooks are in
 `notebooks/google_drive/milestone1_v0_3/`:
 
-1. `02_M1_V03_CONTRACT_AND_PACK.ipynb`
-2. `03_M1_V03_TELECOM_TRANSLATOR.ipynb`
-3. `04_M1_V03_LOCK_AND_ACCEPTANCE_TESTS.ipynb`
-4. `05_M1_V03_PETROBRAS_3W_CONTRACT_CHALLENGE.ipynb`
+1. `02_M1_V03_TELECOM_MATERIALISATION.ipynb`
+2. `03_M1_V03_WEEK1_ACCEPTANCE.ipynb`
+3. `04_M1_V03_PETROBRAS_3W_CHALLENGE.ipynb`
 
-The notebooks are intentionally thin. Reusable implementation belongs in the Python
-packages, not in notebook source cells.
+They contain paths and workflow calls—not duplicate implementations. In Colab they
+install the package from GitHub and record the resolved Git commit in each workflow
+report. See the [step-by-step notebook guide](docs/RUN_NOTEBOOKS.md).
+
+## Important contract decisions
+
+- `entity_service_windows.csv` remains a native input; canonical validity is stored
+  once in `entity_registry.valid_from` and `valid_to`.
+- Null telemetry rows are retained with `quality_code = invalid`.
+- FEC values at or above the generator ceiling use `quality_code = clipped`.
+- FEC exposure follows the frozen generator mechanism and is expected to be constant.
+- CRC exposure is derived from each row’s throughput and the pack’s 1,500-byte frame
+  parameter, so it must vary when throughput varies.
+- `tickets.csv` and all ground-truth fields are evaluation-only.
+- Petrobras 3W adds condition-state truth without inventing severity, topology,
+  shared manifolds, cause groups, or tickets.
 
 ## Data policy
 
-Datasets and materialised outputs are not stored in Git:
+Datasets and outputs stay in Google Drive and are ignored by Git. Only code,
+contracts, pack metadata, tests, notebooks, and small licence-compatible fixtures
+belong in this repository.
 
-- native telecom files remain in Google Drive;
-- Petrobras 3W remains under
-  `sources/petrobras_3w/2.0.0/raw/3w_dataset_2.0.0`;
-- canonical outputs remain under `outputs/milestone_1/v0.3/`;
-- Parquet, CSV, credentials and local environment files are ignored.
-
-Only small, licence-compatible test fixtures should ever be committed.
-
-## Verified Milestone 1 evidence
-
-- 19 package tests pass.
-- Translator output is invariant after truth columns, evaluation files and
-  `tickets.csv` are removed.
-- Detector output is identical with SPEC-EVAL mounted, renamed, empty or removed.
-- The internal package graph is acyclic.
-- The full telecom panel translated 6,288,215 native rows into 69,170,365 canonical
-  observations with a 3.72 GiB process high-water mark under an 8 GiB budget.
-- The Petrobras 3W challenge produced 8,034,930 observations from the smallest
-  qualifying three-well subset and required `gt_condition_states` without inventing
-  topology or severity.
-
-See [the acceptance record](docs/WEEK1_ACCEPTANCE.md) and
-[architecture notes](docs/ARCHITECTURE.md).
-
-## Releases
-
-CI runs tests, rebuilds notebooks and checks the distribution on every pull request.
-A `v*` tag builds a wheel, source distribution, notebook archive and SHA-256 manifest
-as GitHub Release assets.
+See [architecture](docs/ARCHITECTURE.md) and the
+[Week 1 acceptance map](docs/WEEK1_ACCEPTANCE.md).
 
 ## Licence
 
-The source code is available under the
-[Apache License 2.0](LICENSE). Dataset files retain their original licences and are
-not redistributed by this repository.
+Code is available under the [Apache License 2.0](LICENSE). Datasets retain their
+original licences and are not redistributed here.

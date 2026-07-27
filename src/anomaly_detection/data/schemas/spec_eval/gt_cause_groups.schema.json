@@ -1,0 +1,15 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:telemetry:spec-eval:0.3.0:gt-cause-groups",
+  "title": "SPEC-EVAL cause group row",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cause_group_id", "cause_type", "start_ts", "end_ts", "footprint_json"],
+  "properties": {
+    "cause_group_id": {"type": "string"},
+    "cause_type": {"type": "string"},
+    "start_ts": {"type": "string", "format": "date-time"},
+    "end_ts": {"type": "string", "format": "date-time"},
+    "footprint_json": {"type": "string"}
+  }
+}

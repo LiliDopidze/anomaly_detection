@@ -1,0 +1,12 @@
+[
+    {
+    "rule_id": "metric_ids_are_namespaced",
+    "kind": "metric_id_prefix",
+    "prefix": "telecom."
+  },
+  {
+    "rule_id": "topology_starts_at_olt_and_ends_at_ont",
+    "kind": "required_relation_types",
+    "values": ["contains_pon", "contains_splitter_l1", "contains_splitter_l2", "serves_ont", "groups_ont"]
+  }
+]

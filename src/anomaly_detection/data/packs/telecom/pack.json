@@ -1,0 +1,51 @@
+{
+  "pack_id": "telecom",
+  "pack_version": "0.2.0",
+  "compatible_contract_versions": ["0.3.0"],
+  "description": "GPON/FTTH metric, entity, relation, quality and exposure semantics.",
+  "entity_types": ["olt", "pon_port", "splitter_l1", "splitter_l2", "ont", "geo_cluster"],
+  "parameters": {
+    "gpon_standard_downstream_line_rate_bps": {
+      "value": 2488320000,
+      "unit": "bit/s",
+      "provenance": "ITU-T G.984.3 nominal downstream line rate",
+      "status": "physical_standard_reference_not_used_to_reinterpret_generator_counts"
+    },
+    "gpon_standard_rs_255_239_transmitted_bits": {
+      "value": 2040,
+      "unit": "bit/codeword",
+      "provenance": "RS(255,239): 255 transmitted octets",
+      "status": "physical_standard_reference"
+    },
+    "gpon_standard_rs_255_239_payload_bits": {
+      "value": 1912,
+      "unit": "bit/codeword",
+      "provenance": "RS(255,239): 239 payload octets",
+      "status": "physical_standard_reference"
+    },
+    "generator_fec_line_rate_bps": {
+      "value": 2488000000,
+      "unit": "bit/s",
+      "provenance": "telemetry-synth 4.0.1 frozen generator mechanism",
+      "status": "canonical_fec_bit_exposure_parameter"
+    },
+    "generator_fec_divisor_bits": {
+      "value": 1904,
+      "unit": "bit",
+      "provenance": "telemetry-synth 4.0.1 frozen generator uses this divisor; it does not match RS(255,239) transmitted or payload bits",
+      "status": "lineage_only_do_not_reinterpret_fec_count_as_standard_codeword_count"
+    },
+    "crc_frame_size_bytes": {
+      "value": 1500,
+      "unit": "byte",
+      "provenance": "telemetry-synth 4.0.1 faults.py uses 1500-byte frames",
+      "status": "frozen_source_parameter"
+    },
+    "generator_crc_reference_rate_bps": {
+      "value": 78000000,
+      "unit": "bit/s",
+      "provenance": "telemetry-synth 4.0.1 faults.py uses a fixed 78 Mb/s reference",
+      "status": "lineage_only_not_canonical_exposure"
+    }
+  }
+}

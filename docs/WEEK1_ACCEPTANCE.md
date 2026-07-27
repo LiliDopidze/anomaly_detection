@@ -1,67 +1,71 @@
-# Milestone 1 acceptance record
-
-Date: 24 July 2026
+# Milestone 1 v0.3 acceptance map
 
 - SPEC-CORE: 0.3.0
 - SPEC-EVAL: 0.3.0
-- Telecom Pack: 0.1.0
+- Telecom Pack: 0.2.0
 - Synthetic GPON adapter: 0.3.0
 - OilWell Pack: 0.1.0
 
 ## Deliverables
 
-| ID | Deliverable | Status | Evidence |
-|---:|---|---|---|
-| 335 | SPEC-CORE and SPEC-EVAL split | Complete | Separate packages and schema roots |
-| 336 | Generic adapter and sector-pack interfaces | Complete | `telemetry_contract/adapters.py` and `models.py` |
-| 337 | Telecom Pack v0.1 | Complete | Full metric and relation semantics under `telemetry_packs/telecom` |
-| 338 | Generator adapter | Complete | Bounded translator in `telemetry_adapters/synthetic_gpon.py` |
-| 339 | Grouped-fault mechanism | Complete | Cause-group mapping and multi-fault integrity test |
-| 340 | Ground-truth isolation tests | Complete | Negative control, translator invariance and runtime mount variants |
-| 341 | Existing pipeline frozen as a legacy baseline | Qualified | Generator release is hash-described; executable legacy detector source was not supplied |
+| ID | Deliverable | Implementation evidence |
+|---:|---|---|
+| 335 | SPEC-CORE and SPEC-EVAL split | `core.py` and `evaluation.py`, with separate schema roots |
+| 336 | Generic adapter and sector-pack interfaces | Neutral protocols and declarative pack loader |
+| 337 | Telecom Pack v0.1+ | Complete metric, exposure, relation, quality, and behaviour metadata |
+| 338 | Generator adapter | Bounded, batch-writing translator in `telecom.py` |
+| 339 | Grouped-fault mechanism | Cause-group translation and multi-fault integrity test |
+| 340 | Ground-truth isolation tests | Invariance, canary, negative-control, and runtime-mount tests |
+| 341 | Legacy baseline frozen | Supplied generator frozen; unavailable detector source explicitly recorded |
 
 ## Exit criteria
 
-| ID | Exit criterion | Result |
+| ID | Exit criterion | Primary evidence |
 |---:|---|---|
-| 342 | Detector runs with SPEC-EVAL removed | Pass |
-| 343 | Outputs are identical with and without truth mounted | Pass |
-| 344 | Contract and pack contain no hidden circular dependency | Pass |
+| 342 | Detector runs with SPEC-EVAL removed | Notebook 03 runtime variants |
+| 343 | Output is identical with and without truth | Notebook 03 translator content hashes |
+| 344 | No hidden circular dependency | Automated import-graph tests |
 
-Translator invariance is the primary leakage proof. Runtime mount equality is
-secondary deployment evidence because the Week 1 detector is intentionally a
+Translator canonical-content invariance is the primary leakage proof. Runtime mount
+equality is secondary deployment evidence because the Week 1 detector is a
 placeholder.
 
-## Material contract decisions
+## Acceptance tests implemented in Notebook 03
 
-- `entity_service_windows.csv` remains a native input; canonical validity is stored
-  once in `entity_registry.valid_from` and `valid_to`.
-- Null-valued telemetry rows are retained with `quality_code = invalid`.
-- FEC values at the generator ceiling use `quality_code = clipped`.
-- The anomaly-direction vocabulary is `decrease`, `increase`, `both`, `change`.
-- Telecom relations exercise both network topology and geographic membership.
-- `tickets.csv` is explicitly evaluation-only.
-- Petrobras 3W adds `gt_condition_states` without `severity_ordinal`.
-- No cross-well topology, shared manifold, cause group or ticket is invented for 3W.
+1. Find a native sample that definitely exercises both `clipped` and `invalid`.
+2. Translate the original source with evaluation truth available.
+3. Translate a redacted source with truth columns, evaluation files, and
+   `tickets.csv` removed.
+4. Compare canonical table content hashes—not Parquet bytes.
+5. Inject a truth timestamp canary and prove no timestamp reaches SPEC-CORE.
+6. Deliberately inject that canary into SPEC-CORE and prove the harness detects it.
+7. Verify the materialised full/selected run contains clipped and invalid rows.
+8. Verify FEC exposure is constant and CRC exposure is non-degenerate.
+9. Exercise an event whose `known_at` is later than its event time.
+10. Score with SPEC-EVAL mounted, renamed, removed, and empty.
+11. Inspect the runtime import boundary.
 
-## Full-panel verification
+## Memory gate
 
-- Native telecom rows: 6,288,215.
-- Canonical telemetry rows: 69,170,365.
-- Collection-gap intervals: 169,501.
-- Clipped rows: 1,626,252.
-- Invalid rows: 226,384.
-- Process high-water memory: 3.72 GiB against an 8 GiB budget.
-- Traced 250,000-row widening probe: 0.97 GiB.
+The 8 GiB gate uses peak RSS from a clean materialisation subprocess, which includes
+native Arrow/NumPy allocations. A scoped `tracemalloc` widening probe is recorded
+separately for diagnostic detail. Notebook-process `ru_maxrss` is not used as the
+gate because it is a lifetime high-water mark.
 
 ## Cross-sector challenge
 
-The smallest deterministic 3W subset satisfying all criteria used three distinct real
-wells and produced:
+Notebook 04 finds the smallest Petrobras 3W subset satisfying all of:
 
-- 8,034,930 canonical telemetry observations;
-- two fault-event intervals;
-- ten condition-state intervals;
-- an intentionally empty relation table.
+- a normal instance;
+- a transient event;
+- a persistent condition;
+- a state transition;
+- a missing or frozen measurement;
+- at least three distinct real wells.
 
-The contract-fit report records what could not be represented without invention.
+It fails if any criterion is absent and records what could not be represented without
+inventing source facts.
+
+The authoritative run results live beside the immutable outputs as
+`workflow_report.json`, `acceptance_report.json`, `memory_report.json`, and
+`threew_contract_fit_report.json`.

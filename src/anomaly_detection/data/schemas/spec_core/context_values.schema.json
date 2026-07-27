@@ -1,0 +1,16 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:telemetry:spec-core:0.3.0:context-values",
+  "title": "SPEC-CORE observable context value row",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_ts", "known_at", "entity_id", "context_key", "value", "source"],
+  "properties": {
+    "event_ts": {"type": "string", "format": "date-time"},
+    "known_at": {"type": "string", "format": "date-time"},
+    "entity_id": {"type": ["string", "null"]},
+    "context_key": {"type": "string"},
+    "value": {"type": ["number", "integer", "string", "boolean", "null"]},
+    "source": {"type": "string"}
+  }
+}

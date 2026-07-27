@@ -1,0 +1,8 @@
+[
+    {"profile_id": "stable_continuous", "model_family": "rolling_robust_quantiles", "challenger": "local_level_state_space", "parameters": {"minimum_history": 48}},
+  {"profile_id": "trend_one_season", "model_family": "robust_seasonal_median", "challenger": "ets", "parameters": {"candidate_periods_are_hypotheses": true}},
+  {"profile_id": "multiple_seasonalities", "model_family": "time_of_week_quantiles", "challenger": "mstl", "parameters": {}},
+  {"profile_id": "overdispersed_count", "model_family": "negative_binomial", "challenger": "zero_inflated_negative_binomial", "parameters": {"use_exposure": true}},
+  {"profile_id": "zero_inflated_bounded", "model_family": "hurdle", "challenger": "beta_hurdle", "parameters": {}},
+  {"profile_id": "counter_with_resets", "model_family": "validated_difference", "challenger": "state_space_count", "parameters": {"reset_handling": "required"}}
+]

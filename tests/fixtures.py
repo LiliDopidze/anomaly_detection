@@ -14,8 +14,18 @@ def native_frames():
                 {
                     "timestamp_utc": timestamp,
                     "ont_id": entity_id,
-                    "rx_power_dbm": -20.0 - entity_index - 0.1 * step,
-                    "fec_count": step + entity_index,
+                    "rx_power_dbm": (
+                        None
+                        if entity_id == "ONT-00001" and step == 1
+                        else -20.0 - entity_index - 0.1 * step
+                    ),
+                    "fec_count": (
+                        5_000_000.25
+                        if entity_id == "ONT-00001" and step == 4
+                        else step + entity_index
+                    ),
+                    "crc_errors": step * 2 + entity_index,
+                    "throughput_mbps": 10.0 + 5.0 * step + 2.0 * entity_index,
                     "gt_state": "degrading" if step >= 5 else "healthy",
                     "gt_fault_id": "F-00001" if step >= 5 else None,
                     "gt_margin_db": 7.0 - 0.1 * step,

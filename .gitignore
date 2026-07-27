@@ -30,6 +30,9 @@ dist/
 # Data and materialised outputs never belong in Git
 data/
 Data/
+# Pack metadata and JSON schemas are source code, not user datasets.
+!src/anomaly_detection/data/
+!src/anomaly_detection/data/**
 sources/
 fixtures/
 outputs/

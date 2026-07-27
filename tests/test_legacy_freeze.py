@@ -29,6 +29,26 @@ class LegacyFreezeTests(unittest.TestCase):
         self.assertEqual(freeze["status"], "descriptor_frozen_pending_source")
         self.assertIn("synthetic generator", freeze["reason"])
 
+    def test_quarantined_generator_matches_its_frozen_manifest(self):
+        root = ROOT / "legacy" / "telemetry_synth_v4"
+        manifest = json.loads(
+            (root / "SOURCE_MANIFEST.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["status"], "frozen_exact_source")
+        for relative_path, expected in manifest["files"].items():
+            path = root / relative_path
+            self.assertEqual(
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+                expected,
+                relative_path,
+            )
+
+    def test_generator_is_not_an_installed_source_package(self):
+        self.assertEqual(
+            list((ROOT / "src" / "telemetry_synth").glob("*.py")),
+            [],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

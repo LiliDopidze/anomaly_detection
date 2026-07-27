@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from telemetry_adapters import SyntheticGponAdapter
-from telemetry_eval_contract import validate_eval_bundle
+from anomaly_detection.evaluation import validate_eval_bundle
+from anomaly_detection.telecom import SyntheticGponAdapter
 
 from .fixtures import evaluation_frames
 
@@ -32,11 +32,15 @@ class GroupedFaultTests(unittest.TestCase):
     def test_group_identifier_never_appears_in_runtime_package(self):
         from pathlib import Path
 
-        root = Path(__file__).resolve().parents[1] / "src" / "telemetry_runtime"
-        for path in root.rglob("*.py"):
-            self.assertNotIn(
-                "cause_group_id", path.read_text(encoding="utf-8"), str(path)
-            )
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "anomaly_detection"
+            / "runtime.py"
+        )
+        self.assertNotIn(
+            "cause_group_id", path.read_text(encoding="utf-8"), str(path)
+        )
 
 
 if __name__ == "__main__":

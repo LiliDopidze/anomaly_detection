@@ -1,0 +1,30 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:telemetry:spec-core:0.3.0:metric-catalogue",
+  "title": "SPEC-CORE metric catalogue row",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["metric_id", "entity_type", "measurement_kind", "unit", "lower_bound", "upper_bound", "anomaly_direction", "sampling_semantics", "aggregation_semantics", "value_nullable", "expected_cadence_seconds", "censoring_type", "expected_behaviour_profile", "candidate_periods", "exposure_metric_id", "exposure_semantics", "exposure_unit", "exposure_formula_id", "exposure_source", "context_keys"],
+  "properties": {
+    "metric_id": {"type": "string"},
+    "entity_type": {"type": "string"},
+    "measurement_kind": {"enum": ["gauge", "rate", "interval_count", "cumulative_counter", "bounded_fraction", "discrete_state", "event"]},
+    "unit": {"type": "string"},
+    "lower_bound": {"type": ["number", "null"]},
+    "upper_bound": {"type": ["number", "null"]},
+    "anomaly_direction": {"enum": ["decrease", "increase", "both", "change"]},
+    "sampling_semantics": {"type": "string"},
+    "aggregation_semantics": {"type": "string"},
+    "value_nullable": {"type": "boolean"},
+    "expected_cadence_seconds": {"type": ["number", "null"], "exclusiveMinimum": 0},
+    "censoring_type": {"type": "string"},
+    "expected_behaviour_profile": {"type": "string"},
+    "candidate_periods": {"type": "array", "items": {"type": "string"}},
+    "exposure_metric_id": {"type": ["string", "null"]},
+    "exposure_semantics": {"type": ["string", "null"]},
+    "exposure_unit": {"type": ["string", "null"]},
+    "exposure_formula_id": {"type": ["string", "null"]},
+    "exposure_source": {"type": ["string", "null"]},
+    "context_keys": {"type": "array", "items": {"type": "string"}}
+  }
+}

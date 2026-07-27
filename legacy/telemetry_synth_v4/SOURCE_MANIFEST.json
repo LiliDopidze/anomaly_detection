@@ -1,0 +1,17 @@
+{
+  "status": "frozen_exact_source",
+  "source_version": "telemetry-synth-4.0.1",
+  "files": {
+    "telemetry_synth/__init__.py": "3e38cc71ad7d98e5b4c8e9e1b325a4ad81dc2f7ae7bd00219417a25cb725c98a",
+    "telemetry_synth/catalogues.py": "1909f100763b900b852f85c197bdd85591dc9fba44ca4140e21f2fd5796bd7c6",
+    "telemetry_synth/emit.py": "e1606b3c2ea2a99f61b66fbbd34f28bda57003479dda8d01254389640f8056f0",
+    "telemetry_synth/faults.py": "8998ea67bc500146891692dd7873ef2f0766daf5347bd5ab911e32731284f2ce",
+    "telemetry_synth/generator.py": "4cdc6038bc10a272539a0210a71990e6d83c7b0c5641a12cf34b3e4eb08c9ddb",
+    "telemetry_synth/manifest.py": "55e23aecfe7f435b4717d41f297eba364a240c4af899ad59afbc17d5ef1b153e",
+    "telemetry_synth/provenance.py": "47a4a09a07c2c596dd98467546d6597d6d5313968ca796d644dba7f999706201",
+    "telemetry_synth/settings.py": "b0588548049a943c724990d146c77c4ab92a9b4bec9b8321c3f7c499f66594ce",
+    "telemetry_synth/signals.py": "3fbe949082f89692edafccfada1412d6974ff857a155f7ff499921ca04238c98",
+    "telemetry_synth/topology.py": "f96bf30ff69a2f14d40ba9270b8f0416962472d8a6596b69bbdf962188a51ba0",
+    "telemetry_synth/validate.py": "d4858abfe5c90ead1d91d84993f9921b474a7a578f450a253f176bc7a5c7bd4d"
+  }
+}
