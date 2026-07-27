@@ -3,8 +3,10 @@
 This repository is intentionally notebook-first. It is the working environment for
 one data scientist validating the product idea—not a premature production package.
 
-There are three notebooks and one shared Python file:
+There are four notebooks and one shared Python file:
 
+0. `00_NATIVE_DATA_EXPLORATION.ipynb` — inventories the native source and performs
+   a statistically disciplined intake audit before any translation or modelling.
 1. `01_TELECOM_WEEK1_END_TO_END.ipynb` — defines the neutral contract and Telecom
    Pack, translates the synthetic source, and proves evaluation truth is isolated.
 2. `02_PETROBRAS_3W_CONTRACT_CHALLENGE.ipynb` — tests the same contract with a
@@ -21,10 +23,11 @@ The contract, sector mappings, assertions, modelling choices, and ranking formul
 remain visible in notebook execution order.
 
 ```text
-native data ──> Notebook 01 or 02 ──> SPEC-CORE ──> Notebook 03 ──> ranked incidents
-                         │                                  │
-                         └────────> SPEC-EVAL ──────────────┘
-                                      read only after outputs are frozen
+native data ──> Notebook 00 ──> Notebook 01 or 02 ──> SPEC-CORE
+                    EDA                  │                  │
+                                         └──> SPEC-EVAL     └──> Notebook 03
+                                               locked             │
+                                                                  └──> ranked incidents
 ```
 
 Datasets and outputs stay in Google Drive and are not committed to Git. See the
