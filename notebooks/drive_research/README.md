@@ -7,6 +7,7 @@ Create this folder in Google Drive:
 ```text
 MyDrive/anomaly_detection/
 ├── research/week1/
+│   ├── 00_NATIVE_DATA_EXPLORATION.ipynb
 │   ├── 01_TELECOM_WEEK1_END_TO_END.ipynb
 │   ├── 02_PETROBRAS_3W_CONTRACT_CHALLENGE.ipynb
 │   ├── 03_SECTOR_AGNOSTIC_MODELLING_AND_RANKING.ipynb
@@ -61,6 +62,75 @@ Notebook 03 additionally writes the small operator-facing
 the underlying dataset.
 
 ## Run order
+
+### 0. Explore the native data
+
+Open `00_NATIVE_DATA_EXPLORATION.ipynb` first and choose
+**Runtime → Run all**. It defaults to telecom.
+
+The notebook acts as a statistical intake audit:
+
+1. Counts source files and Parquet rows from exact metadata.
+2. Identifies the row grain, operational measurements, context and embedded truth.
+3. Takes a reproducible bounded sample from every telecom row group.
+4. Calculates count, missingness, zero share, robust quantiles, range, skewness and
+   boundary concentration for every operational measurement.
+5. Compares missingness across entities so a global average cannot hide an unusable
+   ONT or well.
+6. Plots bulk distributions and a Spearman dependence matrix.
+7. Loads complete histories for a few selected entities and measures cadence,
+   duplicate timestamps, gaps and frozen values.
+8. Summarises vendor, firmware, topology and other available context.
+9. Opens labels only in a clearly marked evaluation-only section.
+10. Writes a small statistical report, tables and figures to Drive. It does not copy
+    the sampled telemetry or create `SPEC-CORE`.
+
+Default telecom output:
+
+```text
+MyDrive/anomaly_detection/outputs/exploration/telecom/telecom_native_eda_v1/
+├── eda_report.json
+├── source_inventory.csv
+├── native_schema.csv
+├── numeric_summary_sample.csv
+├── entity_missingness_summary_sample.csv
+├── quality_flags_sample.csv
+├── temporal_quality_selected_series.csv
+├── evaluation_only_summary.csv
+└── figures/
+```
+
+The exact shape and file composition are not estimates. Distributions,
+correlations, missingness prevalence and label prevalence are sample estimates.
+Complete-series temporal checks are exact only for the selected example entities.
+
+Useful telecom controls:
+
+```python
+%env EDA_SECTOR=telecom
+%env EDA_RUN_ID=telecom_native_eda_v1
+%env EDA_SAMPLE_ROWS=200000
+%env EDA_SERIES_ENTITY_COUNT=2
+%env EDA_SERIES_DAYS=7
+```
+
+To inspect Petrobras 3W instead:
+
+```python
+%env EDA_SECTOR=petrobras_3w
+%env EDA_RUN_ID=threew_real_wells_eda_v1
+%env EDA_THREEW_FILE_COUNT=20
+%env EDA_THREEW_ROWS_PER_FILE=10000
+```
+
+The 3W exact inventory counts all real, simulated and hand-drawn files separately.
+Its default descriptive sample draws 20 files uniformly from filenames beginning
+with `WELL-`. It does not use event labels to choose the operational sample and does
+not use `SIMULATED_` or `DRAWN_` files. Event-directory and row-label composition
+are opened only in the final evaluation-only section.
+
+Use `EDA_INCLUDE_TRUTH=0` when you want a purely operational EDA run. Use a new
+`EDA_RUN_ID` if you want to retain two sets of exploration outputs.
 
 ### 1. Telecom contract and locked truth
 
@@ -273,7 +343,7 @@ what was rejected or removed by the daily budget. `model_diagnostics.parquet`
 reveals which metrics dominate the alert stream. These two diagnostic files are
 usually where you look first when the ranked list is noisy.
 
-## What happens after the three notebooks
+## What happens after the four notebooks
 
 The immediate next step is not packaging. It is to validate whether the ranked list
 matches real operational decisions.
@@ -318,5 +388,5 @@ mechanics have one implementation in `week1_core.py`.
 
 Add a package, CLI, orchestration, CI, or release process only after the ranked
 incident output is useful to an operator and more than one person needs to change or
-run the pipeline. Until then, the four Drive files are the maintained research
+run the pipeline. Until then, the five Drive files are the maintained research
 surface.
