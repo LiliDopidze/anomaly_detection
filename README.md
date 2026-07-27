@@ -81,7 +81,7 @@ Only small, licence-compatible test fixtures should ever be committed.
 
 ## Verified Milestone 1 evidence
 
-- 18 package tests pass.
+- 19 package tests pass.
 - Translator output is invariant after truth columns, evaluation files and
   `tickets.csv` are removed.
 - Detector output is identical with SPEC-EVAL mounted, renamed, empty or removed.
@@ -101,5 +101,8 @@ CI runs tests, rebuilds notebooks and checks the distribution on every pull requ
 A `v*` tag builds a wheel, source distribution, notebook archive and SHA-256 manifest
 as GitHub Release assets.
 
-The repository licence has not yet been selected. Until a licence is added, the code
-is visible for review but reuse rights are not granted.
+## Licence
+
+The source code is available under the
+[Apache License 2.0](LICENSE). Dataset files retain their original licences and are
+not redistributed by this repository.
