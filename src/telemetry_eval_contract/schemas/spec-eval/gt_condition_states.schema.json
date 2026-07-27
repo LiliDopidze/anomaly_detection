@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:telemetry:spec-eval:0.3.0:gt-condition-states",
+  "title": "SPEC-EVAL labelled condition-state interval",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entity_id", "condition_start_ts", "condition_end_ts", "condition_code", "condition_label", "label_source", "source_instance_id"],
+  "properties": {
+    "entity_id": {"type": "string"},
+    "condition_start_ts": {"type": "string", "format": "date-time"},
+    "condition_end_ts": {"type": "string", "format": "date-time"},
+    "condition_code": {"type": "string"},
+    "condition_label": {"type": "string"},
+    "label_source": {"type": "string"},
+    "source_instance_id": {"type": "string"}
+  }
+}

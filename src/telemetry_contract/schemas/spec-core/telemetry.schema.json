@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:telemetry:spec-core:0.3.0:telemetry",
+  "title": "SPEC-CORE telemetry row",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_ts", "ingested_at", "entity_id", "metric_id", "value", "quality_code", "quality_detail", "exposure", "source_id"],
+  "properties": {
+    "event_ts": {"type": "string", "format": "date-time"},
+    "ingested_at": {"type": "string", "format": "date-time"},
+    "entity_id": {"type": "string", "minLength": 1},
+    "metric_id": {"type": "string", "minLength": 1},
+    "value": {"type": ["number", "integer", "string", "boolean", "null"]},
+    "quality_code": {"enum": ["measured", "clipped", "invalid"]},
+    "quality_detail": {"type": ["string", "null"]},
+    "exposure": {"type": ["number", "null"], "minimum": 0},
+    "source_id": {"type": "string", "minLength": 1}
+  }
+}

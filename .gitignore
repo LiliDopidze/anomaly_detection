@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Build and release outputs
+build/
+dist/
+*.whl
+*.zip
+*.tar.gz
+
+# Jupyter and editors
+.ipynb_checkpoints/
+.DS_Store
+.idea/
+.vscode/
+
+# Credentials and local configuration
+.env
+.env.*
+*.pem
+*.key
+
+# Data and materialised outputs never belong in Git
+data/
+Data/
+sources/
+fixtures/
+outputs/
+contracts/
+bootstrap/
+week1_outputs/
+*.parquet
+*.csv
+
+# Supplied local references require an explicit licensing decision
+legacy/attachments/
+docs/reference/
+
+# Superseded local notebook drafts retained outside the published repository
+notebooks/0[0-7]_*.ipynb
+notebooks/WEEK1_NOTEBOOK_GUIDE.md
+notebooks/google_drive/0*_DRIVE_*.ipynb
+notebooks/google_drive/Week1_Google_Drive_Notebooks/
+notebooks/google_drive/Week1_Google_Drive_Notebooks.zip
+notebooks/google_drive/README.md
+scripts/build_google_drive_notebooks.py

@@ -1,0 +1,4 @@
+*.ipynb linguist-language=Jupyter Notebook
+*.json text eol=lf
+*.py text eol=lf
+*.md text eol=lf

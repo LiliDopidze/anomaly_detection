@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:telemetry:spec-eval:0.3.0:gt-ticket-links",
+  "title": "SPEC-EVAL ticket-to-truth linkage row",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ticket_id", "entity_id", "fault_event_id", "fault_type_label", "is_no_fault_found", "is_misattributed", "reported_ts", "resolved_ts"],
+  "properties": {
+    "ticket_id": {"type": "string"},
+    "entity_id": {"type": "string"},
+    "fault_event_id": {"type": ["string", "null"]},
+    "fault_type_label": {"type": ["string", "null"]},
+    "is_no_fault_found": {"type": ["boolean", "null"]},
+    "is_misattributed": {"type": ["boolean", "null"]},
+    "reported_ts": {"type": ["string", "null"], "format": "date-time"},
+    "resolved_ts": {"type": ["string", "null"], "format": "date-time"}
+  }
+}

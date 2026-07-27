@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:telemetry:spec-eval:0.3.0:gt-fault-entity-intervals",
+  "title": "SPEC-EVAL affected-entity interval row",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fault_event_id", "affected_entity_id", "fault_family", "channel", "active_start_ts", "active_end_ts", "impact_ts", "contribution"],
+  "properties": {
+    "fault_event_id": {"type": "string"},
+    "affected_entity_id": {"type": "string"},
+    "fault_family": {"type": ["string", "null"]},
+    "channel": {"type": ["string", "null"]},
+    "active_start_ts": {"type": "string", "format": "date-time"},
+    "active_end_ts": {"type": "string", "format": "date-time"},
+    "impact_ts": {"type": ["string", "null"], "format": "date-time"},
+    "contribution": {"type": ["number", "null"]}
+  }
+}

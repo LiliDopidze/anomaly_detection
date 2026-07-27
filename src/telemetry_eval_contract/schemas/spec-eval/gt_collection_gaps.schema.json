@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:telemetry:spec-eval:0.3.0:gt-collection-gaps",
+  "title": "SPEC-EVAL true collection-gap cause row",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entity_id", "event_ts", "gap_reason"],
+  "properties": {
+    "entity_id": {"type": "string"},
+    "event_ts": {"type": "string", "format": "date-time"},
+    "gap_reason": {"type": "string"}
+  }
+}
