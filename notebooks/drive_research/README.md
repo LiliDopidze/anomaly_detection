@@ -179,21 +179,29 @@ Step by step, it:
 
 1. Reads only `SPEC-CORE`; evaluation truth is not loaded.
 2. Selects a small entity slice for rapid model iteration.
-3. Transforms values according to neutral `measurement_kind`:
-   gauges remain values, interval counts become log rates when exposure exists, and
-   cumulative counters become reset-safe increments.
-4. Builds a history-only rolling median and robust scale for every entity-metric
-   series.
-5. Converts signed deviations using the pack's `anomaly_direction`.
-6. Saves `anomaly_scores.parquet` before evaluation.
-7. Groups anomalous points into time/domain incidents. For telecom, two anomalous
-   ONTs served by the same L2 splitter become one shared-domain incident.
-8. Ranks incidents using anomaly strength, affected entity count, metric count and
-   available priority weights.
-9. Saves `ranked_incidents.parquet` and the operator-friendly
-   `ranked_incidents.csv`.
-10. Only after these outputs are frozen, reads `SPEC-EVAL` and writes offline recall,
-    coverage and lead-time results.
+3. Transforms values from neutral catalogue semantics: gauges remain values,
+   interval counts become log rates when exposure exists, cumulative counters
+   become reset-safe increments, and zero-inflated bounded values use a log hurdle.
+4. Builds a shifted, history-only rolling median and robust scale for every
+   entity-metric series. The current observation is never in its own baseline.
+5. Gives every entity its own early calibration window. This matters for historical
+   fixtures such as 3W whose well records occur in different years.
+6. Learns a truth-free raw-score threshold per metric from those calibration
+   windows, then converts raw deviations to comparable calibrated scores.
+7. Saves scores, calibration windows, thresholds, and metric diagnostics before
+   evaluation truth is read.
+8. Groups point alerts into adjacent episodes at their operational domain. For
+   telecom, two anomalous ONTs served by the same L2 splitter can become one
+   shared-domain episode.
+9. Rejects weak isolated episodes unless they are persistent, affect multiple
+   entities, affect multiple metrics, or are far above their calibrated threshold.
+10. Ranks eligible episodes and applies an explicit daily incident budget. Rejected
+    candidates remain inspectable rather than disappearing.
+11. Saves `ranked_incidents.parquet` and the small operator-friendly
+    `ranked_incidents.csv`.
+12. Only after all model outputs are frozen, reads `SPEC-EVAL` and compares incident
+    recall before and after the daily budget, truth-overlap fraction, condition
+    coverage, and lead time.
 
 Example:
 
@@ -213,8 +221,12 @@ is:
 
 ```text
 MyDrive/anomaly_detection/outputs/research/v0.3.0/models/telecom/
-└── telecom_robust_baseline_v1/
+└── telecom_episode_baseline_v2/
     ├── anomaly_scores.parquet
+    ├── calibration_windows.parquet
+    ├── calibration_thresholds.parquet
+    ├── model_diagnostics.parquet
+    ├── candidate_episodes.parquet
     ├── ranked_incidents.csv
     ├── ranked_incidents.parquet
     ├── modelling_report.json
@@ -226,16 +238,40 @@ model combines selected telemetry in memory. Increase the entity count gradually
 until the ranking logic is accepted; full-population scoring is the next streaming
 engineering step.
 
+The most useful controls are:
+
+- `MODEL_ENTITY_LIMIT` — defaults to 20; `0` means every entity.
+- `MODEL_HISTORY` and `MODEL_MIN_HISTORY` — rolling history lengths in native
+  observations.
+- `MODEL_CALIBRATION_FRACTION` — early fraction of each entity's history used only
+  to set thresholds.
+- `MODEL_POINT_QUANTILE` — desired high calibration-score quantile.
+- `MODEL_MIN_RAW_THRESHOLD` — safety floor when a calibration distribution is
+  degenerate.
+- `MODEL_MIN_EPISODE_BUCKETS` and `MODEL_HIGH_CONFIDENCE_RATIO` — evidence required
+  for an episode to become an incident.
+- `MODEL_MAX_INCIDENTS_PER_DAY` — the explicit operator workload budget; `0`
+  disables it.
+
+Use a new `MODEL_RUN_ID` whenever a control changes. Existing output directories are
+immutable by design.
+
 To model Petrobras instead:
 
 ```python
 %env MODEL_SECTOR=petrobras_3w
 %env MODEL_CORE_RUN_ROOT=/content/drive/MyDrive/anomaly_detection/outputs/research/v0.3.0/petrobras_3w/contract_challenge_v1
-%env MODEL_RUN_ID=petrobras_robust_baseline_v1
+%env MODEL_RUN_ID=petrobras_episode_baseline_v2
 ```
 
-The scoring and ranking cells read only `SPEC-CORE` and save both output files before
-the evaluation cell reads `SPEC-EVAL`.
+The scoring and ranking cells read only `SPEC-CORE` and save every model artifact
+before the evaluation cell reads `SPEC-EVAL`. `SPEC-EVAL` is therefore a scorecard,
+not a feature source or threshold-tuning source.
+
+`ranked_incidents.csv` is the review table. `candidate_episodes.parquet` explains
+what was rejected or removed by the daily budget. `model_diagnostics.parquet`
+reveals which metrics dominate the alert stream. These two diagnostic files are
+usually where you look first when the ranked list is noisy.
 
 ## What happens after the three notebooks
 
