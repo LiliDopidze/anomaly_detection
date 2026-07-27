@@ -9,8 +9,10 @@ There are three notebooks and one shared Python file:
    Pack, translates the synthetic source, and proves evaluation truth is isolated.
 2. `02_PETROBRAS_3W_CONTRACT_CHALLENGE.ipynb` — tests the same contract with a
    second sector and records what the public source cannot express.
-3. `03_SECTOR_AGNOSTIC_MODELLING_AND_RANKING.ipynb` — creates anomaly scores and
-   the first operator-facing `ranked_incidents.csv`.
+3. `03_SECTOR_AGNOSTIC_MODELLING_AND_RANKING.ipynb` — calibrates a truth-free
+   statistical baseline, forms persistent cross-signal episodes, applies an
+   explicit alert budget, and creates the operator-facing
+   `ranked_incidents.csv`.
 4. `week1_core.py` — only the settled mechanics where a silent copy error would
    invalidate the experiment: exposure, clipping, batching, canonical hashing,
    truth routing, and the verified 3W selector.
