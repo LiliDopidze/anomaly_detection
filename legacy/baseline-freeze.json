@@ -15,7 +15,7 @@
   "status": "descriptor_frozen_pending_source",
   "reason": "The supplied files contain the synthetic generator and methodology, but no executable legacy feature, detector, incident or hazard pipeline.",
   "immutable_fixture_release": {
-    "path": "legacy/attachments/telemetry-synth-4.0.1.tar.gz",
+    "source_id": "telemetry-synth-4.0.1",
     "sha256": "3d06ca17dfe06abc3eab0fa23971cb070518bd75174b1ba1d985738d73e2a59e"
   }
 }

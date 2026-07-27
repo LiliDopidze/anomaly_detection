@@ -7,13 +7,9 @@ __pycache__/
 htmlcov/
 .venv/
 venv/
-
-# Build and release outputs
 build/
 dist/
-*.whl
-*.zip
-*.tar.gz
+*.egg-info/
 
 # Jupyter and editors
 .ipynb_checkpoints/
@@ -27,12 +23,9 @@ dist/
 *.pem
 *.key
 
-# Data and materialised outputs never belong in Git
+# Data and materialised outputs stay in Drive
 data/
 Data/
-# Pack metadata and JSON schemas are source code, not user datasets.
-!src/anomaly_detection/data/
-!src/anomaly_detection/data/**
 sources/
 fixtures/
 outputs/
@@ -42,15 +35,6 @@ week1_outputs/
 *.parquet
 *.csv
 
-# Supplied local references require an explicit licensing decision
+# Local supplied references are preserved on the workstation, not published
 legacy/attachments/
 docs/reference/
-
-# Superseded local notebook drafts retained outside the published repository
-notebooks/0[0-7]_*.ipynb
-notebooks/WEEK1_NOTEBOOK_GUIDE.md
-notebooks/google_drive/0*_DRIVE_*.ipynb
-notebooks/google_drive/Week1_Google_Drive_Notebooks/
-notebooks/google_drive/Week1_Google_Drive_Notebooks.zip
-notebooks/google_drive/README.md
-scripts/build_google_drive_notebooks.py
