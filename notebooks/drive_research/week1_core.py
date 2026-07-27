@@ -1084,11 +1084,23 @@ def discover_threew(source: str | Path) -> dict[str, Any]:
         raise FileNotFoundError(f"missing 3W configuration: {config_path}")
     parser.read(config_path, encoding="utf-8")
     version = parser.get("VERSION", "DATASET")
-    files = sorted(source.glob("*/*.parquet"))
+    # Only directories 0–9 contain event instances. The public release can also
+    # contain auxiliary Parquet files under folds/, which are not dataset instances.
+    files = sorted(
+        path
+        for event_code in range(10)
+        for path in (source / str(event_code)).glob("*.parquet")
+    )
+    all_direct_child_parquet = sorted(source.glob("*/*.parquet"))
+    auxiliary_files = sorted(set(all_direct_child_parquet) - set(files))
     missing_dirs = [str(code) for code in range(10) if not (source / str(code)).is_dir()]
     return {
         "version": version,
         "file_count": len(files),
+        "auxiliary_parquet_file_count": len(auxiliary_files),
+        "auxiliary_parquet_directories": sorted(
+            {path.parent.name for path in auxiliary_files}
+        ),
         "missing_event_directories": missing_dirs,
         "ready": (
             version == THREEW_EXPECTED_VERSION
