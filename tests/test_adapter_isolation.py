@@ -123,10 +123,12 @@ class AdapterIsolationTests(unittest.TestCase):
                 self.assertFalse(values.eq(canary).any(), f"{table_name}.{column}")
 
         leaky = {name: frame.copy() for name, frame in core.items()}
-        leaky["operational_events"]["event_end"] = pd.to_datetime(
-            leaky["operational_events"]["event_end"], utc=True
+        event_index = leaky["operational_events"].index
+        leaky["operational_events"]["event_end"] = pd.Series(
+            [canary] * len(event_index),
+            index=event_index,
+            dtype="datetime64[ns, UTC]",
         )
-        leaky["operational_events"].loc[:, "event_end"] = canary
         leaked_values = pd.to_datetime(
             leaky["operational_events"]["event_end"], utc=True, errors="coerce"
         )
