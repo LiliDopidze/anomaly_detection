@@ -71,66 +71,92 @@ Open `00_NATIVE_DATA_EXPLORATION.ipynb` first and choose
 The notebook acts as a statistical intake audit:
 
 1. Counts source files and Parquet rows from exact metadata.
-2. Identifies the row grain, operational measurements, context and embedded truth.
-3. Takes a reproducible bounded sample from every telecom row group.
-4. Calculates count, missingness, zero share, robust quantiles, range, skewness and
-   boundary concentration for every operational measurement.
-5. Compares missingness across entities so a global average cannot hide an unusable
-   ONT or well.
-6. Plots bulk distributions and a Spearman dependence matrix.
-7. Loads complete histories for a few selected entities and measures cadence,
-   duplicate timestamps, gaps and frozen values.
-8. Summarises vendor, firmware, topology and other available context.
-9. Opens labels only in a clearly marked evaluation-only section.
-10. Writes a small statistical report, tables and figures to Drive. It does not copy
-    the sampled telemetry or create `SPEC-CORE`.
+2. Deterministically seals cold-entity and future/unseen-instance holdouts before
+   analysing any feature.
+3. Prints a dictionary for every native field: meaning, unit, measurement kind,
+   inference availability, treatment, nuisance modes and evidence status.
+4. Prints actual operational rows three ways: time-ordered, deterministic random,
+   and one transposed observation so every selected feature is readable.
+5. Takes a reproducible bounded sample only from the sealed exploration frame and
+   checks whether that sample represents its entities, months or file durations.
+6. Calculates count, missingness, zeros, robust quantiles, Bowley skew, medcouple
+   skew and boundary concentration without deleting apparent outliers.
+7. Examines entity-level and co-occurring missingness, bulk distributions and three
+   dependence views: pooled rows, equal-entity weighting and first differences.
+8. Loads complete selected histories and measures cadence, gaps, frozen values,
+   effective sample size, drift, robust change screens and gap-aware recurrence.
+9. Screens where variance sits across entities and native peer groups. For 3W it
+   explicitly records that manifold topology is unavailable rather than inventing it.
+10. Examines valve-state transitions and dwell times for 3W, and counter resets for
+    telecom.
+11. Runs a simple label-free robust score over several thresholds and persistence
+    rules to expose likely alert-volume problems. This is a feasibility screen, not
+    the final detector.
+12. Hash-freezes every pre-label table and figure. Only then does an optional
+    evaluation section reopen the exact sampled positions, and it proves the frozen
+    artifacts did not change.
+13. Writes small reports and figures to Drive. It does not copy sampled telemetry or
+    create `SPEC-CORE`.
 
 Default telecom output:
 
 ```text
-MyDrive/anomaly_detection/outputs/exploration/telecom/telecom_native_eda_v1/
-├── eda_report.json
-├── source_inventory.csv
-├── native_schema.csv
-├── numeric_summary_sample.csv
-├── entity_missingness_summary_sample.csv
-├── quality_flags_sample.csv
-├── temporal_quality_selected_series.csv
-├── evaluation_only_summary.csv
-└── figures/
+MyDrive/anomaly_detection/outputs/exploration/telecom/<timestamped_run_id>/
+├── artifact_hashes_prelabel.json
+├── eda_final_report.json
+├── prelabel/
+│   ├── prelabel_manifest.json
+│   ├── holdout_seal.csv
+│   ├── feature_dictionary.csv
+│   ├── sample_manifest.csv
+│   ├── sampling_validity.csv
+│   ├── numeric_summary_sample.csv
+│   ├── variance_structure.csv
+│   ├── effective_sample_size.csv
+│   ├── drift_and_change_screen.csv
+│   ├── recurrence_screen.csv
+│   ├── alert_feasibility_summary.csv
+│   ├── decision_register.csv
+│   └── figures/
+└── label_audit/                       # absent when EDA_INCLUDE_TRUTH=0
+    └── label_audit_summary.csv
 ```
 
 The exact shape and file composition are not estimates. Distributions,
-correlations, missingness prevalence and label prevalence are sample estimates.
-Complete-series temporal checks are exact only for the selected example entities.
+correlations, missingness prevalence and label prevalence are estimates for the
+explicitly recorded exploration frame. Complete-series temporal checks describe only
+the deterministically selected histories. Synthetic telecom and event-conditioned 3W
+cannot estimate deployment incident prevalence.
 
 Useful telecom controls:
 
 ```python
 %env EDA_SECTOR=telecom
-%env EDA_RUN_ID=telecom_native_eda_v1
 %env EDA_SAMPLE_ROWS=200000
-%env EDA_SERIES_ENTITY_COUNT=2
-%env EDA_SERIES_DAYS=7
+%env EDA_LONGITUDINAL_ENTITY_COUNT=12
+%env EDA_SERIES_PLOT_COUNT=2
+%env EDA_DEV_ENTITY_FRACTION=0.70
+%env EDA_DEV_TIME_FRACTION=0.60
 ```
 
 To inspect Petrobras 3W instead:
 
 ```python
 %env EDA_SECTOR=petrobras_3w
-%env EDA_RUN_ID=threew_real_wells_eda_v1
 %env EDA_THREEW_FILE_COUNT=20
 %env EDA_THREEW_ROWS_PER_FILE=10000
+%env EDA_LONGITUDINAL_FILE_COUNT=6
+%env EDA_THREEW_DEV_FILE_FRACTION=0.60
 ```
 
 The 3W exact inventory counts all real, simulated and hand-drawn files separately.
-Its default descriptive sample draws 20 files uniformly from filenames beginning
-with `WELL-`. It does not use event labels to choose the operational sample and does
-not use `SIMULATED_` or `DRAWN_` files. Event-directory and row-label composition
-are opened only in the final evaluation-only section.
+Its primary exploration draws only from filenames beginning with `WELL-`. It does
+not use `SIMULATED_` or `DRAWN_` files, and it does not expose event-directory or
+row-label values until the post-freeze audit.
 
-Use `EDA_INCLUDE_TRUTH=0` when you want a purely operational EDA run. Use a new
-`EDA_RUN_ID` if you want to retain two sets of exploration outputs.
+Use `EDA_INCLUDE_TRUTH=0` for a purely operational run. By default the notebook makes
+a UTC-timestamped immutable run directory. If you set `EDA_RUN_ID` yourself, it must
+be new: the notebook refuses to overwrite a prior evidence set.
 
 ### 1. Telecom contract and locked truth
 

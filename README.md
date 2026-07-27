@@ -5,8 +5,9 @@ one data scientist validating the product idea—not a premature production pack
 
 There are four notebooks and one shared Python file:
 
-0. `00_NATIVE_DATA_EXPLORATION.ipynb` — inventories the native source and performs
-   a statistically disciplined intake audit before any translation or modelling.
+0. `00_NATIVE_DATA_EXPLORATION.ipynb` — seals development/holdout frames, prints
+   and explains the native operational data, and performs a label-free statistical
+   intake audit before any translation or modelling.
 1. `01_TELECOM_WEEK1_END_TO_END.ipynb` — defines the neutral contract and Telecom
    Pack, translates the synthetic source, and proves evaluation truth is isolated.
 2. `02_PETROBRAS_3W_CONTRACT_CHALLENGE.ipynb` — tests the same contract with a
@@ -24,8 +25,8 @@ remain visible in notebook execution order.
 
 ```text
 native data ──> Notebook 00 ──> Notebook 01 or 02 ──> SPEC-CORE
-                    EDA                  │                  │
-                                         └──> SPEC-EVAL     └──> Notebook 03
+                sealed EDA              │                  │
+                + label audit            └──> SPEC-EVAL     └──> Notebook 03
                                                locked             │
                                                                   └──> ranked incidents
 ```
