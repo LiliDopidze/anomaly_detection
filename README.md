@@ -27,7 +27,7 @@ native data ──> Notebook 01 or 02 ──> SPEC-CORE ──> Notebook 03 ─�
 
 Datasets and outputs stay in Google Drive and are not committed to Git. See the
 [Drive run guide](notebooks/drive_research/README.md) for the exact folder layout,
-run order, controls, and output locations.
+run order, controls, output locations, and the next modelling steps.
 
 The previous package/CLI/release implementation is preserved in Git history and its
 separate engineering branch. The legacy baseline descriptor remains in
