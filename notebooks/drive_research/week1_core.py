@@ -1,4 +1,10 @@
-"""Small, deterministic mechanics for the Week 1 telecom notebook."""
+"""Shared, sector-neutral mechanics for the Week 1 research notebooks.
+
+Sector notebooks create a small PACK-CORE/PACK-EVAL bundle.  This module
+validates that interface and converts PACK-CORE observations to the canonical
+long SPEC-CORE contract.  It deliberately contains no telecom or oil-well
+field names, file names, entity types, or label meanings.
+"""
 
 from __future__ import annotations
 
@@ -6,16 +12,16 @@ import hashlib
 import json
 import shutil
 import uuid
-from dataclasses import asdict, dataclass
+from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
 import pyarrow.parquet as pq
 
 
-CORE_VERSION = "0.4.0"
-EVAL_VERSION = "0.4.0"
-SOURCE_ID = "telemetry-synth-4.1.0"
+CORE_VERSION = "0.5.0"
+EVAL_VERSION = "0.5.0"
+PACK_INTERFACE_VERSION = "0.1.0"
 
 CORE_SCHEMAS = {
     "telemetry": ["event_ts", "entity_id", "metric_id", "value", "quality_code"],
@@ -24,6 +30,7 @@ CORE_SCHEMAS = {
     "entity_relations": ["parent_entity_id", "child_entity_id", "relation_type"],
     "collection_gaps": ["entity_id", "gap_start", "gap_end"],
 }
+
 EVAL_SCHEMAS = {
     "fault_events": [
         "fault_id",
@@ -37,15 +44,23 @@ EVAL_SCHEMAS = {
     ],
     "fault_entity_intervals": ["fault_id", "entity_id", "start_ts", "end_ts"],
     "tickets": ["ticket_id", "entity_id", "reported_ts", "resolved_ts", "fault_id"],
+    "condition_states": [
+        "entity_id",
+        "start_ts",
+        "end_ts",
+        "condition_code",
+    ],
 }
-METRIC_MAP_COLUMNS = [
-    "native_field",
+
+PACK_METRIC_SCHEMA = [
     "metric_id",
     "entity_type",
     "measurement_kind",
     "unit",
     "clip_at",
 ]
+PACK_OBSERVATION_KEYS = ["event_ts", "entity_id"]
+
 MEASUREMENT_KINDS = {
     "gauge",
     "bounded_fraction",
@@ -53,29 +68,13 @@ MEASUREMENT_KINDS = {
     "cumulative_counter",
     "discrete_state",
 }
-TOPOLOGY_LEVELS = [
-    ("olt_id", "olt"),
-    ("pon_port", "pon_port"),
-    ("splitter_l1", "splitter_l1"),
-    ("splitter_l2", "splitter_l2"),
-    ("ont_id", "ont"),
-]
-
 CORE_TABLES = tuple(CORE_SCHEMAS)
 EVAL_TABLES = tuple(EVAL_SCHEMAS)
 
 
-@dataclass(frozen=True)
-class Selection:
-    """Optional development slice. Empty values mean the full source."""
-
-    entity_ids: tuple[str, ...] = ()
-    start: str | None = None
-    end: str | None = None
-    batch_rows: int = 100_000
-
-
 def sha256_file(path, chunk_size=1024 * 1024):
+    """Return a streaming SHA-256 hash for one file."""
+
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
         while chunk := handle.read(chunk_size):
@@ -84,6 +83,8 @@ def sha256_file(path, chunk_size=1024 * 1024):
 
 
 def write_json(path, payload, overwrite=False):
+    """Write stable, human-readable JSON without silently replacing a file."""
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and not overwrite:
@@ -94,8 +95,12 @@ def write_json(path, payload, overwrite=False):
     )
 
 
+def read_json(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
 def canonical_frame_hash(frame, sort_by=()):
-    """Hash logical table content without depending on Parquet metadata."""
+    """Hash table values without depending on Parquet file metadata."""
 
     frame = frame.copy()
     order = [column for column in sort_by if column in frame]
@@ -109,539 +114,587 @@ def canonical_frame_hash(frame, sort_by=()):
 
     schema = "|".join(f"{name}:{dtype}" for name, dtype in frame.dtypes.items())
     row_hashes = pd.util.hash_pandas_object(frame, index=False).to_numpy()
-    digest = hashlib.sha256(schema.encode())
+    digest = hashlib.sha256(schema.encode("utf-8"))
     digest.update(row_hashes.tobytes())
     return digest.hexdigest()
 
 
-def _source_roots(source, evaluation):
-    source = Path(source)
-    roots = [source, source / "Data"]
-    if evaluation:
-        roots += [source / "evaluation", source / "SPEC-EVAL", source / "SPEC_EVAL"]
-    return tuple(dict.fromkeys(roots))
+def empty_table(table_name):
+    """Create an empty canonical evaluation table with the correct columns."""
+
+    return pd.DataFrame(columns=EVAL_SCHEMAS[table_name])
 
 
-def source_file(source, filename, evaluation=False, required=True):
-    matches = [
-        root / filename
-        for root in _source_roots(source, evaluation)
-        if (root / filename).is_file()
-    ]
-    if len(matches) > 1:
-        raise ValueError(f"Ambiguous source file {filename}: {matches}")
-    if matches:
-        return matches[0]
-    if required:
-        raise FileNotFoundError(f"Missing source file: {filename}")
-    return None
+@contextmanager
+def immutable_directory(destination):
+    """Build a directory atomically and refuse to overwrite completed runs."""
 
-
-def discover_telecom(source):
-    required_core = [
-        "reference_dataset.parquet",
-        "topology.csv",
-        "entity_service_windows.csv",
-    ]
-    required_eval = ["gt_fault_registry.csv", "fault_entity_intervals.csv"]
-    missing_core = [
-        name
-        for name in required_core
-        if source_file(source, name, required=False) is None
-    ]
-    missing_eval = [
-        name
-        for name in required_eval
-        if source_file(source, name, evaluation=True, required=False) is None
-    ]
-    return {
-        "core_ready": not missing_core,
-        "evaluation_ready": not missing_eval,
-        "missing_core": missing_core,
-        "missing_evaluation": missing_eval,
-        "tickets_available": source_file(
-            source, "tickets.csv", evaluation=True, required=False
-        )
-        is not None,
-    }
-
-
-def validate_metric_map(metric_map):
-    if list(metric_map.columns) != METRIC_MAP_COLUMNS:
-        raise ValueError(f"Metric map columns must be {METRIC_MAP_COLUMNS}")
-    if metric_map["native_field"].duplicated().any():
-        raise ValueError("native_field must be unique")
-    if metric_map["metric_id"].duplicated().any():
-        raise ValueError("metric_id must be unique")
-    unknown = set(metric_map["measurement_kind"]) - MEASUREMENT_KINDS
-    if unknown:
-        raise ValueError(f"Unknown measurement kinds: {sorted(unknown)}")
-
-
-def _filter_panel(frame, selection):
-    if selection.entity_ids:
-        frame = frame.loc[frame["ont_id"].astype(str).isin(selection.entity_ids)]
-    timestamps = pd.to_datetime(frame["timestamp_utc"], utc=True)
-    if selection.start:
-        frame = frame.loc[timestamps.ge(pd.to_datetime(selection.start, utc=True))]
-        timestamps = pd.to_datetime(frame["timestamp_utc"], utc=True)
-    if selection.end:
-        frame = frame.loc[timestamps.lt(pd.to_datetime(selection.end, utc=True))]
-    return frame.reset_index(drop=True)
-
-
-def _infer_cadence(presence):
-    entity_id = str(presence["ont_id"].iloc[0])
-    timestamps = (
-        pd.to_datetime(
-            presence.loc[presence["ont_id"].astype(str).eq(entity_id), "timestamp_utc"],
-            utc=True,
-        )
-        .drop_duplicates()
-        .sort_values()
+    destination = Path(destination)
+    if destination.exists():
+        raise FileExistsError(f"Refusing to overwrite {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(
+        f".{destination.name}.tmp-{uuid.uuid4().hex[:8]}"
     )
-    positive = timestamps.diff().dropna()
-    positive = positive.loc[positive.gt(pd.Timedelta(0))]
-    if positive.empty:
-        raise ValueError("Could not infer a positive telemetry cadence")
-    return positive.mode().iloc[0]
-
-
-def translate_telemetry_batch(panel, metric_map):
-    """Convert one native wide batch to canonical long telemetry."""
-
-    available = [field for field in metric_map["native_field"] if field in panel]
-    if not available:
-        raise ValueError("No mapped metric fields found in the native panel")
-
-    mapping = metric_map.set_index("native_field")
-    long = panel[["timestamp_utc", "ont_id", *available]].melt(
-        id_vars=["timestamp_utc", "ont_id"],
-        value_vars=available,
-        var_name="native_field",
-        value_name="value",
-    )
-    long["event_ts"] = pd.to_datetime(long.pop("timestamp_utc"), utc=True)
-    long["entity_id"] = long.pop("ont_id").astype(str)
-    long["metric_id"] = long["native_field"].map(mapping["metric_id"])
-
-    long["value"] = pd.to_numeric(long["value"], errors="coerce")
-    clip_at = long["native_field"].map(mapping["clip_at"])
-    long["quality_code"] = "measured"
-    long.loc[long["value"].isna(), "quality_code"] = "invalid"
-    clipped = long["value"].notna() & clip_at.notna() & long["value"].ge(clip_at)
-    long.loc[clipped, "quality_code"] = "clipped"
-
-    return (
-        long[CORE_SCHEMAS["telemetry"]]
-        .sort_values(["event_ts", "entity_id", "metric_id"], kind="stable")
-        .reset_index(drop=True)
-    )
-
-
-def build_entity_registry(topology, service_windows):
-    windows = service_windows.copy()
-    windows["entity_id"] = windows["entity_id"].astype(str)
-    windows = windows.set_index("entity_id")
-
-    rows = []
-    for field, entity_type in TOPOLOGY_LEVELS:
-        if field not in topology:
-            continue
-        for entity_id in sorted(topology[field].dropna().astype(str).unique()):
-            window = (
-                windows.loc[entity_id]
-                if entity_type == "ont" and entity_id in windows.index
-                else None
-            )
-            rows.append(
-                {
-                    "entity_id": entity_id,
-                    "entity_type": entity_type,
-                    "valid_from": pd.NaT if window is None else window["install_ts"],
-                    "valid_to": (
-                        pd.NaT if window is None else window["decommission_ts"]
-                    ),
-                }
-            )
-    return (
-        pd.DataFrame(rows, columns=CORE_SCHEMAS["entity_registry"])
-        .drop_duplicates("entity_id")
-        .sort_values("entity_id")
-        .reset_index(drop=True)
-    )
-
-
-def build_entity_relations(topology, relation_mappings):
-    rows = []
-    for parent_field, child_field, relation_type in relation_mappings:
-        pairs = topology[[parent_field, child_field]].dropna().drop_duplicates()
-        rows += [
-            {
-                "parent_entity_id": str(parent),
-                "child_entity_id": str(child),
-                "relation_type": relation_type,
-            }
-            for parent, child in pairs.itertuples(index=False)
-        ]
-    return (
-        pd.DataFrame(rows, columns=CORE_SCHEMAS["entity_relations"])
-        .drop_duplicates()
-        .sort_values(CORE_SCHEMAS["entity_relations"])
-        .reset_index(drop=True)
-    )
-
-
-def build_collection_gaps(presence, service_windows, cadence, selection):
-    """Find absent timestamp runs only while each ONT is in service."""
-
-    observed = presence.copy()
-    observed["ont_id"] = observed["ont_id"].astype(str)
-    observed["timestamp_utc"] = pd.to_datetime(observed["timestamp_utc"], utc=True)
-    observed = observed.drop_duplicates().sort_values(
-        ["ont_id", "timestamp_utc"], kind="stable"
-    )
-
-    windows = service_windows.copy()
-    windows["entity_id"] = windows["entity_id"].astype(str)
-    windows = windows.set_index("entity_id")
-    data_start = observed["timestamp_utc"].min()
-    data_end = observed["timestamp_utc"].max() + cadence
-    if selection.start:
-        data_start = max(data_start, pd.to_datetime(selection.start, utc=True))
-    if selection.end:
-        data_end = min(data_end, pd.to_datetime(selection.end, utc=True))
-
-    gaps = []
-    for entity_id, group in observed.groupby("ont_id", sort=False):
-        service = windows.loc[entity_id] if entity_id in windows.index else None
-        valid_from = (
-            data_start
-            if service is None or pd.isna(service["install_ts"])
-            else max(data_start, pd.to_datetime(service["install_ts"], utc=True))
-        )
-        valid_to = (
-            data_end
-            if service is None or pd.isna(service["decommission_ts"])
-            else min(data_end, pd.to_datetime(service["decommission_ts"], utc=True))
-        )
-        timestamps = group.loc[
-            group["timestamp_utc"].between(valid_from, valid_to, inclusive="left"),
-            "timestamp_utc",
-        ].tolist()
-        if not timestamps:
-            gaps.append((entity_id, valid_from, valid_to))
-            continue
-
-        previous = valid_from - cadence
-        for timestamp in timestamps:
-            gap_start = previous + cadence
-            if gap_start < timestamp:
-                gaps.append((entity_id, gap_start, timestamp))
-            previous = timestamp
-        if previous + cadence < valid_to:
-            gaps.append((entity_id, previous + cadence, valid_to))
-
-    return pd.DataFrame(gaps, columns=CORE_SCHEMAS["collection_gaps"])
-
-
-def _write_table(frame, path, sort_by=()):
-    frame.to_parquet(path, index=False)
-    return len(frame), canonical_frame_hash(frame, sort_by)
-
-
-def _materialise_core(source, destination, metric_map, relation_mappings, selection):
-    destination.mkdir(parents=True)
-    telemetry_directory = destination / "telemetry"
-    telemetry_directory.mkdir()
-
-    panel = pq.ParquetFile(source_file(source, "reference_dataset.parquet"))
-    panel_columns = set(panel.schema_arrow.names)
-    if not {"timestamp_utc", "ont_id"} <= panel_columns:
-        raise ValueError("Panel must contain timestamp_utc and ont_id")
-    truth_columns = sorted(
-        name for name in panel_columns if str(name).startswith("gt_")
-    )
-    if truth_columns:
-        raise ValueError(f"Observable panel contains truth: {truth_columns}")
-
-    metric_map = metric_map.loc[metric_map["native_field"].isin(panel_columns)].copy()
-    if metric_map.empty:
-        raise ValueError("None of the mapped metrics exist in the panel")
-
-    presence_parts = []
-    for batch in panel.iter_batches(
-        batch_size=selection.batch_rows,
-        columns=["timestamp_utc", "ont_id"],
-    ):
-        selected = _filter_panel(batch.to_pandas(), selection)
-        if len(selected):
-            presence_parts.append(selected)
-    if not presence_parts:
-        raise ValueError("The selected telemetry slice is empty")
-    presence = pd.concat(presence_parts, ignore_index=True)
-    cadence = _infer_cadence(presence)
-    selected_entities = set(presence["ont_id"].astype(str))
-
-    topology = pd.read_csv(source_file(source, "topology.csv"))
-    topology = topology.loc[
-        topology["ont_id"].astype(str).isin(selected_entities)
-    ].copy()
-    windows = pd.read_csv(
-        source_file(source, "entity_service_windows.csv"),
-        parse_dates=["install_ts", "decommission_ts"],
-    )
-    windows = windows.loc[
-        windows["entity_id"].astype(str).isin(selected_entities)
-    ].copy()
-
-    tables = {
-        "metric_catalogue": metric_map[CORE_SCHEMAS["metric_catalogue"]].reset_index(
-            drop=True
-        ),
-        "entity_registry": build_entity_registry(topology, windows),
-        "entity_relations": build_entity_relations(topology, relation_mappings),
-        "collection_gaps": build_collection_gaps(presence, windows, cadence, selection),
-    }
-    row_counts, hashes = {}, {}
-    for name, frame in tables.items():
-        row_counts[name], hashes[name] = _write_table(
-            frame, destination / f"{name}.parquet", frame.columns
-        )
-
-    telemetry_hash = hashlib.sha256()
-    telemetry_rows = part_number = 0
-    columns = ["timestamp_utc", "ont_id", *metric_map["native_field"]]
-    for batch in panel.iter_batches(batch_size=selection.batch_rows, columns=columns):
-        selected = _filter_panel(batch.to_pandas(), selection)
-        if selected.empty:
-            continue
-        canonical = translate_telemetry_batch(selected, metric_map)
-        canonical.to_parquet(
-            telemetry_directory / f"part-{part_number:05d}.parquet",
-            index=False,
-            compression="zstd",
-        )
-        telemetry_hash.update(
-            canonical_frame_hash(
-                canonical, ["event_ts", "entity_id", "metric_id"]
-            ).encode()
-        )
-        telemetry_rows += len(canonical)
-        part_number += 1
-
-    row_counts["telemetry"] = telemetry_rows
-    hashes["telemetry"] = telemetry_hash.hexdigest()
-    manifest = {
-        "contract_version": CORE_VERSION,
-        "source_id": SOURCE_ID,
-        "cadence_seconds": cadence.total_seconds(),
-        "selection": asdict(selection),
-        "tables": CORE_SCHEMAS,
-        "row_counts": row_counts,
-        "canonical_content_hashes": hashes,
-    }
-    write_json(destination / "manifest.json", manifest)
-    return manifest
-
-
-def _column(frame, name, default=pd.NA):
-    if name in frame:
-        return frame[name]
-    return pd.Series(default, index=frame.index)
-
-
-def _materialise_evaluation(source, destination, selected_entities):
-    registry = pd.read_csv(
-        source_file(source, "gt_fault_registry.csv", evaluation=True)
-    )
-    intervals = pd.read_csv(
-        source_file(source, "fault_entity_intervals.csv", evaluation=True)
-    )
-    intervals = intervals.loc[
-        intervals["entity_id"].astype(str).isin(selected_entities)
-    ].copy()
-    fault_ids = set(intervals["fault_id"].astype(str))
-    registry = registry.loc[registry["gt_fault_id"].astype(str).isin(fault_ids)].copy()
-
-    fault_events = pd.DataFrame(
-        {
-            "fault_id": registry["gt_fault_id"].astype(str),
-            "fault_type": registry["gt_fault_type"].astype(str),
-            "domain_id": _column(registry, "target"),
-            "onset_ts": _column(registry, "onset_ts"),
-            "observable_ts": _column(registry, "first_observable_ts"),
-            "impact_ts": _column(registry, "impact_ts"),
-            "end_ts": _column(registry, "repair_ts"),
-            "group_id": _column(registry, "group_id"),
-        }
-    )
-    fault_intervals = pd.DataFrame(
-        {
-            "fault_id": intervals["fault_id"].astype(str),
-            "entity_id": intervals["entity_id"].astype(str),
-            "start_ts": _column(intervals, "active_start_ts"),
-            "end_ts": _column(intervals, "active_end_ts"),
-        }
-    )
-
-    ticket_path = source_file(source, "tickets.csv", evaluation=True, required=False)
-    if ticket_path:
-        native_tickets = pd.read_csv(ticket_path)
-        native_tickets = native_tickets.loc[
-            native_tickets["ont_id"].astype(str).isin(selected_entities)
-        ]
-        tickets = pd.DataFrame(
-            {
-                "ticket_id": native_tickets["ticket_id"].astype(str),
-                "entity_id": native_tickets["ont_id"].astype(str),
-                "reported_ts": _column(native_tickets, "reported_ts"),
-                "resolved_ts": _column(native_tickets, "resolved_ts"),
-                "fault_id": _column(native_tickets, "gt_fault_id"),
-            }
-        )
-    else:
-        tickets = pd.DataFrame(columns=EVAL_SCHEMAS["tickets"])
-
-    tables = {
-        "fault_events": fault_events,
-        "fault_entity_intervals": fault_intervals,
-        "tickets": tickets,
-    }
-    for frame in tables.values():
-        for column in frame:
-            if column.endswith("_ts"):
-                frame[column] = pd.to_datetime(frame[column], utc=True, errors="coerce")
-
-    destination.mkdir(parents=True)
-    row_counts, hashes = {}, {}
-    for name, frame in tables.items():
-        frame = frame[EVAL_SCHEMAS[name]]
-        row_counts[name], hashes[name] = _write_table(
-            frame, destination / f"{name}.parquet", frame.columns
-        )
-    manifest = {
-        "contract_version": EVAL_VERSION,
-        "tables": EVAL_SCHEMAS,
-        "row_counts": row_counts,
-        "canonical_content_hashes": hashes,
-    }
-    write_json(destination / "manifest.json", manifest)
-    return manifest
-
-
-def _source_manifest(source, include_evaluation):
-    files = [
-        ("reference_dataset.parquet", False, True),
-        ("topology.csv", False, True),
-        ("entity_service_windows.csv", False, True),
-    ]
-    if include_evaluation:
-        files += [
-            ("gt_fault_registry.csv", True, True),
-            ("fault_entity_intervals.csv", True, True),
-            ("tickets.csv", True, False),
-        ]
-
-    records = []
-    for name, evaluation, required in files:
-        path = source_file(source, name, evaluation=evaluation, required=required)
-        if path:
-            records.append(
-                {
-                    "relative_path": str(path.relative_to(source)),
-                    "bytes": path.stat().st_size,
-                    "sha256": sha256_file(path),
-                    "evaluation_only": evaluation,
-                }
-            )
-    return {"source_id": SOURCE_ID, "source_root": str(source), "files": records}
-
-
-def materialise_telecom(
-    source,
-    run_root,
-    metric_map,
-    relation_mappings,
-    selection=None,
-    include_evaluation=True,
-):
-    """Create immutable SPEC-CORE and optional, separate SPEC-EVAL."""
-
-    source, run_root = Path(source), Path(run_root)
-    selection = selection or Selection()
-    validate_metric_map(metric_map)
-    inventory = discover_telecom(source)
-    if not inventory["core_ready"]:
-        raise FileNotFoundError(inventory)
-    if include_evaluation and not inventory["evaluation_ready"]:
-        raise FileNotFoundError(inventory)
-    if run_root.exists():
-        raise FileExistsError(f"Refusing to overwrite {run_root}")
-
-    temporary = run_root.with_name(f".{run_root.name}.tmp-{uuid.uuid4().hex[:8]}")
     try:
-        core_manifest = _materialise_core(
-            source,
-            temporary / "SPEC-CORE",
-            metric_map,
-            relation_mappings,
-            selection,
-        )
-        entities = pd.read_parquet(temporary / "SPEC-CORE" / "entity_registry.parquet")
-        selected_entities = set(
-            entities.loc[entities["entity_type"].eq("ont"), "entity_id"].astype(str)
-        )
-        evaluation_manifest = (
-            _materialise_evaluation(source, temporary / "SPEC-EVAL", selected_entities)
-            if include_evaluation
-            else None
-        )
-        write_json(
-            temporary / "source_manifest.json",
-            _source_manifest(source, include_evaluation),
-        )
-        report = {
-            "contract_version": CORE_VERSION,
-            "source": str(source),
-            "run_root": str(run_root),
-            "core_manifest": core_manifest,
-            "evaluation_manifest": evaluation_manifest,
-        }
-        write_json(temporary / "workflow_report.json", report)
-        run_root.parent.mkdir(parents=True, exist_ok=True)
-        temporary.rename(run_root)
-        return report
+        temporary.mkdir()
+        yield temporary
+        temporary.rename(destination)
     except Exception:
         if temporary.exists():
             shutil.rmtree(temporary)
         raise
 
 
-def audit_core(core):
-    """Validate the minimal schemas and count quality codes."""
+def source_record(path, source_root, evaluation_only=False):
+    """Describe one source file for a reproducible lineage manifest."""
 
-    core = Path(core)
-    manifest = json.loads((core / "manifest.json").read_text())
-    quality_counts, telemetry_rows = {}, 0
+    path = Path(path)
+    source_root = Path(source_root)
+    try:
+        relative_path = str(path.relative_to(source_root))
+    except ValueError:
+        relative_path = str(path)
+    return {
+        "relative_path": relative_path,
+        "bytes": path.stat().st_size,
+        "sha256": sha256_file(path),
+        "evaluation_only": bool(evaluation_only),
+    }
 
-    for part in sorted((core / "telemetry").glob("part-*.parquet")):
+
+def _partitioned_hash(directory, sort_by):
+    digest = hashlib.sha256()
+    rows = 0
+    parts = sorted(Path(directory).glob("part-*.parquet"))
+    if not parts:
+        raise FileNotFoundError(f"No Parquet parts found in {directory}")
+    for part in parts:
+        frame = pd.read_parquet(part)
+        digest.update(canonical_frame_hash(frame, sort_by).encode("ascii"))
+        rows += len(frame)
+    return digest.hexdigest(), rows
+
+
+def _table_hash(path, schema):
+    frame = pd.read_parquet(path)
+    if list(frame.columns) != list(schema):
+        raise ValueError(f"Unexpected schema in {path}: {list(frame.columns)}")
+    return canonical_frame_hash(frame, schema), len(frame)
+
+
+def _truth_like_columns(columns):
+    reserved = {
+        "class",
+        "state",
+        "label",
+        "fault_id",
+        "condition_code",
+        "ticket_id",
+    }
+    return sorted(
+        name
+        for name in map(str, columns)
+        if name.lower() in reserved or name.lower().startswith("gt_")
+    )
+
+
+def _validate_pack_tables(pack_root, evaluation_tables=()):
+    """Validate the physical pack interface without interpreting the sector."""
+
+    pack_root = Path(pack_root)
+    core = pack_root / "PACK-CORE"
+    observations = core / "observations"
+    parts = sorted(observations.glob("part-*.parquet"))
+    if not parts:
+        raise FileNotFoundError(f"No observation parts in {observations}")
+
+    catalogue = pd.read_parquet(core / "metric_catalogue.parquet")
+    registry = pd.read_parquet(core / "entity_registry.parquet")
+    relations = pd.read_parquet(core / "entity_relations.parquet")
+
+    if list(catalogue.columns) != PACK_METRIC_SCHEMA:
+        raise ValueError(f"Pack metric catalogue must use {PACK_METRIC_SCHEMA}")
+    if list(registry.columns) != CORE_SCHEMAS["entity_registry"]:
+        raise ValueError("Pack entity_registry schema is invalid")
+    if list(relations.columns) != CORE_SCHEMAS["entity_relations"]:
+        raise ValueError("Pack entity_relations schema is invalid")
+    if catalogue["metric_id"].duplicated().any():
+        raise ValueError("Pack metric_id values must be unique")
+    if registry["entity_id"].duplicated().any():
+        raise ValueError("Pack entity_id values must be unique")
+
+    unknown_kinds = set(catalogue["measurement_kind"]) - MEASUREMENT_KINDS
+    if unknown_kinds:
+        raise ValueError(f"Unknown measurement kinds: {sorted(unknown_kinds)}")
+
+    metric_ids = catalogue["metric_id"].astype(str).tolist()
+    expected_observation_columns = [*PACK_OBSERVATION_KEYS, *metric_ids]
+    for part in parts:
+        columns = pq.ParquetFile(part).schema_arrow.names
+        if columns != expected_observation_columns:
+            raise ValueError(
+                f"Unexpected observation schema in {part.name}: {columns}"
+            )
+        leaks = _truth_like_columns(columns)
+        if leaks:
+            raise ValueError(f"Evaluation fields found in PACK-CORE: {leaks}")
+
+    registry_ids = set(registry["entity_id"].astype(str))
+    relation_ids = set(relations["parent_entity_id"].dropna().astype(str))
+    relation_ids |= set(relations["child_entity_id"].dropna().astype(str))
+    missing_relation_entities = relation_ids - registry_ids
+    if missing_relation_entities:
+        raise ValueError(
+            "Relations reference entities missing from the registry: "
+            f"{sorted(missing_relation_entities)[:5]}"
+        )
+
+    for table_name in evaluation_tables:
+        if table_name not in EVAL_SCHEMAS:
+            raise ValueError(f"Unknown evaluation table: {table_name}")
+        path = pack_root / "PACK-EVAL" / f"{table_name}.parquet"
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        frame = pd.read_parquet(path)
+        if list(frame.columns) != EVAL_SCHEMAS[table_name]:
+            raise ValueError(f"Unexpected {table_name} schema")
+
+    return {
+        "observation_parts": len(parts),
+        "metrics": len(catalogue),
+        "entities": len(registry),
+        "relations": len(relations),
+    }
+
+
+def pack_core_hashes(pack_root):
+    """Return logical hashes used by the sector-pack isolation test."""
+
+    core = Path(pack_root) / "PACK-CORE"
+    observations_hash, _ = _partitioned_hash(
+        core / "observations", PACK_OBSERVATION_KEYS
+    )
+    hashes = {"observations": observations_hash}
+    schemas = {
+        "metric_catalogue": PACK_METRIC_SCHEMA,
+        "entity_registry": CORE_SCHEMAS["entity_registry"],
+        "entity_relations": CORE_SCHEMAS["entity_relations"],
+    }
+    for table_name, schema in schemas.items():
+        hashes[table_name], _ = _table_hash(
+            core / f"{table_name}.parquet", schema
+        )
+    return hashes
+
+
+def finalise_pack(
+    pack_root,
+    *,
+    sector,
+    pack_version,
+    expected_cadence_seconds,
+    source_manifest,
+    evaluation_tables=(),
+    notes=(),
+):
+    """Validate and seal a sector pack after its notebook writes the tables."""
+
+    pack_root = Path(pack_root)
+    cadence = float(expected_cadence_seconds)
+    if cadence <= 0:
+        raise ValueError("expected_cadence_seconds must be positive")
+
+    validation = _validate_pack_tables(pack_root, evaluation_tables)
+    core = pack_root / "PACK-CORE"
+    observation_hash, observation_rows = _partitioned_hash(
+        core / "observations", PACK_OBSERVATION_KEYS
+    )
+    core_hashes = {"observations": observation_hash}
+    core_rows = {"observations": observation_rows}
+
+    schemas = {
+        "metric_catalogue": PACK_METRIC_SCHEMA,
+        "entity_registry": CORE_SCHEMAS["entity_registry"],
+        "entity_relations": CORE_SCHEMAS["entity_relations"],
+    }
+    for table_name, schema in schemas.items():
+        table_hash, rows = _table_hash(core / f"{table_name}.parquet", schema)
+        core_hashes[table_name] = table_hash
+        core_rows[table_name] = rows
+
+    eval_hashes, eval_rows = {}, {}
+    for table_name in evaluation_tables:
+        path = pack_root / "PACK-EVAL" / f"{table_name}.parquet"
+        table_hash, rows = _table_hash(path, EVAL_SCHEMAS[table_name])
+        eval_hashes[table_name] = table_hash
+        eval_rows[table_name] = rows
+
+    manifest = {
+        "pack_interface_version": PACK_INTERFACE_VERSION,
+        "pack_version": str(pack_version),
+        "sector": str(sector),
+        "expected_cadence_seconds": cadence,
+        "metric_ids": pd.read_parquet(
+            core / "metric_catalogue.parquet", columns=["metric_id"]
+        )["metric_id"].astype(str).tolist(),
+        "evaluation_tables": list(evaluation_tables),
+        "core_row_counts": core_rows,
+        "core_content_hashes": core_hashes,
+        "evaluation_row_counts": eval_rows,
+        "evaluation_content_hashes": eval_hashes,
+        "notes": list(notes),
+        "validation": validation,
+    }
+    write_json(pack_root / "source_manifest.json", source_manifest)
+    write_json(pack_root / "pack_manifest.json", manifest)
+    return manifest
+
+
+def validate_pack(pack_root):
+    """Validate a completed pack and return its manifest."""
+
+    pack_root = Path(pack_root)
+    manifest = read_json(pack_root / "pack_manifest.json")
+    if manifest["pack_interface_version"] != PACK_INTERFACE_VERSION:
+        raise ValueError(
+            "Unsupported pack interface: "
+            f"{manifest['pack_interface_version']}"
+        )
+    _validate_pack_tables(pack_root, manifest["evaluation_tables"])
+    actual_hashes = pack_core_hashes(pack_root)
+    if actual_hashes != manifest["core_content_hashes"]:
+        raise ValueError("PACK-CORE content no longer matches its manifest")
+    return manifest
+
+
+def _quality_codes(long_frame, catalogue):
+    long_frame["value"] = pd.to_numeric(long_frame["value"], errors="coerce")
+    long_frame["quality_code"] = "measured"
+    long_frame.loc[long_frame["value"].isna(), "quality_code"] = "invalid"
+
+    clip_limits = catalogue.set_index("metric_id")["clip_at"]
+    limit = pd.to_numeric(
+        long_frame["metric_id"].map(clip_limits), errors="coerce"
+    )
+    clipped = (
+        long_frame["value"].notna()
+        & limit.notna()
+        & long_frame["value"].ge(limit)
+    )
+    long_frame.loc[clipped, "quality_code"] = "clipped"
+    return long_frame
+
+
+def _collection_gaps(presence, registry, cadence_seconds):
+    """Find absent expected samples inside observed service time."""
+
+    presence = presence.copy()
+    presence["event_ts"] = pd.to_datetime(
+        presence["event_ts"], utc=True, errors="raise"
+    )
+    presence["entity_id"] = presence["entity_id"].astype(str)
+    presence = presence.drop_duplicates().sort_values(
+        ["entity_id", "event_ts"], kind="stable"
+    )
+    if presence.empty:
+        return pd.DataFrame(columns=CORE_SCHEMAS["collection_gaps"])
+
+    cadence = pd.Timedelta(seconds=float(cadence_seconds))
+    data_start = presence["event_ts"].min()
+    data_end = presence["event_ts"].max() + cadence
+    registry = registry.copy()
+    registry["entity_id"] = registry["entity_id"].astype(str)
+    registry = registry.set_index("entity_id")
+
+    gaps = []
+    for entity_id, group in presence.groupby("entity_id", sort=False):
+        if entity_id not in registry.index:
+            raise ValueError(f"Observation entity missing from registry: {entity_id}")
+        entity = registry.loc[entity_id]
+        valid_from = pd.to_datetime(entity["valid_from"], utc=True, errors="coerce")
+        valid_to = pd.to_datetime(entity["valid_to"], utc=True, errors="coerce")
+        window_start = data_start if pd.isna(valid_from) else max(data_start, valid_from)
+        window_end = data_end if pd.isna(valid_to) else min(data_end, valid_to)
+        if window_start >= window_end:
+            continue
+
+        timestamps = (
+            group.loc[
+                group["event_ts"].ge(window_start)
+                & group["event_ts"].lt(window_end),
+                "event_ts",
+            ]
+            .drop_duplicates()
+            .sort_values()
+            .tolist()
+        )
+        if not timestamps:
+            gaps.append((entity_id, window_start, window_end))
+            continue
+
+        previous = window_start - cadence
+        for timestamp in timestamps:
+            gap_start = previous + cadence
+            if gap_start < timestamp:
+                gaps.append((entity_id, gap_start, timestamp))
+            previous = timestamp
+        if previous + cadence < window_end:
+            gaps.append((entity_id, previous + cadence, window_end))
+
+    return pd.DataFrame(gaps, columns=CORE_SCHEMAS["collection_gaps"])
+
+
+def materialise_canonical(pack_root, run_root, include_evaluation=True):
+    """Convert any valid sector pack into immutable SPEC-CORE/SPEC-EVAL."""
+
+    pack_root, run_root = Path(pack_root), Path(run_root)
+    pack_manifest = validate_pack(pack_root)
+    catalogue = pd.read_parquet(
+        pack_root / "PACK-CORE" / "metric_catalogue.parquet"
+    )
+    registry = pd.read_parquet(
+        pack_root / "PACK-CORE" / "entity_registry.parquet"
+    )
+    relations = pd.read_parquet(
+        pack_root / "PACK-CORE" / "entity_relations.parquet"
+    )
+    metric_ids = catalogue["metric_id"].astype(str).tolist()
+
+    with immutable_directory(run_root) as temporary:
+        core = temporary / "SPEC-CORE"
+        telemetry_directory = core / "telemetry"
+        telemetry_directory.mkdir(parents=True)
+
+        telemetry_digest = hashlib.sha256()
+        telemetry_rows = 0
+        quality_counts = {}
+        presence_parts = []
+
+        observation_parts = sorted(
+            (pack_root / "PACK-CORE" / "observations").glob("part-*.parquet")
+        )
+        for part_number, part in enumerate(observation_parts):
+            wide = pd.read_parquet(part)
+            wide["event_ts"] = pd.to_datetime(
+                wide["event_ts"], utc=True, errors="raise"
+            )
+            wide["entity_id"] = wide["entity_id"].astype(str)
+            presence_parts.append(wide[PACK_OBSERVATION_KEYS].drop_duplicates())
+
+            long = wide.melt(
+                id_vars=PACK_OBSERVATION_KEYS,
+                value_vars=metric_ids,
+                var_name="metric_id",
+                value_name="value",
+            )
+            long = _quality_codes(long, catalogue)
+            long = (
+                long[CORE_SCHEMAS["telemetry"]]
+                .sort_values(
+                    ["event_ts", "entity_id", "metric_id"], kind="stable"
+                )
+                .reset_index(drop=True)
+            )
+            long.to_parquet(
+                telemetry_directory / f"part-{part_number:05d}.parquet",
+                index=False,
+                compression="zstd",
+            )
+            telemetry_digest.update(
+                canonical_frame_hash(
+                    long, ["event_ts", "entity_id", "metric_id"]
+                ).encode("ascii")
+            )
+            telemetry_rows += len(long)
+            for code, count in long["quality_code"].value_counts().items():
+                quality_counts[str(code)] = (
+                    quality_counts.get(str(code), 0) + int(count)
+                )
+
+        canonical_catalogue = catalogue[
+            CORE_SCHEMAS["metric_catalogue"]
+        ].copy()
+        presence = pd.concat(presence_parts, ignore_index=True)
+        gaps = _collection_gaps(
+            presence,
+            registry,
+            pack_manifest["expected_cadence_seconds"],
+        )
+        sidecars = {
+            "metric_catalogue": canonical_catalogue,
+            "entity_registry": registry[CORE_SCHEMAS["entity_registry"]],
+            "entity_relations": relations[CORE_SCHEMAS["entity_relations"]],
+            "collection_gaps": gaps,
+        }
+        for table_name, frame in sidecars.items():
+            frame.to_parquet(core / f"{table_name}.parquet", index=False)
+
+        core_hashes = {"telemetry": telemetry_digest.hexdigest()}
+        core_rows = {"telemetry": telemetry_rows}
+        for table_name, frame in sidecars.items():
+            core_hashes[table_name] = canonical_frame_hash(
+                frame, CORE_SCHEMAS[table_name]
+            )
+            core_rows[table_name] = len(frame)
+
+        core_manifest = {
+            "contract_version": CORE_VERSION,
+            "sector": pack_manifest["sector"],
+            "source_pack_version": pack_manifest["pack_version"],
+            "expected_cadence_seconds": pack_manifest[
+                "expected_cadence_seconds"
+            ],
+            "tables": CORE_SCHEMAS,
+            "row_counts": core_rows,
+            "canonical_content_hashes": core_hashes,
+            "quality_counts": quality_counts,
+        }
+        write_json(core / "manifest.json", core_manifest)
+
+        eval_manifest = None
+        if include_evaluation and pack_manifest["evaluation_tables"]:
+            evaluation = temporary / "SPEC-EVAL"
+            evaluation.mkdir()
+            eval_hashes, eval_rows = {}, {}
+            for table_name in pack_manifest["evaluation_tables"]:
+                frame = pd.read_parquet(
+                    pack_root / "PACK-EVAL" / f"{table_name}.parquet"
+                )
+                frame = frame[EVAL_SCHEMAS[table_name]]
+                frame.to_parquet(
+                    evaluation / f"{table_name}.parquet", index=False
+                )
+                eval_hashes[table_name] = canonical_frame_hash(
+                    frame, EVAL_SCHEMAS[table_name]
+                )
+                eval_rows[table_name] = len(frame)
+            eval_manifest = {
+                "contract_version": EVAL_VERSION,
+                "tables": {
+                    name: EVAL_SCHEMAS[name]
+                    for name in pack_manifest["evaluation_tables"]
+                },
+                "row_counts": eval_rows,
+                "canonical_content_hashes": eval_hashes,
+            }
+            write_json(evaluation / "manifest.json", eval_manifest)
+
+        lineage = {
+            "pack_root": str(pack_root),
+            "pack_manifest_sha256": sha256_file(
+                pack_root / "pack_manifest.json"
+            ),
+            "source_manifest_sha256": sha256_file(
+                pack_root / "source_manifest.json"
+            ),
+            "evaluation_mounted": bool(
+                include_evaluation and pack_manifest["evaluation_tables"]
+            ),
+            "adapter_has_sector_branch": False,
+        }
+        write_json(temporary / "lineage.json", lineage)
+        write_json(
+            temporary / "workflow_report.json",
+            {
+                "run_root": str(run_root),
+                "core_manifest": core_manifest,
+                "evaluation_manifest": eval_manifest,
+                "lineage": lineage,
+            },
+        )
+
+    return read_json(run_root / "workflow_report.json")
+
+
+def audit_core(core_root):
+    """Validate a completed SPEC-CORE and report its basic contents."""
+
+    core_root = Path(core_root)
+    manifest = read_json(core_root / "manifest.json")
+    if manifest["contract_version"] != CORE_VERSION:
+        raise ValueError("Unsupported SPEC-CORE version")
+
+    telemetry_rows = 0
+    quality_counts = {}
+    for part in sorted((core_root / "telemetry").glob("part-*.parquet")):
         frame = pd.read_parquet(part)
         if list(frame.columns) != CORE_SCHEMAS["telemetry"]:
-            raise AssertionError(f"Unexpected telemetry schema in {part.name}")
+            raise ValueError(f"Unexpected telemetry schema in {part.name}")
         telemetry_rows += len(frame)
         for code, count in frame["quality_code"].value_counts().items():
-            quality_counts[code] = quality_counts.get(code, 0) + int(count)
+            quality_counts[str(code)] = quality_counts.get(str(code), 0) + int(count)
 
-    for name in CORE_TABLES[1:]:
-        frame = pd.read_parquet(core / f"{name}.parquet")
-        if list(frame.columns) != CORE_SCHEMAS[name]:
-            raise AssertionError(f"Unexpected {name} schema")
+    for table_name in CORE_TABLES[1:]:
+        frame = pd.read_parquet(core_root / f"{table_name}.parquet")
+        if list(frame.columns) != CORE_SCHEMAS[table_name]:
+            raise ValueError(f"Unexpected {table_name} schema")
+
     if telemetry_rows != manifest["row_counts"]["telemetry"]:
-        raise AssertionError("Telemetry row count does not match manifest")
-
+        raise ValueError("Telemetry row count does not match the manifest")
     return {
         "telemetry_rows": telemetry_rows,
         "quality_counts": quality_counts,
-        **{name: manifest["row_counts"][name] for name in CORE_TABLES[1:]},
+        **{
+            name: int(manifest["row_counts"][name])
+            for name in CORE_TABLES[1:]
+        },
     }
+
+
+def core_content_hashes(core_root):
+    """Read the sealed logical hashes without opening SPEC-EVAL."""
+
+    return read_json(Path(core_root) / "manifest.json")[
+        "canonical_content_hashes"
+    ]
+
+
+def runtime_probe(core_root):
+    """A deterministic SPEC-CORE-only score used as deployment evidence."""
+
+    totals = []
+    for part in sorted((Path(core_root) / "telemetry").glob("part-*.parquet")):
+        frame = pd.read_parquet(
+            part, columns=["entity_id", "metric_id", "value"]
+        )
+        frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
+        totals.append(
+            frame.groupby(["entity_id", "metric_id"], as_index=False)
+            .agg(value_sum=("value", "sum"), observed=("value", "count"))
+        )
+    combined = pd.concat(totals, ignore_index=True)
+    combined = (
+        combined.groupby(["entity_id", "metric_id"], as_index=False)
+        .agg(value_sum=("value_sum", "sum"), observed=("observed", "sum"))
+    )
+    return canonical_frame_hash(
+        combined, sort_by=["entity_id", "metric_id"]
+    )
+
+
+__all__ = [
+    "CORE_SCHEMAS",
+    "CORE_TABLES",
+    "CORE_VERSION",
+    "EVAL_SCHEMAS",
+    "EVAL_TABLES",
+    "EVAL_VERSION",
+    "PACK_INTERFACE_VERSION",
+    "PACK_METRIC_SCHEMA",
+    "PACK_OBSERVATION_KEYS",
+    "audit_core",
+    "canonical_frame_hash",
+    "core_content_hashes",
+    "empty_table",
+    "finalise_pack",
+    "immutable_directory",
+    "materialise_canonical",
+    "pack_core_hashes",
+    "read_json",
+    "runtime_probe",
+    "sha256_file",
+    "source_record",
+    "validate_pack",
+    "write_json",
+]
