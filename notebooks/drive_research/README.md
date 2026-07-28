@@ -53,12 +53,12 @@ hash-pinned real-well files. It does not use simulated files.
 ### Telecom
 
 1. Run `01A_TELECOM_PACK.ipynb`.
-2. Copy the printed pack path.
-3. In `01B_COMMON_CANONICAL_ADAPTER.ipynb`, set:
+2. Open the **Choose the sector here** cell in
+   `01B_COMMON_CANONICAL_ADAPTER.ipynb`.
+3. Select Telecom:
 
    ```python
-   %env ADAPTER_PACK_ROOT=/content/drive/MyDrive/anomaly_detection/outputs/packs/telecom/telecom_v4_1_full_v1
-   %env CANONICAL_RUN_ID=canonical_v1
+   SECTOR = "telecom"
    ```
 
 4. Run `01B_COMMON_CANONICAL_ADAPTER.ipynb`.
@@ -66,17 +66,18 @@ hash-pinned real-well files. It does not use simulated files.
 ### Petrobras 3W
 
 1. Run `01A_PETROBRAS_3W_PACK.ipynb`.
-2. In `01B_COMMON_CANONICAL_ADAPTER.ipynb`, set:
+2. Open the **Choose the sector here** cell in
+   `01B_COMMON_CANONICAL_ADAPTER.ipynb`.
+3. Select Petrobras 3W:
 
    ```python
-   %env ADAPTER_PACK_ROOT=/content/drive/MyDrive/anomaly_detection/outputs/packs/petrobras_3w/real_well_contract_fixture_v1
-   %env CANONICAL_RUN_ID=canonical_v1
+   SECTOR = "petrobras_3w"
    ```
 
-3. Run the same adapter notebook without changing its code.
+4. Run the same adapter notebook. No translation code changes.
 
 In Colab choose **Runtime → Run all**. Output directories are immutable. Change
-the relevant run ID before repeating a completed run.
+`CANONICAL_RUN_ID` in the sector-switch cell before repeating a completed run.
 
 ## What the notebooks produce
 
