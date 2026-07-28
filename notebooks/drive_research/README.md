@@ -1,199 +1,112 @@
-# Drive research workflow
+# Week 1 research workflow
 
-## What to upload
-
-Create this folder in Google Drive:
+This is the maintained research surface for the sector-agnostic anomaly
+detection project. It contains four notebooks and one small Python file:
 
 ```text
-MyDrive/anomaly_detection/
-├── research/week1/
-│   ├── 00_NATIVE_DATA_EXPLORATION.ipynb
-│   ├── 01_TELECOM_WEEK1_END_TO_END.ipynb
-│   ├── 02_PETROBRAS_3W_CONTRACT_CHALLENGE.ipynb
-│   ├── 03_SECTOR_AGNOSTIC_MODELLING_AND_RANKING.ipynb
-│   └── week1_core.py
-├── Full dataset/
-│   ├── Data/
-│   │   ├── reference_dataset.parquet
-│   │   ├── topology.csv
-│   │   ├── entity_service_windows.csv
-│   │   └── engineering_events.csv              # optional
-│   └── evaluation/
-│       ├── gt_fault_registry.csv
-│       ├── fault_entity_intervals.csv
-│       ├── gt_fault_groups.csv
-│       └── tickets.csv                         # evaluation only
-└── sources/petrobras_3w/2.0.0/raw/3w_dataset_2.0.0/
+research/week1/
+├── 01_TELECOM_WEEK1_END_TO_END.ipynb
+├── 02_PETROBRAS_3W_CONTRACT_CHALLENGE.ipynb
+├── 00_CANONICAL_PROFILE.ipynb
+├── 03_SECTOR_AGNOSTIC_MODELLING_AND_RANKING.ipynb
+└── week1_core.py
+```
+
+The notebook numbers describe responsibilities, not execution order. Run `00`
+after a sector notebook has created canonical data.
+
+## Drive layout
+
+Upload the five maintained files above to:
+
+```text
+MyDrive/anomaly_detection/research/week1/
+```
+
+Keep the telecom source here:
+
+```text
+MyDrive/anomaly_detection/telco_syntetic_data/
+├── reference_dataset.parquet
+├── topology.csv
+├── entity_service_windows.csv
+├── engineering_events.csv
+├── alarms.csv                         # optional operational input
+├── tickets.csv                        # evaluation only
+├── gt_panel.parquet                   # evaluation only
+├── gt_fault_registry.csv              # evaluation only
+├── fault_entity_intervals.csv         # evaluation only
+├── gt_fault_groups.csv                # evaluation only
+├── gt_benign_anomalies.csv            # evaluation only
+└── gt_collection_gaps.parquet         # evaluation only
+```
+
+The updated `reference_dataset.parquet` is the observable panel. It must not
+contain `gt_` columns. The notebooks also accept the corrected folder spelling
+`telco_synthetic_data` and an optional `native/` subfolder.
+
+Keep Petrobras 3W here:
+
+```text
+MyDrive/anomaly_detection/sources/petrobras_3w/2.0.0/raw/
+└── 3w_dataset_2.0.0/
     ├── dataset.ini
     ├── README.md
     ├── LICENSE-CC-BY
     └── 0/ ... 9/
 ```
 
-The telecom source resolver also accepts the files directly under `Full dataset/`.
-It tolerates an evaluation folder whose name has accidental leading/trailing spaces,
-but renaming it to `evaluation` is clearer.
-
-Do not upload datasets to GitHub. The notebooks read data from Drive and write all
-materialised data, reports, model scores, and ranked incidents back to Drive.
-
-## Why the large data stays Parquet
-
-Canonical telemetry and anomaly scores are written only as Parquet because Parquet
-preserves types, compresses efficiently, and supports column-level reads. The telecom
-panel can reach roughly 69 million canonical rows, while the three-file 3W challenge
-produces more than eight million. A duplicate CSV export would add substantial Drive
-space and I/O without helping the model.
-
-Large outputs therefore look like:
-
-```text
-SPEC-CORE/
-├── telemetry/
-│   ├── part-00000.parquet
-│   └── part-00001.parquet
-├── metric_catalogue.parquet
-├── entity_registry.parquet
-└── ...
-```
-
-Notebook 03 additionally writes the small operator-facing
-`ranked_incidents.csv`. This is intentionally a summary rather than a second copy of
-the underlying dataset.
+Do not upload the datasets to GitHub. Data and materialised outputs stay on
+Drive. GitHub is for the notebooks, `week1_core.py`, documentation and tests.
 
 ## Run order
 
-### 0. Explore the native data
+### Telecom
 
-Open `00_NATIVE_DATA_EXPLORATION.ipynb` first and choose
-**Runtime → Run all**. It defaults to telecom.
+1. `01_TELECOM_WEEK1_END_TO_END.ipynb`
+2. `00_CANONICAL_PROFILE.ipynb`
+3. `03_SECTOR_AGNOSTIC_MODELLING_AND_RANKING.ipynb`
 
-Notebook 00 is deliberately limited to data exploration and statistical assessment:
+### Petrobras 3W
 
-1. Counts files, observations, entities, fields, date ranges and instance lengths.
-2. Prints every feature with its meaning, unit, physical type and statistical type.
-3. Shows first rows, deterministic random rows and one complete observation
-   vertically.
-4. Uses exact Parquet metadata to count missing and frozen variables where possible.
-5. Calculates counts, missingness, zeros, mean, standard deviation, robust
-   quantiles, IQR, median absolute deviation, moment skew and Bowley skew.
-6. Plots feature distributions without modifying the underlying values.
-7. Loads complete selected histories and plots the measurements and labels over
-   time.
-8. Measures cadence, duration, duplicate timestamps, gaps and regular-grid coverage.
-9. Reports exact-lag autocorrelations, Theil–Sen trends, periodogram peaks, ADF
-   statistics and KPSS statistics on contiguous observed segments.
-10. Compares pooled Spearman dependence with dependence after first differencing.
-11. Counts labels and continuous label periods.
-12. For 3W, identifies exactly which real instances satisfy the anomaly-detection
-    benchmark in Vargas et al. (2019).
+1. `02_PETROBRAS_3W_CONTRACT_CHALLENGE.ipynb`
+2. Set `PROFILE_SECTOR=petrobras_3w`, then run
+   `00_CANONICAL_PROFILE.ipynb`
+3. Set `MODEL_SECTOR=petrobras_3w`, then run
+   `03_SECTOR_AGNOSTIC_MODELLING_AND_RANKING.ipynb`
 
-It does not fit a detector, create train/test folds, select thresholds, define
-holdouts, score alerts, write a decision register or make product interpretations.
+In Colab, open a notebook and choose **Runtime → Run all**. Existing run
+directories are immutable. Change the relevant run ID before repeating a
+completed run.
 
-Default telecom output:
+## What each notebook does
 
-```text
-MyDrive/anomaly_detection/outputs/exploration/telecom/<timestamped_run_id>/
-├── eda_report.json
-├── dataset_dimensions.csv
-├── source_inventory.csv
-├── feature_dictionary.csv
-├── sample_manifest.csv
-├── descriptive_statistics.csv
-├── variable_quality.csv
-├── series_variable_quality.csv
-├── temporal_summary.csv
-├── autocorrelation_summary.csv
-├── trend_summary.csv
-├── spectrum_summary.csv
-├── stationarity_tests.csv
-├── correlation_pooled_spearman.csv
-├── correlation_first_difference_spearman.csv
-├── label_distribution.csv
-├── label_periods_selected_series.csv
-└── figures/
-```
+### 01 — Telecom contract, translation and truth lock
 
-Dataset dimensions and Parquet-metadata counts are exact. Distribution statistics
-come from the bounded sample whose composition is stored in `sample_manifest.csv`.
-Time-series statistics use the complete histories listed in
-`complete_series_manifest.csv`.
+Notebook 01 is the Telecom Pack and adapter workbench. It:
 
-Useful telecom controls:
+- defines the neutral `SPEC-CORE` and `SPEC-EVAL` contracts;
+- defines telecom metric meanings, entity types and relations;
+- converts the v4.1 wide panel into canonical long telemetry in batches;
+- maps native nulls to `quality_code=invalid`;
+- maps FEC values at the generator ceiling to `quality_code=clipped`;
+- calculates source-faithful FEC and CRC exposure;
+- converts engineering events and alarms into operational events;
+- routes tickets and all ground truth to `SPEC-EVAL`;
+- hash-pins every source file used in `source_manifest.json`;
+- proves that original and truth-redacted native inputs produce identical
+  canonical content;
+- proves that a deliberately leaky translator fails the isolation harness.
 
-```python
-%env EDA_SECTOR=telecom
-%env EDA_SAMPLE_ROWS=200000
-%env EDA_SERIES_COUNT=4
-%env EDA_FOCUS_FEATURES=rx_power_dbm,temperature_c,ber,fec_count,crc_errors,throughput_mbps
-```
-
-To inspect Petrobras 3W instead:
-
-```python
-%env EDA_SECTOR=petrobras_3w
-%env EDA_THREEW_SAMPLE_FILES=30
-%env EDA_THREEW_ROWS_PER_FILE=5000
-%env EDA_SERIES_COUNT=4
-%env EDA_FULL_LABEL_SCAN=1
-```
-
-The 3W exact inventory counts all real, simulated and hand-drawn files separately.
-Numerical feature statistics use a stratified bounded sample of real `WELL-`
-instances because the 2019 anomaly-detection benchmark is defined on real instances.
-Simulated and hand-drawn instances remain visible in the exact inventory and label
-counts.
-
-For the downloaded 3W 2.0.0 source, the notebook reproduces the exact totals
-published in the [3W 2.0.0 data paper](https://arxiv.org/abs/2507.01048):
-41,109 completely missing variables, 6,095 fully observed frozen variables and
-4,028,400 unlabeled observations. It also writes:
+Example:
 
 ```text
-threew_anomaly_benchmark_protocol.csv
-threew_anomaly_benchmark_eligibility.csv
-threew_anomaly_benchmark_summary.csv
-```
-
-The strict [2019 anomaly-detection benchmark](https://doi.org/10.1016/j.petrol.2019.106223)
-uses real event types 1, 2, 5, 6, 7 and 8 with at least one continuous normal
-period of 20 minutes. Event type 9 was introduced later in 3W 2.0.0, so the notebook
-reports it separately as an extension rather than silently changing the original
-benchmark.
-
-### 1. Telecom contract and locked truth
-
-Open `01_TELECOM_WEEK1_END_TO_END.ipynb` in Colab and choose **Runtime → Run all**.
-
-Step by step, it:
-
-1. Mounts Drive and imports only the settled mechanics from `week1_core.py`.
-2. Defines the neutral `SPEC-CORE` and `SPEC-EVAL` table contracts in visible cells.
-3. Defines the Telecom Pack: metric meanings, entity hierarchy, geographic relation,
-   measurement kinds, directions, bounds, censoring and exposure provenance.
-4. Discovers the native panel, topology, service windows and evaluation files.
-5. Converts native wide telemetry to canonical long telemetry in bounded batches.
-6. Writes every canonical table as partitioned Parquet.
-7. Applies value-quality rules: native null becomes `invalid`; FEC at or above
-   5,000,000 becomes `clipped`.
-8. Calculates constant FEC bit opportunities and throughput-derived, varying CRC
-   frame opportunities.
-9. Stores tickets, fault IDs, true intervals and causes only in `SPEC-EVAL`.
-10. Translates an original and a truth-redacted fixture and proves their canonical
-    `SPEC-CORE` hashes are identical.
-11. Injects a deliberate timestamp leak and proves the negative control detects it.
-12. Saves the workflow, lineage and acceptance reports.
-
-Example translation:
-
-```text
-Native:
+native:
 timestamp_utc=2026-01-01T00:00Z
 ont_id=ONT-00001
 rx_power_dbm=-22.4
 
-Canonical telemetry:
+canonical:
 event_ts=2026-01-01T00:00Z
 entity_id=ONT-00001
 metric_id=telecom.optical.rx_power
@@ -201,18 +114,18 @@ value=-22.4
 quality_code=measured
 ```
 
-A native `gt_fault_id` on the same source row is not copied into canonical telemetry;
-it is routed to `SPEC-EVAL`.
-
 Default output:
 
 ```text
-MyDrive/anomaly_detection/outputs/research/v0.3.0/telecom/telecom_full_v1/
+outputs/research/v0.3.0/telecom/telecom_v4_1_full_v1/
+├── SPEC-CORE/
+├── SPEC-EVAL/
+├── source_manifest.json
+├── workflow_report.json
+└── acceptance_report.json
 ```
 
-Outputs are immutable. Change `TELECOM_RUN_ID` before rerunning a completed run.
-
-For development, set environment variables before running:
+For a quick development run, set a small entity/time slice and a new run ID:
 
 ```python
 %env TELECOM_ENTITY_IDS=ONT-00001,ONT-00002
@@ -221,107 +134,95 @@ For development, set environment variables before running:
 %env TELECOM_RUN_ID=telecom_debug_v1
 ```
 
-Leave entity IDs and time limits empty for the final materialisation.
+Leave the filters empty for the final materialisation.
 
-### 2. Petrobras 3W contract challenge
+### 02 — Petrobras 3W contract challenge
 
-Open `02_PETROBRAS_3W_CONTRACT_CHALLENGE.ipynb` and choose **Run all**.
+Notebook 02 is not a second model. It tests whether the supposedly neutral
+contract works outside telecom. It:
 
-Step by step, it:
+- verifies the official 3W 2.0.0 source inventory;
+- defines the OilWell Pack;
+- selects the smallest real-well fixture satisfying the coverage criteria;
+- hash-pins the selected source files;
+- converts native measurements into the same canonical telemetry schema;
+- keeps native `class` and `state` out of `SPEC-CORE`;
+- writes event truth and condition-state truth to `SPEC-EVAL`;
+- records facts the adapter could not express without invention.
 
-1. Verifies dataset version 2.0.0, directories `0`–`9`, and 2,228 event instances.
-2. Defines the OilWell Pack for 27 state, opening, pressure, flow and temperature
-   measurements.
-3. Selects a deterministic three-real-well fixture covering normal operation, a
-   persistent condition, a transient event, a state transition and missing values.
-4. Hash-pins the selected source files.
-5. Converts the 297,590 selected native wide rows into 8,034,930 canonical long
-   telemetry rows in 5,000-row native batches.
-6. Writes all canonical tables as partitioned Parquet.
-7. Removes native `class` and `state` from `SPEC-CORE`.
-8. Converts `class` to event truth and `state` to condition-interval truth in
-   `SPEC-EVAL`.
-9. Proves empty relations, tickets and operational events are accepted instead of
-   inventing facts absent from 3W.
-10. Writes `contract_fit_report.json`, recording what the source cannot represent.
-
-Example translation:
-
-```text
-Native:
-entity inferred from file = WELL-00014
-P-ANULAR = 7,100,000
-class = 3
-
-SPEC-CORE:
-entity_id=WELL-00014
-metric_id=oil_well.pressure.p_anular
-value=7100000
-
-SPEC-EVAL:
-event code 3 = Severe Slugging
-```
+It does not invent topology, tickets, operating events or severity. Empty
+canonical tables are valid when the source does not contain those facts.
 
 Default output:
 
 ```text
-MyDrive/anomaly_detection/outputs/research/v0.3.0/petrobras_3w/contract_challenge_v1/
+outputs/research/v0.3.0/petrobras_3w/contract_challenge_v1/
 ```
 
-It also copies the selected, hash-pinned fixture by default. Set
-`COPY_PINNED_FIXTURE=0` if Drive space is tight.
+### 00 — Canonical statistical profile
 
-### 3. Model and rank incidents
+Notebook 00 runs only after canonical materialisation. The same notebook
+profiles telecom or Petrobras because it sees canonical names and measurement
+kinds, not native source columns.
 
-Open `03_SECTOR_AGNOSTIC_MODELLING_AND_RANKING.ipynb` and choose **Run all**.
+It:
 
-Step by step, it:
+- opens `SPEC-CORE` only and verifies the truth box was not read;
+- chooses a deterministic bounded entity sample;
+- freezes the first 40% of each selected history as pre-label evidence;
+- displays canonical fields, units, sampling semantics and catalogue meaning;
+- quantifies coverage, missing values, clipping, constant runs and degenerate
+  series;
+- computes robust distributions and between/within-entity variation;
+- recommends only measurement-kind transformations;
+- plots representative series, rolling median/IQR and level/difference
+  correlations;
+- tests pack-declared candidate periods on complete regular segments;
+- uses robust STL and ACF/PACF as descriptive evidence.
 
-1. Reads only `SPEC-CORE`; evaluation truth is not loaded.
-2. Selects a small entity slice for rapid model iteration.
-3. Transforms values from neutral catalogue semantics: gauges remain values,
-   interval counts become log rates when exposure exists, cumulative counters
-   become reset-safe increments, and zero-inflated bounded values use a log hurdle.
-4. Builds a shifted, history-only rolling median and robust scale for every
-   entity-metric series. The current observation is never in its own baseline.
-5. Gives every entity its own early calibration window. This matters for historical
-   fixtures such as 3W whose well records occur in different years.
-6. Learns a truth-free raw-score threshold per metric from those calibration
-   windows, then converts raw deviations to comparable calibrated scores.
-7. Saves scores, calibration windows, thresholds, and metric diagnostics before
-   evaluation truth is read.
-8. Groups point alerts into adjacent episodes at their operational domain. For
-   telecom, two anomalous ONTs served by the same L2 splitter can become one
-   shared-domain episode.
-9. Rejects weak isolated episodes unless they are persistent, affect multiple
-   entities, affect multiple metrics, or are far above their calibrated threshold.
-10. Ranks eligible episodes and applies an explicit daily incident budget. Rejected
-    candidates remain inspectable rather than disappearing.
-11. Saves `ranked_incidents.parquet` and the small operator-friendly
-    `ranked_incidents.csv`.
-12. Only after all model outputs are frozen, reads `SPEC-EVAL` and compares incident
-    recall before and after the daily budget, truth-overlap fraction, condition
-    coverage, and lead time.
+It deliberately does not choose anomaly thresholds, remove seasonality
+automatically, inspect labels or decide that an extreme value is a fault.
 
-Example:
+Default profile output:
 
 ```text
-ONT-00001: abnormal receive power at 10:00
-ONT-00002: abnormal receive power at 10:00
-Both are served by L2-001
-
-Result:
-one ranked incident for L2-001
-affected_entity_count=2
-anomalous_metric_count=1
+outputs/research/v0.3.0/profiles/<sector>/<core_run_id>/
+├── metric_profile.parquet
+├── series_quality.parquet
+├── decomposition_evidence.parquet
+├── profile_windows.parquet
+├── profile_manifest.json
+└── figures/
 ```
 
-It defaults to the telecom core run and 20 entities for quick iteration. The output
-is:
+The default profile uses eight entities. Change `PROFILE_ENTITY_LIMIT` for
+broader evidence; do not change `PROFILE_FRACTION` without also changing the
+model calibration fraction.
+
+### 03 — Baseline model and ranked incidents
+
+Notebook 03 is real baseline modelling. It:
+
+- verifies that Notebook 00 profiled the same immutable `SPEC-CORE`;
+- verifies the profile was label-free;
+- applies the profile's neutral, measurement-kind transformations;
+- builds shifted rolling-median and robust-scale baselines;
+- calibrates metric thresholds on the early 40% of each entity's history;
+- scores the later period without reading truth;
+- groups point alerts into persistent operational episodes;
+- ranks incidents and applies an explicit daily workload budget;
+- freezes all model artifacts;
+- only then opens `SPEC-EVAL` for offline evaluation.
+
+The profile does not tune the model. It provides auditable statistical
+evidence. The baseline remains intentionally simple so later seasonal,
+multivariate or topology-aware challengers have an honest reference.
+
+Default model output:
 
 ```text
-MyDrive/anomaly_detection/outputs/research/v0.3.0/models/telecom/
-└── telecom_episode_baseline_v2/
+outputs/research/v0.3.0/models/telecom/
+└── telecom_episode_baseline_v3/
     ├── anomaly_scores.parquet
     ├── calibration_windows.parquet
     ├── calibration_thresholds.parquet
@@ -333,90 +234,54 @@ MyDrive/anomaly_detection/outputs/research/v0.3.0/models/telecom/
     └── offline_evaluation.json
 ```
 
-Do not start with `MODEL_ENTITY_LIMIT=0` on the full telecom run: the current research
-model combines selected telemetry in memory. Increase the entity count gradually
-until the ranking logic is accepted; full-population scoring is the next streaming
-engineering step.
+Start with the default 20 entities. The notebook currently combines the
+selected slice in memory, so increase `MODEL_ENTITY_LIMIT` gradually rather
+than starting with `0` (all entities).
 
-The most useful controls are:
+## What is unified and what changes by sector
 
-- `MODEL_ENTITY_LIMIT` — defaults to 20; `0` means every entity.
-- `MODEL_HISTORY` and `MODEL_MIN_HISTORY` — rolling history lengths in native
-  observations.
-- `MODEL_CALIBRATION_FRACTION` — early fraction of each entity's history used only
-  to set thresholds.
-- `MODEL_POINT_QUANTILE` — desired high calibration-score quantile.
-- `MODEL_MIN_RAW_THRESHOLD` — safety floor when a calibration distribution is
-  degenerate.
-- `MODEL_MIN_EPISODE_BUCKETS` and `MODEL_HIGH_CONFIDENCE_RATIO` — evidence required
-  for an episode to become an incident.
-- `MODEL_MAX_INCIDENTS_PER_DAY` — the explicit operator workload budget; `0`
-  disables it.
+Unified:
 
-Use a new `MODEL_RUN_ID` whenever a control changes. Existing output directories are
-immutable by design.
+- canonical telemetry and entity schemas;
+- measurement-kind vocabulary;
+- quality codes and truth isolation;
+- profile calculations;
+- baseline scoring, calibration, episode formation and ranking;
+- evaluation boundary.
 
-To model Petrobras instead:
+Sector-specific:
 
-```python
-%env MODEL_SECTOR=petrobras_3w
-%env MODEL_CORE_RUN_ROOT=/content/drive/MyDrive/anomaly_detection/outputs/research/v0.3.0/petrobras_3w/contract_challenge_v1
-%env MODEL_RUN_ID=petrobras_episode_baseline_v2
-```
+- native file discovery and field mapping;
+- metric catalogue, units, bounds and sampling semantics;
+- entity types and known relations;
+- exposure formulas;
+- interpretation of native labels into evaluation truth.
 
-The scoring and ranking cells read only `SPEC-CORE` and save every model artifact
-before the evaluation cell reads `SPEC-EVAL`. `SPEC-EVAL` is therefore a scorecard,
-not a feature source or threshold-tuning source.
+For a new sector, create a new adapter/pack notebook like Notebook 02. Do not
+copy or edit the canonical profiler or model unless the new sector exposes a
+real contract limitation. Record anything the source cannot express instead
+of manufacturing facts to make the adapter look complete.
 
-`ranked_incidents.csv` is the review table. `candidate_episodes.parquet` explains
-what was rejected or removed by the daily budget. `model_diagnostics.parquet`
-reveals which metrics dominate the alert stream. These two diagnostic files are
-usually where you look first when the ranked list is noisy.
+## Why `week1_core.py` remains
 
-## What happens after the four notebooks
+The notebooks contain decisions that are still under research. The one flat
+Python file contains settled mechanics where duplication can create silent
+scientific errors: batch translation, exposure arithmetic, clipping, canonical
+hashing, truth routing and deterministic 3W selection.
 
-The immediate next step is not packaging. It is to validate whether the ranked list
-matches real operational decisions.
+There is no package, CLI, release process or notebook generator. Those belong
+later, when the ranked incident list is useful and more than one person needs
+to operate the workflow.
 
-1. **Review the top 20–50 telecom incidents.** For each row, record: investigate,
-   suppress, merge with another incident, or missing context.
-2. **Fix the unit of work.** Decide whether an operator acts on an ONT, splitter,
-   service, geographic cluster or a correlated group.
-3. **Freeze the first evaluation protocol.** Use chronological train/calibration/test
-   periods and read `SPEC-EVAL` only after scores are frozen.
-4. **Compare honest baselines.** Include persistence, robust univariate rules and
-   topology grouping. The generator is sufficient when a competent baseline is
-   neither trivially perfect nor useless.
-5. **Improve the model only where operator review identifies value.** Likely areas
-   are seasonal baselines, cross-metric evidence, topology propagation and incident
-   merging.
-6. **Scale scoring after the ranking definition stabilises.** Replace Notebook 03's
-   in-memory entity slice with partition-by-entity or partition-by-time scoring.
-7. **Bring in engineering support later.** Package, schedule, monitor and deploy only
-   after the incident list is useful and another person needs to operate the workflow.
+## Next step after Week 1
 
-The exit artifact for this research stage is therefore not “a trained model.” It is
-a reproducible ranked incident list plus documented operator feedback explaining
-which rankings are useful and why.
+Review the top 20–50 rows of `ranked_incidents.csv` with someone who understands
+the operational setting. Record whether each row should be investigated,
+suppressed, merged or enriched with missing context. This determines the true
+unit of work and evaluation cost.
 
-## What you should edit
-
-Edit notebook cells when you are still reasoning about:
-
-- contract fields;
-- sector mappings;
-- acceptance assertions;
-- measurement transformations;
-- model design;
-- incident grouping and ranking.
-
-Do not copy the exposure, FEC clipping, canonical hashing, truth routing, batch
-materialisation, or 3W selection functions into notebook cells. Those settled
-mechanics have one implementation in `week1_core.py`.
-
-## When to bring back engineering infrastructure
-
-Add a package, CLI, orchestration, CI, or release process only after the ranked
-incident output is useful to an operator and more than one person needs to change or
-run the pipeline. Until then, the five Drive files are the maintained research
-surface.
+Then compare focused challengers against the frozen baseline: seasonal
+baselines where the canonical profile supports them, count models for interval
+counts, multivariate evidence, and topology-aware propagation. Judge them at
+incident level using recall, lead time and operator workload—not point-level
+accuracy alone.

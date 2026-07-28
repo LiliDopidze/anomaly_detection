@@ -5,18 +5,18 @@ one data scientist validating the product idea—not a premature production pack
 
 There are four notebooks and one shared Python file:
 
-0. `00_NATIVE_DATA_EXPLORATION.ipynb` — displays the native data and performs
-   descriptive, data-quality, dependence and time-series assessments before any
-   translation or modelling.
 1. `01_TELECOM_WEEK1_END_TO_END.ipynb` — defines the neutral contract and Telecom
    Pack, translates the synthetic source, and proves evaluation truth is isolated.
 2. `02_PETROBRAS_3W_CONTRACT_CHALLENGE.ipynb` — tests the same contract with a
    second sector and records what the public source cannot express.
-3. `03_SECTOR_AGNOSTIC_MODELLING_AND_RANKING.ipynb` — calibrates a truth-free
+3. `00_CANONICAL_PROFILE.ipynb` — profiles the early, label-free portion of either
+   canonical sector using robust distributions, quality diagnostics and
+   time-series evidence.
+4. `03_SECTOR_AGNOSTIC_MODELLING_AND_RANKING.ipynb` — calibrates a truth-free
    statistical baseline, forms persistent cross-signal episodes, applies an
    explicit alert budget, and creates the operator-facing
    `ranked_incidents.csv`.
-4. `week1_core.py` — only the settled mechanics where a silent copy error would
+5. `week1_core.py` — only the settled mechanics where a silent copy error would
    invalidate the experiment: exposure, clipping, batching, canonical hashing,
    truth routing, and the verified 3W selector.
 
@@ -24,11 +24,13 @@ The contract, sector mappings, assertions, modelling choices, and ranking formul
 remain visible in notebook execution order.
 
 ```text
-native data ──> Notebook 00 ──> Notebook 01 or 02 ──> SPEC-CORE
-                factual EDA             │                  │
-                                        └──> SPEC-EVAL     └──> Notebook 03
-                                               locked             │
-                                                                  └──> ranked incidents
+native data ──> Notebook 01 or 02 ──> SPEC-CORE ──> Notebook 00
+                         │                               │
+                         └──> SPEC-EVAL                  │ label-free profile
+                                locked                   v
+                                                   Notebook 03
+                                                        │
+                                                        └──> ranked incidents
 ```
 
 Datasets and outputs stay in Google Drive and are not committed to Git. See the

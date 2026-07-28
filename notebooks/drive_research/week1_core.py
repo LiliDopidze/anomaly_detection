@@ -29,7 +29,7 @@ import pyarrow.parquet as pq
 
 CORE_VERSION = "0.3.0"
 EVAL_VERSION = "0.3.0"
-TELECOM_SOURCE_ID = "telemetry-synth-4.0.1"
+TELECOM_SOURCE_ID = "telemetry-synth-4.1.0"
 THREEW_SOURCE_ID = "petrobras-3w-2.0.0"
 FEC_CEILING = 5_000_000
 
@@ -474,7 +474,10 @@ def build_entity_relations(
     )
 
 
-def build_operational_events(engineering_events: pd.DataFrame | None) -> pd.DataFrame:
+def build_operational_events(
+    engineering_events: pd.DataFrame | None,
+    alarms: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     columns = (
         "event_id",
         "entity_id",
@@ -485,29 +488,51 @@ def build_operational_events(engineering_events: pd.DataFrame | None) -> pd.Data
         "attributes_json",
         "source",
     )
-    if engineering_events is None or not len(engineering_events):
-        return _empty(columns)
     rows = []
-    for record in engineering_events.to_dict(orient="records"):
-        rows.append(
-            {
-                "event_id": _stable_id(
-                    "ENG",
-                    record.get("entity_id"),
-                    record.get("ts"),
-                    record.get("event_type"),
-                ),
-                "entity_id": str(record["entity_id"]),
-                "event_type": str(record["event_type"]),
-                "event_start": record["ts"],
-                "event_end": pd.NaT,
-                "known_at": record["ts"],
-                "attributes_json": _attributes_json(
-                    record, ("level_change_db", "detail")
-                ),
-                "source": TELECOM_SOURCE_ID,
-            }
-        )
+    if engineering_events is not None:
+        for record in engineering_events.to_dict(orient="records"):
+            rows.append(
+                {
+                    "event_id": _stable_id(
+                        "ENG",
+                        record.get("entity_id"),
+                        record.get("ts"),
+                        record.get("event_type"),
+                    ),
+                    "entity_id": str(record["entity_id"]),
+                    "event_type": str(record["event_type"]),
+                    "event_start": record["ts"],
+                    "event_end": pd.NaT,
+                    "known_at": record["ts"],
+                    "attributes_json": _attributes_json(
+                        record, ("level_change_db", "detail")
+                    ),
+                    "source": TELECOM_SOURCE_ID,
+                }
+            )
+    if alarms is not None:
+        for record in alarms.to_dict(orient="records"):
+            rows.append(
+                {
+                    "event_id": _stable_id(
+                        "ALARM",
+                        record.get("entity_id"),
+                        record.get("raised_ts"),
+                        record.get("alarm_type"),
+                    ),
+                    "entity_id": str(record["entity_id"]),
+                    "event_type": f"alarm.{record['alarm_type']}",
+                    "event_start": record["raised_ts"],
+                    "event_end": record.get("cleared_ts"),
+                    "known_at": record["raised_ts"],
+                    "attributes_json": _attributes_json(
+                        record, ("duration_samples",)
+                    ),
+                    "source": TELECOM_SOURCE_ID,
+                }
+            )
+    if not rows:
+        return _empty(columns)
     return (
         pd.DataFrame(rows, columns=columns)
         .sort_values(["event_start", "event_id"], kind="stable")
@@ -762,6 +787,15 @@ def materialise_telecom(
         if engineering_file is not None
         else None
     )
+    alarm_file = native_path(source, "alarms.csv", required=False)
+    alarms = (
+        pd.read_csv(
+            alarm_file,
+            parse_dates=["raised_ts", "cleared_ts"],
+        )
+        if alarm_file is not None
+        else None
+    )
     panel_file = pq.ParquetFile(native_path(source, "reference_dataset.parquet"))
     native_columns = set(panel_file.schema_arrow.names)
     available_metrics = [
@@ -794,6 +828,10 @@ def materialise_telecom(
         engineering = engineering.loc[
             engineering["entity_id"].astype(str).isin(graph_entities)
         ].copy()
+    if alarms is not None:
+        alarms = alarms.loc[
+            alarms["entity_id"].astype(str).isin(selected_entities)
+        ].copy()
     catalogue = metric_catalogue.loc[
         metric_catalogue["native_field"].isin(available_metrics)
     ].copy()
@@ -803,7 +841,7 @@ def materialise_telecom(
         "entity_relations": build_entity_relations(
             topology, windows, relation_mappings
         ),
-        "operational_events": build_operational_events(engineering),
+        "operational_events": build_operational_events(engineering, alarms),
         "collection_gaps": build_collection_gaps(
             presence, windows, selection, cadence=cadence
         ),
@@ -873,6 +911,7 @@ def materialise_telecom(
             },
             "entity_validity_stored_once": True,
             "tickets_excluded_from_core": True,
+            "alarms_included_as_operational_events": alarms is not None,
             "collection_gap_algorithm": "consecutive differences and run compression",
         },
     )
@@ -946,6 +985,50 @@ def materialise_telecom(
             eval_bundle, evaluation_root, contract_version=EVAL_VERSION
         )
 
+    source_specification = [
+        ("reference_dataset.parquet", False, True),
+        ("topology.csv", False, True),
+        ("entity_service_windows.csv", False, True),
+        ("engineering_events.csv", False, False),
+        ("alarms.csv", False, False),
+    ]
+    if include_evaluation:
+        source_specification.extend([
+            ("gt_fault_registry.csv", True, True),
+            ("fault_entity_intervals.csv", True, True),
+            ("gt_fault_groups.csv", True, True),
+            ("tickets.csv", True, False),
+            ("gt_benign_anomalies.csv", True, False),
+            ("gt_collection_gaps.parquet", True, False),
+        ])
+    source_files = []
+    for filename, evaluation_file, required in source_specification:
+        path = native_path(
+            source,
+            filename,
+            evaluation=evaluation_file,
+            required=required,
+        )
+        if path is None:
+            continue
+        try:
+            relative_path = str(path.relative_to(source))
+        except ValueError:
+            relative_path = str(path)
+        source_files.append({
+            "relative_path": relative_path,
+            "bytes": path.stat().st_size,
+            "sha256": sha256_file(path),
+            "evaluation_only": evaluation_file,
+        })
+    source_manifest = {
+        "source_id": TELECOM_SOURCE_ID,
+        "source_root": str(source),
+        "include_evaluation": include_evaluation,
+        "files": source_files,
+    }
+    write_json(run_root / "source_manifest.json", source_manifest)
+
     stored_bytes = sum(path.stat().st_size for path in telemetry_dir.glob("*.parquet"))
     report = {
         "workflow": "telecom_materialisation",
@@ -954,6 +1037,7 @@ def materialise_telecom(
         "run_root": str(run_root),
         "core_manifest": core_manifest,
         "evaluation_manifest": eval_manifest,
+        "source_manifest": "source_manifest.json",
         "memory": {
             "peak_observed_rss_gib": peak_rss,
             "scope": "fresh notebook process sampled after each physical batch",
@@ -1490,6 +1574,7 @@ def materialise_threew(
             **{name: canonical_frame_hash(frame) for name, frame in sidecars.items()},
         },
         "physical_telemetry_batch_native_rows": THREEW_BATCH_NATIVE_ROWS,
+        "cadence_seconds": 1.0,
         "truth_columns_removed": ["class", "state"],
     }
     write_json(core / "manifest.json", core_manifest)
