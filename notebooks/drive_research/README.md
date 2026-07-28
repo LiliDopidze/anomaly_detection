@@ -79,6 +79,12 @@ hash-pinned real-well files. It does not use simulated files.
 In Colab choose **Runtime → Run all**. Output directories are immutable. Change
 `CANONICAL_RUN_ID` in the sector-switch cell before repeating a completed run.
 
+The final `01B` section inventories every generated file, prints every JSON
+manifest/report, and previews every Parquet output. Partitioned observations
+and telemetry are summarized by schema, total rows, and first/last samples
+instead of printing millions of rows. This inspection is Week 1 contract QA;
+the later canonical EDA must still read `SPEC-CORE` only.
+
 ## What the notebooks produce
 
 Each sector notebook writes:
