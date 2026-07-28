@@ -1,16 +1,17 @@
 # Week 1 Drive workflow
 
-Upload these four maintained files to:
+Upload these five maintained files to:
 
 ```text
 MyDrive/anomaly_detection/research/week1/
 ├── 01A_TELECOM_PACK.ipynb
 ├── 01A_PETROBRAS_3W_PACK.ipynb
 ├── 01B_COMMON_CANONICAL_ADAPTER.ipynb
+├── 02_CANONICAL_EDA.ipynb
 └── week1_core.py
 ```
 
-The three notebooks are the visible research flow. `week1_core.py` is one flat
+The four notebooks are the visible research flow. `week1_core.py` is one flat
 helper file containing only shared mechanics whose silent duplication would
 invalidate the experiment.
 
@@ -62,6 +63,9 @@ hash-pinned real-well files. It does not use simulated files.
    ```
 
 4. Run `01B_COMMON_CANONICAL_ADAPTER.ipynb`.
+5. In `02_CANONICAL_EDA.ipynb`, choose `SECTOR = "telecom"` and enter the
+   canonical run ID written by `01B`.
+6. Run `02_CANONICAL_EDA.ipynb`.
 
 ### Petrobras 3W
 
@@ -75,15 +79,18 @@ hash-pinned real-well files. It does not use simulated files.
    ```
 
 4. Run the same adapter notebook. No translation code changes.
+5. In `02_CANONICAL_EDA.ipynb`, choose `SECTOR = "petrobras_3w"` and enter the
+   canonical run ID written by `01B`.
+6. Run the same EDA notebook. No analysis code changes.
 
 In Colab choose **Runtime → Run all**. Output directories are immutable. Change
-`CANONICAL_RUN_ID` in the sector-switch cell before repeating a completed run.
+the relevant pack, canonical, or EDA run ID before repeating a completed stage.
 
 The final `01B` section inventories every generated file, prints every JSON
 manifest/report, and previews every Parquet output. Partitioned observations
 and telemetry are summarized by schema, total rows, and first/last samples
 instead of printing millions of rows. This inspection is Week 1 contract QA;
-the later canonical EDA must still read `SPEC-CORE` only.
+the canonical EDA still reads `SPEC-CORE` only.
 
 If the canonical run already exists and you only want to inspect it, use the
 sector-switch cell:
@@ -129,6 +136,29 @@ outputs/canonical/v0.5.0/<sector>/<canonical_run_id>/
 Later EDA, feature engineering, and models receive only `SPEC-CORE`.
 `SPEC-EVAL` is opened only after model outputs are frozen.
 
+The canonical EDA writes:
+
+```text
+outputs/eda/v0.5.0/<sector>/<eda_run_id>/
+├── analysis_windows.parquet
+├── metric_profile.parquet
+├── series_profile.parquet
+├── temporal_evidence.parquet
+├── seasonality_evidence.parquet
+├── dependence_evidence.parquet
+├── figures/
+└── eda_manifest.json
+```
+
+`02_CANONICAL_EDA.ipynb` first scans all canonical telemetry for structural
+quality. Statistical exploration then uses a deterministic, label-blind
+calibration window: the first 40% of each selected entity's observed time
+range. This is not assumed to be normal data. The notebook profiles
+distributions, missingness, rolling median and IQR, autocorrelation,
+stationarity evidence, gated robust STL decomposition, and cross-metric
+dependence. Its file-access guard records every input and proves that all reads
+remain inside `SPEC-CORE`.
+
 ## What changes for a new sector
 
 Create one new `01A_<SECTOR>_PACK.ipynb`. In that notebook:
@@ -148,11 +178,10 @@ failure first and change the versioned interface deliberately.
 
 ## Next stage
 
-After both Week 1 paths are accepted, create the canonical EDA notebook against
-v0.5.0 `SPEC-CORE` only. The intended order is:
+After the canonical EDA evidence is reviewed, the intended order is:
 
 ```text
-canonical EDA
+review frozen EDA evidence
     ↓
 feature engineering
     ↓
