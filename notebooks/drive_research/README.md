@@ -85,6 +85,14 @@ and telemetry are summarized by schema, total rows, and first/last samples
 instead of printing millions of rows. This inspection is Week 1 contract QA;
 the later canonical EDA must still read `SPEC-CORE` only.
 
+If the canonical run already exists and you only want to inspect it, use the
+sector-switch cell:
+
+```python
+SECTOR = "telecom"       # or "petrobras_3w"
+BUILD_CANONICAL = False  # read the existing canonical run
+```
+
 ## What the notebooks produce
 
 Each sector notebook writes:
