@@ -13,17 +13,17 @@ MyDrive/anomaly_detection/research/milestone1/
 
 The notebooks contain the visible research decisions. `milestone1_core.py` is one
 flat helper file for the small amount of settled logic that must not be copied
-between notebooks: schemas, validation, one content fingerprint, quality coding, canonical
+between notebooks: schemas, validation, one content fingerprint, canonical
 materialisation and isolation probes.
 
 ## Current contracts
 
-- Pack interface: `0.5.0`
-- SPEC-CORE: `0.8.0`
-- SPEC-EVAL: `0.6.0`
+- Pack interface: `0.6.0`
+- SPEC-CORE: `0.9.0`
+- SPEC-EVAL: `0.7.0`
 - Canonical EDA: `0.3.0`
 
-`SPEC-CORE v0.8.0` is the telemetry-only modelling floor:
+`SPEC-CORE v0.9.0` is the telemetry-only modelling floor:
 
 ```text
 telemetry
@@ -33,8 +33,8 @@ observation_episodes
 collection_gaps
 ```
 
-The catalogue declares measurement kind, unit, sampling mode, expected cadence
-when known, bounds and censoring. Entity bounds are derived from observations
+The catalogue declares only measurement kind, unit, sampling mode and expected
+cadence when known. Each sector pack supplies `quality_code` directly. Entity bounds are derived from observations
 available at `as_of_ts`; they are not presented as contractual service windows.
 Every telemetry row also carries an `episode_id`. An episode is one source-
 declared observation run across which time-series differences may be computed.
@@ -45,10 +45,10 @@ Pack observations are long and metric-level: one row means that one metric
 was observed or attempted at that timestamp. Different metrics may therefore
 have different timestamp grids and cadences without a sector branch in the
 common adapter. A null row is an invalid observation; an absent row is not an
-observation and may become a collection gap only when the catalogue declares
-a periodic reporting obligation.
+observation and may become an internal collection gap only between that metric's
+first and last observation when the catalogue declares a periodic obligation.
 
-Faults, condition states and tickets are physically separated in `SPEC-EVAL`.
+Faults and condition states are physically separated in `SPEC-EVAL`.
 A detector reads only `SPEC-CORE` and must run with `SPEC-EVAL` absent. There
 is no `SPEC-CONTEXT` layer in the active telemetry-only workflow.
 
@@ -61,15 +61,17 @@ MyDrive/anomaly_detection/telco_syntetic_data/
 ├── reference_dataset.parquet
 ├── gt_fault_registry.csv
 ├── fault_entity_intervals.csv
-└── tickets.csv
+├── tickets.csv                 # optional; leakage test only
+└── topology.csv                # optional split metadata
 ```
 
 The reference dataset must be the updated observable-only file. It must not
 contain `gt_*`, `class`, `state`, fault, anomaly or label fields. Parquet is
 recommended for the complete panel.
 
-`entity_service_windows.csv` and `engineering_events.csv` are not required or
-read. `topology.csv` is optional and may be used only to derive infrastructure
+Tickets are not translated; when present, the leakage test verifies that removing
+them cannot change model input. `entity_service_windows.csv` and
+`engineering_events.csv` are not read. Topology may only derive infrastructure
 groups in `SPLITS/`; it never enters SPEC-CORE or the detector.
 
 Petrobras 3W:
@@ -118,7 +120,7 @@ the relevant run ID before rebuilding a completed stage.
 - maps Telecom measurements into the authored catalogue;
 - declares one continuous observation episode per ONT;
 - writes observable ONT telemetry to `PACK-CORE`;
-- writes faults, entity intervals and tickets to `PACK-EVAL`;
+- writes fault events and affected-entity intervals to `PACK-EVAL`;
 - writes calibration/development/holdout time ranges to `SPLITS`;
 - optionally derives PON/splitter evaluation groups from topology;
 - proves that deleting evaluation files does not change `PACK-CORE`.
@@ -140,9 +142,9 @@ the relevant run ID before rebuilding a completed stage.
 ### 01B common canonical adapter
 
 - validates either pack through the same code path;
-- creates immutable `SPEC-CORE v0.8.0`;
+- creates immutable `SPEC-CORE v0.9.0`;
 - copies splits and evaluation into separate directories;
-- marks invalid and clipped values;
+- preserves sector-supplied invalid and clipped quality codes;
 - derives observation bounds and per-metric periodic collection gaps;
 - tests one-second and five-second metrics in the same episode, including a
   deliberately missing slow observation;
@@ -182,7 +184,7 @@ outputs/packs/<sector>/<pack_run_id>/
 Canonical runs:
 
 ```text
-outputs/canonical/v0.8.0/<sector>/<canonical_run_id>/
+outputs/canonical/v0.9.0/<sector>/<canonical_run_id>/
 ├── SPEC-CORE/
 ├── SPEC-EVAL/           # optional
 ├── SPLITS/              # orchestration metadata, not model features
@@ -207,7 +209,8 @@ outputs/eda/v0.3.0/<sector>/<eda_run_id>/
 ## Adding another sector
 
 Create one new `01A_<SECTOR>_PACK.ipynb`. It must map native telemetry into the
-Pack v0.5 long metric-level interface, declare observation episodes, route labels to `PACK-EVAL`
+Pack v0.6 long metric-level interface, declare observation episodes, assign
+simple source-quality codes, route labels to `PACK-EVAL`
 and pass the
 original-versus-redacted isolation test.
 

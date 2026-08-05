@@ -27,7 +27,7 @@ SPEC-CORE ──> 02_CANONICAL_EDA.ipynb ──> frozen EDA evidence
   `SPEC-CORE` only. It produces reproducible statistical profiles and figures,
   not anomaly labels or model scores.
 - `milestone1_core.py` contains only settled, shared mechanics: interface
-  validation, immutable materialisation, one content fingerprint, quality codes, gaps,
+  validation, immutable materialisation, one content fingerprint, quality-code checks, gaps,
   episode boundaries and isolation-test support.
 - Datasets and outputs stay in Google Drive. They are not committed to Git.
 
