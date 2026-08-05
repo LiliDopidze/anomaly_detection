@@ -17,7 +17,8 @@ SPEC-CORE ──> 02_CANONICAL_EDA.ipynb ──> frozen EDA evidence
 ```
 
 - Each `01A` notebook owns its native filenames, metric meanings, entity
-  vocabulary, relationships, and label translation.
+  vocabulary and label translation. The active interface is telemetry-only;
+  topology and operational context are not model inputs.
 - `01B_COMMON_CANONICAL_ADAPTER.ipynb` has no sector-specific translation
   branch. It accepts either standardized pack and writes the same canonical
   tables.
