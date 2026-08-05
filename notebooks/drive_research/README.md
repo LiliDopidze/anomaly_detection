@@ -18,23 +18,28 @@ materialisation and isolation probes.
 
 ## Current contracts
 
-- Pack interface: `0.3.0`
-- SPEC-CORE: `0.6.0`
+- Pack interface: `0.4.0`
+- SPEC-CORE: `0.7.0`
 - SPEC-EVAL: `0.6.0`
-- Canonical EDA: `0.2.0`
+- Canonical EDA: `0.3.0`
 
-`SPEC-CORE v0.6.0` is the telemetry-only modelling floor:
+`SPEC-CORE v0.7.0` is the telemetry-only modelling floor:
 
 ```text
 telemetry
 metric_catalogue
 entity_registry
+observation_episodes
 collection_gaps
 ```
 
 The catalogue declares measurement kind, unit, sampling mode, expected cadence
 when known, bounds and censoring. Entity bounds are derived from observations
 available at `as_of_ts`; they are not presented as contractual service windows.
+Every telemetry row also carries an `episode_id`. An episode is one source-
+declared observation run across which time-series differences may be computed.
+It is one continuous stream per Telecom ONT and one source recording per 3W
+file.
 
 Faults, condition states and tickets are physically separated in `SPEC-EVAL`.
 A detector reads only `SPEC-CORE` and must run with `SPEC-EVAL` absent. There
@@ -56,9 +61,9 @@ The reference dataset must be the updated observable-only file. It must not
 contain `gt_*`, `class`, `state`, fault, anomaly or label fields. Parquet is
 recommended for the complete panel.
 
-`topology.csv`, `entity_service_windows.csv` and `engineering_events.csv` are
-not required or read by Pack v0.3. They may remain in the native source folder,
-but they do not enter the active contract, detector or evaluation harness.
+`entity_service_windows.csv` and `engineering_events.csv` are not required or
+read. `topology.csv` is optional and may be used only to derive infrastructure
+groups in `SPLITS/`; it never enters SPEC-CORE or the detector.
 
 Petrobras 3W:
 
@@ -104,13 +109,17 @@ the relevant run ID before rebuilding a completed stage.
 ### 01A Telecom pack
 
 - maps Telecom measurements into the authored catalogue;
+- declares one continuous observation episode per ONT;
 - writes observable ONT telemetry to `PACK-CORE`;
 - writes faults, entity intervals and tickets to `PACK-EVAL`;
+- writes calibration/development/holdout time ranges to `SPLITS`;
+- optionally derives PON/splitter evaluation groups from topology;
 - proves that deleting evaluation files does not change `PACK-CORE`.
 
 ### 01A Petrobras 3W pack
 
 - maps all 27 official measurements;
+- preserves every selected source recording as a distinct episode;
 - identifies real `WELL-*` recordings;
 - creates a deterministic expanded development population;
 - assigns entire wells to calibration, development or holdout;
@@ -121,7 +130,7 @@ the relevant run ID before rebuilding a completed stage.
 ### 01B common canonical adapter
 
 - validates either pack through the same code path;
-- creates immutable `SPEC-CORE v0.6.0`;
+- creates immutable `SPEC-CORE v0.7.0`;
 - copies splits and evaluation into separate directories;
 - marks invalid and clipped values;
 - derives observation bounds and periodic collection gaps;
@@ -135,7 +144,8 @@ the relevant run ID before rebuilding a completed stage.
 - reads `SPEC-CORE` only;
 - performs a full structural audit with a global duplicate check;
 - separates value validity from expected-observation coverage;
-- computes all difference statistics within one entity-metric series;
+- computes all difference statistics within one entity-episode-metric series;
+- prevents differences and rolling statistics from crossing episode boundaries;
 - reports rate distributions across entities rather than misleading pooled
   percentages;
 - plots distributions, missingness, representative series, rolling robust
@@ -161,7 +171,7 @@ outputs/packs/<sector>/<pack_run_id>/
 Canonical runs:
 
 ```text
-outputs/canonical/v0.6.0/<sector>/<canonical_run_id>/
+outputs/canonical/v0.7.0/<sector>/<canonical_run_id>/
 ├── SPEC-CORE/
 ├── SPEC-EVAL/           # optional
 ├── SPLITS/              # orchestration metadata, not model features
@@ -173,7 +183,7 @@ outputs/canonical/v0.6.0/<sector>/<canonical_run_id>/
 EDA evidence:
 
 ```text
-outputs/eda/v0.2.0/<sector>/<eda_run_id>/
+outputs/eda/v0.3.0/<sector>/<eda_run_id>/
 ├── analysis_windows.parquet
 ├── full_series_profile.parquet
 ├── series_profile.parquet
@@ -188,7 +198,8 @@ outputs/eda/v0.2.0/<sector>/<eda_run_id>/
 ## Adding another sector
 
 Create one new `01A_<SECTOR>_PACK.ipynb`. It must map native telemetry into the
-Pack v0.3 interface, route labels to `PACK-EVAL` and pass the
+Pack v0.4 interface, declare observation episodes, route labels to `PACK-EVAL`
+and pass the
 original-versus-redacted isolation test.
 
 Do not add a sector branch to `week1_core.py`, Notebook 01B or Notebook 02. If
@@ -197,7 +208,9 @@ failure before changing the versioned interface.
 
 ## Next stage
 
-After both canonical runs and EDA evidence are reviewed, build
-`03_EVALUATION_HARNESS.ipynb`. The harness comes before feature engineering and
-models so random, constant and leakage-prone detectors can test the evaluation
-rules first.
+Before building `03_EVALUATION_HARNESS.ipynb`, freeze the alert-to-fault
+matching policy and physically separate development truth from final holdout
+truth. The existing `SPLITS` tables provide whole-well, temporal and optional
+infrastructure-group boundaries; they are orchestration metadata, not model
+features. The harness comes before feature engineering and models so random,
+constant and leakage-prone detectors can test the evaluation rules first.
