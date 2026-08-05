@@ -62,7 +62,7 @@ MyDrive/anomaly_detection/telco_syntetic_data/
 ├── gt_fault_registry.csv
 ├── fault_entity_intervals.csv
 ├── tickets.csv                 # optional; leakage test only
-└── topology.csv                # optional split metadata
+└── topology.csv                # required Telecom grouping metadata
 ```
 
 The reference dataset must be the updated observable-only file. It must not
@@ -71,8 +71,12 @@ recommended for the complete panel.
 
 Tickets are not translated; when present, the leakage test verifies that removing
 them cannot change model input. `entity_service_windows.csv` and
-`engineering_events.csv` are not read. Topology may only derive infrastructure
-groups in `SPLITS/`; it never enters SPEC-CORE or the detector.
+`engineering_events.csv` are not read. The Telecom notebook reads only
+`ont_id`, `olt_id`, `pon_port`, `splitter_l1`, `splitter_l2` and `geo_cluster`
+from topology. It writes those memberships to `SPLITS/entity_groups.parquet`;
+topology never enters SPEC-CORE or the detector. Any `gt_*` topology columns
+remain evaluation truth and the isolation test proves they cannot affect the
+approved groups.
 
 Petrobras 3W:
 
@@ -122,8 +126,9 @@ the relevant run ID before rebuilding a completed stage.
 - writes observable ONT telemetry to `PACK-CORE`;
 - writes fault events and affected-entity intervals to `PACK-EVAL`;
 - writes calibration/development/holdout time ranges to `SPLITS`;
-- optionally derives PON/splitter evaluation groups from topology;
-- proves that deleting evaluation files does not change `PACK-CORE`.
+- derives OLT, PON, splitter and geographic groups from topology;
+- proves that deleting evaluation files and topology truth columns changes
+  neither `PACK-CORE` nor the approved topology groups.
 
 ### 01A Petrobras 3W pack
 
@@ -177,7 +182,7 @@ Sector packs:
 outputs/packs/<sector>/<pack_run_id>/
 ├── PACK-CORE/
 ├── PACK-EVAL/           # optional and never read by detector code
-├── SPLITS/              # 3W whole-well partitions
+├── SPLITS/              # time, whole-well or topology groups
 └── pack_manifest.json    # source files, row counts and one fingerprint
 ```
 
@@ -214,6 +219,11 @@ simple source-quality codes, route labels to `PACK-EVAL`
 and pass the
 original-versus-redacted isolation test.
 
+Topology is an optional sector capability, not a universal model requirement.
+When a sector has reliable relationship data, store memberships in `SPLITS`
+for split design, grouped-fault evaluation and incident aggregation. Do not add
+topology columns to telemetry or make the detector depend on them.
+
 Do not add a sector branch to `milestone1_core.py`, Notebook 01B or Notebook 02. If
 a genuine source concept cannot be represented without distortion, record the
 failure before changing the versioned interface.
@@ -222,7 +232,7 @@ failure before changing the versioned interface.
 
 Before building `03_EVALUATION_HARNESS.ipynb`, freeze the alert-to-fault
 matching policy and physically separate development truth from final holdout
-truth. The existing `SPLITS` tables provide whole-well, temporal and optional
+truth. The existing `SPLITS` tables provide whole-well, temporal and available
 infrastructure-group boundaries; they are orchestration metadata, not model
 features. The harness comes before feature engineering and models so random,
 constant and leakage-prone detectors can test the evaluation rules first.
