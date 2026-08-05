@@ -18,7 +18,7 @@ materialisation and isolation probes.
 
 ## Current contracts
 
-- Pack interface: `0.2.0`
+- Pack interface: `0.3.0`
 - SPEC-CORE: `0.6.0`
 - SPEC-EVAL: `0.6.0`
 - Canonical EDA: `0.2.0`
@@ -36,9 +36,9 @@ The catalogue declares measurement kind, unit, sampling mode, expected cadence
 when known, bounds and censoring. Entity bounds are derived from observations
 available at `as_of_ts`; they are not presented as contractual service windows.
 
-Optional topology is physically separated in `SPEC-CONTEXT`. Faults, condition
-states and tickets are physically separated in `SPEC-EVAL`. A detector must be
-able to run with both directories absent.
+Faults, condition states and tickets are physically separated in `SPEC-EVAL`.
+A detector reads only `SPEC-CORE` and must run with `SPEC-EVAL` absent. There
+is no `SPEC-CONTEXT` layer in the active telemetry-only workflow.
 
 ## Native data locations
 
@@ -47,9 +47,6 @@ Telecom:
 ```text
 MyDrive/anomaly_detection/telco_syntetic_data/
 ├── reference_dataset.parquet
-├── topology.csv
-├── entity_service_windows.csv
-├── engineering_events.csv
 ├── gt_fault_registry.csv
 ├── fault_entity_intervals.csv
 └── tickets.csv
@@ -58,6 +55,10 @@ MyDrive/anomaly_detection/telco_syntetic_data/
 The reference dataset must be the updated observable-only file. It must not
 contain `gt_*`, `class`, `state`, fault, anomaly or label fields. Parquet is
 recommended for the complete panel.
+
+`topology.csv`, `entity_service_windows.csv` and `engineering_events.csv` are
+not required or read by Pack v0.3. They may remain in the native source folder,
+but they do not enter the active contract, detector or evaluation harness.
 
 Petrobras 3W:
 
@@ -103,12 +104,9 @@ the relevant run ID before rebuilding a completed stage.
 ### 01A Telecom pack
 
 - maps Telecom measurements into the authored catalogue;
-- validates the topology mapping;
 - writes observable ONT telemetry to `PACK-CORE`;
-- writes topology to optional `PACK-CONTEXT`;
 - writes faults, entity intervals and tickets to `PACK-EVAL`;
-- proves that deleting evaluation files does not change `PACK-CORE`;
-- records service windows and engineering events as unused source capabilities.
+- proves that deleting evaluation files does not change `PACK-CORE`.
 
 ### 01A Petrobras 3W pack
 
@@ -124,7 +122,7 @@ the relevant run ID before rebuilding a completed stage.
 
 - validates either pack through the same code path;
 - creates immutable `SPEC-CORE v0.6.0`;
-- copies optional context, splits and evaluation into separate directories;
+- copies splits and evaluation into separate directories;
 - marks invalid and clipped values;
 - derives observation bounds and periodic collection gaps;
 - supports an optional `as_of_ts` boundary;
@@ -154,7 +152,6 @@ Sector packs:
 ```text
 outputs/packs/<sector>/<pack_run_id>/
 ├── PACK-CORE/
-├── PACK-CONTEXT/        # optional
 ├── PACK-EVAL/           # optional and never read by detector code
 ├── SPLITS/              # 3W whole-well partitions
 ├── pack_manifest.json
@@ -166,7 +163,6 @@ Canonical runs:
 ```text
 outputs/canonical/v0.6.0/<sector>/<canonical_run_id>/
 ├── SPEC-CORE/
-├── SPEC-CONTEXT/        # optional
 ├── SPEC-EVAL/           # optional
 ├── SPLITS/              # orchestration metadata, not model features
 ├── lineage.json
@@ -192,8 +188,8 @@ outputs/eda/v0.2.0/<sector>/<eda_run_id>/
 ## Adding another sector
 
 Create one new `01A_<SECTOR>_PACK.ipynb`. It must map native telemetry into the
-Pack v0.2 interface, route labels to `PACK-EVAL`, declare unavailable
-capabilities honestly and pass the original-versus-redacted isolation test.
+Pack v0.3 interface, route labels to `PACK-EVAL` and pass the
+original-versus-redacted isolation test.
 
 Do not add a sector branch to `week1_core.py`, Notebook 01B or Notebook 02. If
 a genuine source concept cannot be represented without distortion, record the

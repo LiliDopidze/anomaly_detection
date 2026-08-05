@@ -20,7 +20,7 @@ import pyarrow.parquet as pq
 
 CORE_VERSION = "0.6.0"
 EVAL_VERSION = "0.6.0"
-PACK_INTERFACE_VERSION = "0.2.0"
+PACK_INTERFACE_VERSION = "0.3.0"
 
 CORE_SCHEMAS = {
     "telemetry": [
@@ -56,36 +56,6 @@ CORE_SCHEMAS = {
         "gap_end",
         "expected_cadence_seconds",
         "coverage_basis",
-    ],
-}
-
-CONTEXT_SCHEMAS = {
-    "entity_relations": [
-        "parent_entity_id",
-        "child_entity_id",
-        "relation_type",
-    ],
-    "entity_attributes": [
-        "entity_id",
-        "attribute_name",
-        "attribute_value",
-        "valid_from",
-        "valid_to",
-    ],
-    "operational_events": [
-        "entity_id",
-        "event_ts",
-        "end_ts",
-        "event_type",
-        "known_at",
-        "source",
-    ],
-    "service_windows": [
-        "entity_id",
-        "service_start",
-        "service_end",
-        "known_at",
-        "source",
     ],
 }
 
@@ -160,7 +130,6 @@ SAMPLING_MODES = {
 QUALITY_CODES = {"measured", "invalid", "clipped"}
 
 CORE_TABLES = tuple(CORE_SCHEMAS)
-CONTEXT_TABLES = tuple(CONTEXT_SCHEMAS)
 EVAL_TABLES = tuple(EVAL_SCHEMAS)
 
 
@@ -304,7 +273,6 @@ def _validate_catalogue(catalogue):
 def _validate_pack_tables(
     pack_root,
     *,
-    context_tables=(),
     evaluation_tables=(),
     split_tables=(),
 ):
@@ -312,6 +280,8 @@ def _validate_pack_tables(
 
     pack_root = Path(pack_root)
     core = pack_root / "PACK-CORE"
+    if (pack_root / "PACK-CONTEXT").exists():
+        raise ValueError("Pack v0.3 is telemetry-only; PACK-CONTEXT is not supported")
     parts = sorted((core / "observations").glob("part-*.parquet"))
     if not parts:
         raise FileNotFoundError(f"No observation parts in {core / 'observations'}")
@@ -349,7 +319,6 @@ def _validate_pack_tables(
         )
 
     table_groups = [
-        ("PACK-CONTEXT", context_tables, CONTEXT_SCHEMAS),
         ("PACK-EVAL", evaluation_tables, EVAL_SCHEMAS),
         ("SPLITS", split_tables, SPLIT_SCHEMAS),
     ]
@@ -398,8 +367,6 @@ def finalise_pack(
     sector,
     pack_version,
     source_manifest,
-    capabilities,
-    context_tables=(),
     evaluation_tables=(),
     split_tables=(),
     notes=(),
@@ -409,7 +376,6 @@ def finalise_pack(
     pack_root = Path(pack_root)
     validation = _validate_pack_tables(
         pack_root,
-        context_tables=context_tables,
         evaluation_tables=evaluation_tables,
         split_tables=split_tables,
     )
@@ -429,7 +395,6 @@ def finalise_pack(
 
     auxiliary = {}
     for folder, table_names, schemas in [
-        ("PACK-CONTEXT", context_tables, CONTEXT_SCHEMAS),
         ("PACK-EVAL", evaluation_tables, EVAL_SCHEMAS),
         ("SPLITS", split_tables, SPLIT_SCHEMAS),
     ]:
@@ -446,8 +411,6 @@ def finalise_pack(
         "pack_interface_version": PACK_INTERFACE_VERSION,
         "pack_version": str(pack_version),
         "sector": str(sector),
-        "capabilities": capabilities,
-        "context_tables": list(context_tables),
         "evaluation_tables": list(evaluation_tables),
         "split_tables": list(split_tables),
         "metric_ids": pd.read_parquet(
@@ -475,7 +438,6 @@ def validate_pack(pack_root):
         )
     _validate_pack_tables(
         pack_root,
-        context_tables=manifest["context_tables"],
         evaluation_tables=manifest["evaluation_tables"],
         split_tables=manifest["split_tables"],
     )
@@ -699,22 +661,6 @@ def materialise_canonical(
         }
         write_json(core / "manifest.json", core_manifest)
 
-        context_manifest = None
-        if pack_manifest["context_tables"]:
-            hashes, rows = _copy_tables(
-                pack_root / "PACK-CONTEXT",
-                temporary / "SPEC-CONTEXT",
-                pack_manifest["context_tables"],
-                CONTEXT_SCHEMAS,
-            )
-            context_manifest = {
-                "tables": pack_manifest["context_tables"],
-                "row_counts": rows,
-                "canonical_content_hashes": hashes,
-                "capabilities": pack_manifest["capabilities"],
-            }
-            write_json(temporary / "SPEC-CONTEXT" / "manifest.json", context_manifest)
-
         split_manifest = None
         if pack_manifest["split_tables"]:
             hashes, rows = _copy_tables(
@@ -765,7 +711,6 @@ def materialise_canonical(
             {
                 "run_root": str(run_root),
                 "core_manifest": core_manifest,
-                "context_manifest": context_manifest,
                 "split_manifest": split_manifest,
                 "evaluation_manifest": eval_manifest,
                 "lineage": lineage,
@@ -844,8 +789,6 @@ def runtime_probe(core_root):
 
 
 __all__ = [
-    "CONTEXT_SCHEMAS",
-    "CONTEXT_TABLES",
     "CORE_SCHEMAS",
     "CORE_TABLES",
     "CORE_VERSION",
