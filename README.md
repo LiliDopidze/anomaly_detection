@@ -4,7 +4,7 @@ This repository is intentionally notebook-first. It is the working environment
 for one data scientist testing a sector-agnostic anomaly-detection design, not a
 production platform.
 
-## Current Week 1 workflow
+## Current Milestone 1 workflow
 
 ```text
 01A_TELECOM_PACK.ipynb ───────┐
@@ -21,12 +21,13 @@ SPEC-CORE ──> 02_CANONICAL_EDA.ipynb ──> frozen EDA evidence
   topology and operational context are not model inputs.
 - `01B_COMMON_CANONICAL_ADAPTER.ipynb` has no sector-specific translation
   branch. It accepts either standardized pack and preserves the same canonical
-  entity, episode and metric structure.
+  entity, episode and metric structure. Pack observations are metric-level, so
+  different sensors may use different timestamp grids and cadences.
 - `02_CANONICAL_EDA.ipynb` is shared unchanged across sectors and reads
   `SPEC-CORE` only. It produces reproducible statistical profiles and figures,
   not anomaly labels or model scores.
-- `week1_core.py` contains only settled, shared mechanics: interface
-  validation, immutable materialisation, logical hashes, quality codes, gaps,
+- `milestone1_core.py` contains only settled, shared mechanics: interface
+  validation, immutable materialisation, one content fingerprint, quality codes, gaps,
   episode boundaries and isolation-test support.
 - Datasets and outputs stay in Google Drive. They are not committed to Git.
 

@@ -1,8 +1,8 @@
-"""Shared mechanics for the sector-pack research notebooks.
+"""Shared mechanics for the Milestone 1 research notebooks.
 
 The module is intentionally flat.  Sector notebooks own native field names
 and label meanings; this file owns only the versioned interfaces, validation,
-canonical materialisation, hashing, and isolation helpers.
+canonical materialisation, one content fingerprint, and isolation helpers.
 """
 
 from __future__ import annotations
@@ -18,9 +18,9 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 
-CORE_VERSION = "0.7.0"
+CORE_VERSION = "0.8.0"
 EVAL_VERSION = "0.6.0"
-PACK_INTERFACE_VERSION = "0.4.0"
+PACK_INTERFACE_VERSION = "0.5.0"
 
 CORE_SCHEMAS = {
     "telemetry": [
@@ -133,7 +133,10 @@ SPLIT_SCHEMAS = {
 PACK_METRIC_SCHEMA = CORE_SCHEMAS["metric_catalogue"]
 PACK_ENTITY_SCHEMA = ["entity_id", "entity_type"]
 PACK_EPISODE_SCHEMA = ["episode_id", "entity_id", "episode_basis"]
-PACK_OBSERVATION_KEYS = ["event_ts", "entity_id", "episode_id"]
+PACK_OBSERVATION_KEYS = [
+    "event_ts", "entity_id", "episode_id", "metric_id",
+]
+PACK_OBSERVATION_SCHEMA = [*PACK_OBSERVATION_KEYS, "value"]
 
 MEASUREMENT_KINDS = {
     "gauge",
@@ -152,10 +155,9 @@ SAMPLING_MODES = {
 QUALITY_CODES = {"measured", "invalid", "clipped"}
 
 CORE_TABLES = tuple(CORE_SCHEMAS)
-EVAL_TABLES = tuple(EVAL_SCHEMAS)
 
 
-def sha256_file(path, chunk_size=1024 * 1024):
+def file_sha256(path, chunk_size=1024 * 1024):
     """Return a streaming SHA-256 hash for one file."""
 
     digest = hashlib.sha256()
@@ -182,7 +184,7 @@ def read_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def canonical_frame_hash(frame, sort_by=()):
+def _frame_hash(frame, sort_by=()):
     """Hash logical table content independently of Parquet metadata."""
 
     frame = frame.copy()
@@ -201,7 +203,7 @@ def canonical_frame_hash(frame, sort_by=()):
 
 
 @contextmanager
-def immutable_directory(destination):
+def new_output_directory(destination):
     """Build a directory atomically and refuse to overwrite completed runs."""
 
     destination = Path(destination)
@@ -221,8 +223,8 @@ def immutable_directory(destination):
         raise
 
 
-def source_record(path, source_root, role="model_input"):
-    """Describe one native file in a reproducible lineage manifest."""
+def source_file(path, source_root, role="model_input"):
+    """Describe one native file in the pack manifest."""
 
     path = Path(path)
     source_root = Path(source_root)
@@ -233,7 +235,7 @@ def source_record(path, source_root, role="model_input"):
     return {
         "relative_path": relative_path,
         "bytes": path.stat().st_size,
-        "sha256": sha256_file(path),
+        "sha256": file_sha256(path),
         "role": str(role),
     }
 
@@ -242,7 +244,7 @@ def _table_hash(path, schema):
     frame = pd.read_parquet(path)
     if list(frame.columns) != list(schema):
         raise ValueError(f"Unexpected schema in {path}: {list(frame.columns)}")
-    return canonical_frame_hash(frame, schema), len(frame)
+    return _frame_hash(frame, schema), len(frame)
 
 
 def _partitioned_hash(directory, sort_by):
@@ -253,7 +255,7 @@ def _partitioned_hash(directory, sort_by):
     rows = 0
     for part in parts:
         frame = pd.read_parquet(part)
-        digest.update(canonical_frame_hash(frame, sort_by).encode("ascii"))
+        digest.update(_frame_hash(frame, sort_by).encode("ascii"))
         rows += len(frame)
     return digest.hexdigest(), rows
 
@@ -276,6 +278,9 @@ def _validate_catalogue(catalogue):
         raise ValueError(f"Metric catalogue must use {PACK_METRIC_SCHEMA}")
     if catalogue["metric_id"].duplicated().any():
         raise ValueError("metric_id values must be unique")
+    leaks = _truth_like_columns(catalogue["metric_id"])
+    if leaks:
+        raise ValueError(f"Evaluation-like metric IDs are not allowed: {leaks}")
 
     unknown_kinds = set(catalogue["measurement_kind"]) - MEASUREMENT_KINDS
     if unknown_kinds:
@@ -303,7 +308,7 @@ def _validate_pack_tables(
     pack_root = Path(pack_root)
     core = pack_root / "PACK-CORE"
     if (pack_root / "PACK-CONTEXT").exists():
-        raise ValueError("Pack v0.4 is telemetry-only; PACK-CONTEXT is not supported")
+        raise ValueError("Pack v0.5 is telemetry-only; PACK-CONTEXT is not supported")
     parts = sorted((core / "observations").glob("part-*.parquet"))
     if not parts:
         raise FileNotFoundError(f"No observation parts in {core / 'observations'}")
@@ -321,8 +326,7 @@ def _validate_pack_tables(
     if episodes["episode_id"].duplicated().any():
         raise ValueError("episode_id values must be unique")
 
-    metric_ids = catalogue["metric_id"].astype(str).tolist()
-    expected_columns = [*PACK_OBSERVATION_KEYS, *metric_ids]
+    metric_ids = set(catalogue["metric_id"].astype(str))
     registry_ids = set(registry["entity_id"].astype(str))
     episode_ids = set(episodes["episode_id"].astype(str))
     episode_entity = dict(zip(
@@ -333,18 +337,25 @@ def _validate_pack_tables(
         raise ValueError("Observation episode refers to an unregistered entity")
     observed_ids = set()
     observed_episode_ids = set()
+    observed_metric_ids = set()
     for part in parts:
         columns = pq.ParquetFile(part).schema_arrow.names
-        if columns != expected_columns:
+        if columns != PACK_OBSERVATION_SCHEMA:
             raise ValueError(f"Unexpected observation schema in {part.name}: {columns}")
-        leaks = _truth_like_columns(columns)
-        if leaks:
-            raise ValueError(f"Evaluation fields found in PACK-CORE: {leaks}")
         identities = pd.read_parquet(
-            part, columns=["entity_id", "episode_id"]
-        ).dropna().astype(str).drop_duplicates()
+            part, columns=PACK_OBSERVATION_KEYS
+        )
+        if identities.isna().any().any():
+            raise ValueError(f"Null observation key in {part.name}")
+        if identities.duplicated(PACK_OBSERVATION_KEYS).any():
+            raise ValueError(f"Duplicate observation key in {part.name}")
+        identities[["entity_id", "episode_id", "metric_id"]] = identities[
+            ["entity_id", "episode_id", "metric_id"]
+        ].astype(str)
+        identities = identities.drop_duplicates()
         observed_ids.update(identities["entity_id"])
         observed_episode_ids.update(identities["episode_id"])
+        observed_metric_ids.update(identities["metric_id"])
         known = identities["episode_id"].isin(episode_ids)
         mismatched = identities.loc[
             known
@@ -365,6 +376,16 @@ def _validate_pack_tables(
         raise ValueError(
             "Observed episodes missing from the episode registry: "
             f"{sorted(missing_episodes)[:5]}"
+        )
+    unknown_metrics = observed_metric_ids - metric_ids
+    if unknown_metrics:
+        raise ValueError(
+            f"Observed metrics missing from the catalogue: {sorted(unknown_metrics)}"
+        )
+    unused_metrics = metric_ids - observed_metric_ids
+    if unused_metrics:
+        raise ValueError(
+            f"Catalogue metrics have no observations: {sorted(unused_metrics)}"
         )
 
     table_groups = [
@@ -388,11 +409,12 @@ def _validate_pack_tables(
         "observed_entities": len(observed_ids),
         "registered_entities": len(registry),
         "registered_episodes": len(episodes),
+        "observed_metrics": len(observed_metric_ids),
     }
 
 
-def pack_core_hashes(pack_root):
-    """Return logical hashes used by the pack truth-isolation test."""
+def pack_fingerprint(pack_root):
+    """Return one fingerprint for all model-visible pack tables."""
 
     core = Path(pack_root) / "PACK-CORE"
     observations_hash, _ = _partitioned_hash(
@@ -407,20 +429,22 @@ def pack_core_hashes(pack_root):
     episode_hash, _ = _table_hash(
         core / "observation_episodes.parquet", PACK_EPISODE_SCHEMA
     )
-    return {
+    table_hashes = {
         "observations": observations_hash,
         "metric_catalogue": catalogue_hash,
         "entity_registry": registry_hash,
         "observation_episodes": episode_hash,
     }
+    encoded = json.dumps(table_hashes, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
-def finalise_pack(
+def save_pack(
     pack_root,
     *,
     sector,
     pack_version,
-    source_manifest,
+    source_info,
     evaluation_tables=(),
     split_tables=(),
     notes=(),
@@ -437,7 +461,7 @@ def finalise_pack(
     observation_hash, observation_rows = _partitioned_hash(
         core / "observations", PACK_OBSERVATION_KEYS
     )
-    core_hashes = {"observations": observation_hash}
+    table_hashes = {"observations": observation_hash}
     core_rows = {"observations": observation_rows}
     for table_name, schema in {
         "metric_catalogue": PACK_METRIC_SCHEMA,
@@ -445,44 +469,32 @@ def finalise_pack(
         "observation_episodes": PACK_EPISODE_SCHEMA,
     }.items():
         table_hash, rows = _table_hash(core / f"{table_name}.parquet", schema)
-        core_hashes[table_name] = table_hash
+        table_hashes[table_name] = table_hash
         core_rows[table_name] = rows
-
-    auxiliary = {}
-    for folder, table_names, schemas in [
-        ("PACK-EVAL", evaluation_tables, EVAL_SCHEMAS),
-        ("SPLITS", split_tables, SPLIT_SCHEMAS),
-    ]:
-        auxiliary[folder] = {"row_counts": {}, "content_hashes": {}}
-        for table_name in table_names:
-            table_hash, rows = _table_hash(
-                pack_root / folder / f"{table_name}.parquet",
-                schemas[table_name],
-            )
-            auxiliary[folder]["row_counts"][table_name] = rows
-            auxiliary[folder]["content_hashes"][table_name] = table_hash
 
     manifest = {
         "pack_interface_version": PACK_INTERFACE_VERSION,
         "pack_version": str(pack_version),
         "sector": str(sector),
+        "observation_layout": "long_metric_level",
         "evaluation_tables": list(evaluation_tables),
         "split_tables": list(split_tables),
         "metric_ids": pd.read_parquet(
             core / "metric_catalogue.parquet", columns=["metric_id"]
         )["metric_id"].astype(str).tolist(),
         "core_row_counts": core_rows,
-        "core_content_hashes": core_hashes,
-        "auxiliary": auxiliary,
+        "fingerprint": hashlib.sha256(
+            json.dumps(table_hashes, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+        "source": source_info,
         "notes": list(notes),
         "validation": validation,
     }
-    write_json(pack_root / "source_manifest.json", source_manifest)
     write_json(pack_root / "pack_manifest.json", manifest)
     return manifest
 
 
-def validate_pack(pack_root):
+def load_pack(pack_root):
     """Validate a completed pack and return its manifest."""
 
     pack_root = Path(pack_root)
@@ -496,7 +508,7 @@ def validate_pack(pack_root):
         evaluation_tables=manifest["evaluation_tables"],
         split_tables=manifest["split_tables"],
     )
-    if pack_core_hashes(pack_root) != manifest["core_content_hashes"]:
+    if pack_fingerprint(pack_root) != manifest["fingerprint"]:
         raise ValueError("PACK-CORE content no longer matches its manifest")
     return manifest
 
@@ -571,66 +583,67 @@ def _collection_gaps(presence, episodes, catalogue):
     if presence.empty or periodic.empty:
         return pd.DataFrame(columns=CORE_SCHEMAS["collection_gaps"])
 
-    by_episode = {
-        (entity_id, episode_id): (
+    by_series = {
+        (entity_id, episode_id, metric_id): (
             group["event_ts"].drop_duplicates().sort_values().tolist()
         )
-        for (entity_id, episode_id), group in presence.groupby(
-            ["entity_id", "episode_id"], sort=False
+        for (entity_id, episode_id, metric_id), group in presence.groupby(
+            ["entity_id", "episode_id", "metric_id"], sort=False
         )
     }
     bounds = episodes.set_index("episode_id")
+    cadence_by_metric = periodic.set_index("metric_id")[
+        "expected_cadence_seconds"
+    ].astype(float).to_dict()
     rows = []
-    for metric in periodic.itertuples(index=False):
-        cadence_seconds = float(metric.expected_cadence_seconds)
+    for (entity_id, episode_id, metric_id), timestamps in by_series.items():
+        if metric_id not in cadence_by_metric or not timestamps:
+            continue
+        cadence_seconds = cadence_by_metric[metric_id]
         cadence = pd.Timedelta(seconds=cadence_seconds)
-        for (entity_id, episode_id), timestamps in by_episode.items():
-            if not timestamps:
-                continue
-            start = bounds.loc[episode_id, "observed_from"]
-            end = bounds.loc[episode_id, "observed_to"] + cadence
-            previous = start - cadence
-            for timestamp in timestamps:
-                gap_start = previous + cadence
-                if gap_start < timestamp:
-                    rows.append((
-                        entity_id,
-                        episode_id,
-                        metric.metric_id,
-                        gap_start,
-                        timestamp,
-                        cadence_seconds,
-                        "observed_bounds",
-                    ))
-                previous = timestamp
-            if previous + cadence < end:
+        start = bounds.loc[episode_id, "observed_from"]
+        end = bounds.loc[episode_id, "observed_to"] + cadence
+        previous = start - cadence
+        for timestamp in timestamps:
+            gap_start = previous + cadence
+            if gap_start < timestamp:
                 rows.append((
                     entity_id,
                     episode_id,
-                    metric.metric_id,
-                    previous + cadence,
-                    end,
+                    metric_id,
+                    gap_start,
+                    timestamp,
                     cadence_seconds,
-                    "observed_bounds",
+                    "metric_observations_within_episode_bounds",
                 ))
+            previous = timestamp
+        if previous + cadence < end:
+            rows.append((
+                entity_id,
+                episode_id,
+                metric_id,
+                previous + cadence,
+                end,
+                cadence_seconds,
+                "metric_observations_within_episode_bounds",
+            ))
     return pd.DataFrame(rows, columns=CORE_SCHEMAS["collection_gaps"])
 
 
 def _copy_tables(source_root, destination_root, table_names, schemas):
     if not table_names:
-        return {}, {}
+        return {}
     destination_root.mkdir()
-    hashes, rows = {}, {}
+    rows = {}
     for table_name in table_names:
         frame = pd.read_parquet(source_root / f"{table_name}.parquet")
         frame = frame[schemas[table_name]]
         frame.to_parquet(destination_root / f"{table_name}.parquet", index=False)
-        hashes[table_name] = canonical_frame_hash(frame, schemas[table_name])
         rows[table_name] = len(frame)
-    return hashes, rows
+    return rows
 
 
-def materialise_canonical(
+def build_canonical(
     pack_root,
     run_root,
     *,
@@ -640,7 +653,7 @@ def materialise_canonical(
     """Convert any valid sector pack into immutable canonical directories."""
 
     pack_root, run_root = Path(pack_root), Path(run_root)
-    pack_manifest = validate_pack(pack_root)
+    pack_manifest = load_pack(pack_root)
     catalogue = pd.read_parquet(
         pack_root / "PACK-CORE" / "metric_catalogue.parquet"
     )
@@ -650,10 +663,9 @@ def materialise_canonical(
     pack_episodes = pd.read_parquet(
         pack_root / "PACK-CORE" / "observation_episodes.parquet"
     )
-    metric_ids = catalogue["metric_id"].astype(str).tolist()
     as_of = pd.to_datetime(as_of_ts, utc=True) if as_of_ts is not None else None
 
-    with immutable_directory(run_root) as temporary:
+    with new_output_directory(run_root) as temporary:
         core = temporary / "SPEC-CORE"
         telemetry_directory = core / "telemetry"
         telemetry_directory.mkdir(parents=True)
@@ -668,22 +680,16 @@ def materialise_canonical(
             (pack_root / "PACK-CORE" / "observations").glob("part-*.parquet")
         )
         for part in observation_parts:
-            wide = pd.read_parquet(part)
-            wide["event_ts"] = pd.to_datetime(wide["event_ts"], utc=True)
-            wide["entity_id"] = wide["entity_id"].astype(str)
-            wide["episode_id"] = wide["episode_id"].astype(str)
+            long = pd.read_parquet(part)
+            long["event_ts"] = pd.to_datetime(long["event_ts"], utc=True)
+            long[["entity_id", "episode_id", "metric_id"]] = long[
+                ["entity_id", "episode_id", "metric_id"]
+            ].astype(str)
             if as_of is not None:
-                wide = wide.loc[wide["event_ts"].le(as_of)]
-            if wide.empty:
+                long = long.loc[long["event_ts"].le(as_of)]
+            if long.empty:
                 continue
-            presence_parts.append(wide[PACK_OBSERVATION_KEYS].drop_duplicates())
-
-            long = wide.melt(
-                id_vars=PACK_OBSERVATION_KEYS,
-                value_vars=metric_ids,
-                var_name="metric_id",
-                value_name="value",
-            )
+            presence_parts.append(long[PACK_OBSERVATION_KEYS].drop_duplicates())
             long = _quality_codes(long, catalogue)
             long = (
                 long[CORE_SCHEMAS["telemetry"]]
@@ -700,7 +706,7 @@ def materialise_canonical(
             )
             output_part += 1
             telemetry_digest.update(
-                canonical_frame_hash(
+                _frame_hash(
                     long, ["event_ts", "entity_id", "episode_id", "metric_id"]
                 ).encode("ascii")
             )
@@ -721,11 +727,11 @@ def materialise_canonical(
             "observation_episodes": episodes,
             "collection_gaps": gaps,
         }
-        core_hashes = {"telemetry": telemetry_digest.hexdigest()}
+        table_hashes = {"telemetry": telemetry_digest.hexdigest()}
         core_rows = {"telemetry": telemetry_rows}
         for table_name, frame in sidecars.items():
             frame.to_parquet(core / f"{table_name}.parquet", index=False)
-            core_hashes[table_name] = canonical_frame_hash(
+            table_hashes[table_name] = _frame_hash(
                 frame, CORE_SCHEMAS[table_name]
             )
             core_rows[table_name] = len(frame)
@@ -741,76 +747,56 @@ def materialise_canonical(
             "as_of_ts": as_of,
             "tables": CORE_SCHEMAS,
             "row_counts": core_rows,
-            "canonical_content_hashes": core_hashes,
+            "fingerprint": hashlib.sha256(
+                json.dumps(table_hashes, sort_keys=True).encode("utf-8")
+            ).hexdigest(),
             "quality_counts": quality_counts,
             "coverage_basis": (
-                "observed_bounds"
+                "metric_observations_within_episode_bounds"
                 if has_periodic_coverage
                 else "not_applicable_recordings"
             ),
+            "observation_presence_basis": "metric_level_rows",
         }
         write_json(core / "manifest.json", core_manifest)
 
-        split_manifest = None
+        split_rows = {}
         if pack_manifest["split_tables"]:
-            hashes, rows = _copy_tables(
+            split_rows = _copy_tables(
                 pack_root / "SPLITS",
                 temporary / "SPLITS",
                 pack_manifest["split_tables"],
                 SPLIT_SCHEMAS,
             )
-            split_manifest = {
-                "tables": pack_manifest["split_tables"],
-                "row_counts": rows,
-                "canonical_content_hashes": hashes,
-            }
-            write_json(temporary / "SPLITS" / "manifest.json", split_manifest)
 
-        eval_manifest = None
+        evaluation_rows = {}
         if include_evaluation and pack_manifest["evaluation_tables"]:
-            hashes, rows = _copy_tables(
+            evaluation_rows = _copy_tables(
                 pack_root / "PACK-EVAL",
                 temporary / "SPEC-EVAL",
                 pack_manifest["evaluation_tables"],
                 EVAL_SCHEMAS,
             )
-            eval_manifest = {
-                "contract_version": EVAL_VERSION,
-                "tables": {
-                    name: EVAL_SCHEMAS[name]
-                    for name in pack_manifest["evaluation_tables"]
-                },
-                "row_counts": rows,
-                "canonical_content_hashes": hashes,
-            }
-            write_json(temporary / "SPEC-EVAL" / "manifest.json", eval_manifest)
 
-        lineage = {
+        run_manifest = {
+            "run_root": str(run_root),
             "pack_root": str(pack_root),
-            "pack_manifest_sha256": sha256_file(pack_root / "pack_manifest.json"),
-            "source_manifest_sha256": sha256_file(pack_root / "source_manifest.json"),
+            "pack_manifest_sha256": file_sha256(pack_root / "pack_manifest.json"),
             "evaluation_mounted": bool(
                 include_evaluation and pack_manifest["evaluation_tables"]
             ),
             "adapter_has_sector_branch": False,
             "as_of_ts": as_of,
+            "core": core_manifest,
+            "split_rows": split_rows,
+            "evaluation_rows": evaluation_rows,
         }
-        write_json(temporary / "lineage.json", lineage)
-        write_json(
-            temporary / "workflow_report.json",
-            {
-                "run_root": str(run_root),
-                "core_manifest": core_manifest,
-                "split_manifest": split_manifest,
-                "evaluation_manifest": eval_manifest,
-                "lineage": lineage,
-            },
-        )
+        write_json(temporary / "run_manifest.json", run_manifest)
 
-    return read_json(run_root / "workflow_report.json")
+    return read_json(run_root / "run_manifest.json")
 
 
-def audit_core(core_root):
+def check_core(core_root):
     """Validate a completed SPEC-CORE and report its contents."""
 
     core_root = Path(core_root)
@@ -851,59 +837,7 @@ def audit_core(core_root):
     }
 
 
-def core_content_hashes(core_root):
-    """Read sealed logical hashes without opening SPEC-EVAL."""
+def core_fingerprint(core_root):
+    """Read the model-visible fingerprint without opening SPEC-EVAL."""
 
-    return read_json(Path(core_root) / "manifest.json")[
-        "canonical_content_hashes"
-    ]
-
-
-def runtime_probe(core_root):
-    """Return a deterministic SPEC-CORE-only score for isolation tests."""
-
-    totals = []
-    for part in sorted((Path(core_root) / "telemetry").glob("part-*.parquet")):
-        frame = pd.read_parquet(
-            part, columns=["entity_id", "episode_id", "metric_id", "value"]
-        )
-        frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
-        totals.append(
-            frame.groupby(["entity_id", "episode_id", "metric_id"], as_index=False)
-            .agg(value_sum=("value", "sum"), observed=("value", "count"))
-        )
-    combined = pd.concat(totals, ignore_index=True)
-    combined = (
-        combined.groupby(["entity_id", "episode_id", "metric_id"], as_index=False)
-        .agg(value_sum=("value_sum", "sum"), observed=("observed", "sum"))
-    )
-    return canonical_frame_hash(combined, ["entity_id", "episode_id", "metric_id"])
-
-
-__all__ = [
-    "CORE_SCHEMAS",
-    "CORE_TABLES",
-    "CORE_VERSION",
-    "EVAL_SCHEMAS",
-    "EVAL_TABLES",
-    "EVAL_VERSION",
-    "PACK_ENTITY_SCHEMA",
-    "PACK_EPISODE_SCHEMA",
-    "PACK_INTERFACE_VERSION",
-    "PACK_METRIC_SCHEMA",
-    "PACK_OBSERVATION_KEYS",
-    "SPLIT_SCHEMAS",
-    "audit_core",
-    "canonical_frame_hash",
-    "core_content_hashes",
-    "finalise_pack",
-    "immutable_directory",
-    "materialise_canonical",
-    "pack_core_hashes",
-    "read_json",
-    "runtime_probe",
-    "sha256_file",
-    "source_record",
-    "validate_pack",
-    "write_json",
-]
+    return read_json(Path(core_root) / "manifest.json")["fingerprint"]
