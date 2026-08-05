@@ -18,9 +18,9 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 
-CORE_VERSION = "0.8.0"
-EVAL_VERSION = "0.6.0"
-PACK_INTERFACE_VERSION = "0.5.0"
+CORE_VERSION = "0.9.0"
+EVAL_VERSION = "0.7.0"
+PACK_INTERFACE_VERSION = "0.6.0"
 
 CORE_SCHEMAS = {
     "telemetry": [
@@ -38,10 +38,6 @@ CORE_SCHEMAS = {
         "unit",
         "sampling_mode",
         "expected_cadence_seconds",
-        "lower_bound",
-        "upper_bound",
-        "censoring_type",
-        "clip_at",
     ],
     "entity_registry": [
         "entity_id",
@@ -97,17 +93,6 @@ EVAL_SCHEMAS = {
         "label_source",
         "source_instance_id",
     ],
-    "tickets": [
-        "ticket_id",
-        "entity_id",
-        "reported_ts",
-        "resolved_ts",
-        "fault_id",
-        "reported_fault_type",
-        "is_no_fault_found",
-        "is_misattributed",
-        "label_source",
-    ],
 }
 
 SPLIT_SCHEMAS = {
@@ -136,7 +121,7 @@ PACK_EPISODE_SCHEMA = ["episode_id", "entity_id", "episode_basis"]
 PACK_OBSERVATION_KEYS = [
     "event_ts", "entity_id", "episode_id", "metric_id",
 ]
-PACK_OBSERVATION_SCHEMA = [*PACK_OBSERVATION_KEYS, "value"]
+PACK_OBSERVATION_SCHEMA = [*PACK_OBSERVATION_KEYS, "value", "quality_code"]
 
 MEASUREMENT_KINDS = {
     "gauge",
@@ -308,7 +293,7 @@ def _validate_pack_tables(
     pack_root = Path(pack_root)
     core = pack_root / "PACK-CORE"
     if (pack_root / "PACK-CONTEXT").exists():
-        raise ValueError("Pack v0.5 is telemetry-only; PACK-CONTEXT is not supported")
+        raise ValueError("Pack v0.6 is telemetry-only; PACK-CONTEXT is not supported")
     parts = sorted((core / "observations").glob("part-*.parquet"))
     if not parts:
         raise FileNotFoundError(f"No observation parts in {core / 'observations'}")
@@ -342,13 +327,20 @@ def _validate_pack_tables(
         columns = pq.ParquetFile(part).schema_arrow.names
         if columns != PACK_OBSERVATION_SCHEMA:
             raise ValueError(f"Unexpected observation schema in {part.name}: {columns}")
-        identities = pd.read_parquet(
-            part, columns=PACK_OBSERVATION_KEYS
-        )
+        observed = pd.read_parquet(part, columns=PACK_OBSERVATION_SCHEMA)
+        identities = observed[PACK_OBSERVATION_KEYS]
         if identities.isna().any().any():
             raise ValueError(f"Null observation key in {part.name}")
         if identities.duplicated(PACK_OBSERVATION_KEYS).any():
             raise ValueError(f"Duplicate observation key in {part.name}")
+        unknown_quality = set(observed["quality_code"].dropna()) - QUALITY_CODES
+        if unknown_quality or observed["quality_code"].isna().any():
+            raise ValueError(f"Invalid quality codes in {part.name}")
+        missing_values = pd.to_numeric(observed["value"], errors="coerce").isna()
+        if observed.loc[missing_values, "quality_code"].ne("invalid").any():
+            raise ValueError(
+                f"Missing or nonnumeric values must be marked invalid in {part.name}"
+            )
         identities[["entity_id", "episode_id", "metric_id"]] = identities[
             ["entity_id", "episode_id", "metric_id"]
         ].astype(str)
@@ -513,32 +505,6 @@ def load_pack(pack_root):
     return manifest
 
 
-def _quality_codes(long_frame, catalogue):
-    values = pd.to_numeric(long_frame["value"], errors="coerce")
-    metadata = catalogue.set_index("metric_id")
-    lower = pd.to_numeric(
-        long_frame["metric_id"].map(metadata["lower_bound"]), errors="coerce"
-    )
-    upper = pd.to_numeric(
-        long_frame["metric_id"].map(metadata["upper_bound"]), errors="coerce"
-    )
-    clip_at = pd.to_numeric(
-        long_frame["metric_id"].map(metadata["clip_at"]), errors="coerce"
-    )
-
-    invalid = values.isna()
-    invalid |= lower.notna() & values.lt(lower)
-    invalid |= upper.notna() & values.gt(upper)
-    clipped = values.notna() & clip_at.notna() & values.ge(clip_at)
-
-    long_frame = long_frame.copy()
-    long_frame["value"] = values
-    long_frame["quality_code"] = "measured"
-    long_frame.loc[invalid, "quality_code"] = "invalid"
-    long_frame.loc[clipped & ~invalid, "quality_code"] = "clipped"
-    return long_frame
-
-
 def _entity_registry(presence, pack_registry):
     bounds = (
         presence.groupby("entity_id", as_index=False)["event_ts"]
@@ -573,8 +539,8 @@ def _episode_registry(presence, pack_episodes):
     return result[CORE_SCHEMAS["observation_episodes"]]
 
 
-def _collection_gaps(presence, episodes, catalogue):
-    """Find missing periodic observations inside observation-derived bounds."""
+def _collection_gaps(presence, catalogue):
+    """Find internal gaps between a metric's first and last observation."""
 
     periodic = catalogue.loc[
         catalogue["sampling_mode"].eq("periodic")
@@ -591,7 +557,6 @@ def _collection_gaps(presence, episodes, catalogue):
             ["entity_id", "episode_id", "metric_id"], sort=False
         )
     }
-    bounds = episodes.set_index("episode_id")
     cadence_by_metric = periodic.set_index("metric_id")[
         "expected_cadence_seconds"
     ].astype(float).to_dict()
@@ -601,8 +566,8 @@ def _collection_gaps(presence, episodes, catalogue):
             continue
         cadence_seconds = cadence_by_metric[metric_id]
         cadence = pd.Timedelta(seconds=cadence_seconds)
-        start = bounds.loc[episode_id, "observed_from"]
-        end = bounds.loc[episode_id, "observed_to"] + cadence
+        start = timestamps[0]
+        end = timestamps[-1] + cadence
         previous = start - cadence
         for timestamp in timestamps:
             gap_start = previous + cadence
@@ -614,7 +579,7 @@ def _collection_gaps(presence, episodes, catalogue):
                     gap_start,
                     timestamp,
                     cadence_seconds,
-                    "metric_observations_within_episode_bounds",
+                    "metric_observation_bounds",
                 ))
             previous = timestamp
         if previous + cadence < end:
@@ -625,7 +590,7 @@ def _collection_gaps(presence, episodes, catalogue):
                 previous + cadence,
                 end,
                 cadence_seconds,
-                "metric_observations_within_episode_bounds",
+                "metric_observation_bounds",
             ))
     return pd.DataFrame(rows, columns=CORE_SCHEMAS["collection_gaps"])
 
@@ -690,7 +655,6 @@ def build_canonical(
             if long.empty:
                 continue
             presence_parts.append(long[PACK_OBSERVATION_KEYS].drop_duplicates())
-            long = _quality_codes(long, catalogue)
             long = (
                 long[CORE_SCHEMAS["telemetry"]]
                 .sort_values(
@@ -719,7 +683,7 @@ def build_canonical(
         presence = pd.concat(presence_parts, ignore_index=True).drop_duplicates()
         registry = _entity_registry(presence, pack_registry)
         episodes = _episode_registry(presence, pack_episodes)
-        gaps = _collection_gaps(presence, episodes, catalogue)
+        gaps = _collection_gaps(presence, catalogue)
 
         sidecars = {
             "metric_catalogue": catalogue[CORE_SCHEMAS["metric_catalogue"]],
@@ -752,7 +716,7 @@ def build_canonical(
             ).hexdigest(),
             "quality_counts": quality_counts,
             "coverage_basis": (
-                "metric_observations_within_episode_bounds"
+                "metric_observation_bounds"
                 if has_periodic_coverage
                 else "not_applicable_recordings"
             ),
