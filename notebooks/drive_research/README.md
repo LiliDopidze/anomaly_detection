@@ -1,6 +1,6 @@
-# Week 1 Drive workflow
+# Week 1 research workflow
 
-Upload these five maintained files to:
+Keep these five maintained files together in Google Drive:
 
 ```text
 MyDrive/anomaly_detection/research/week1/
@@ -11,29 +11,53 @@ MyDrive/anomaly_detection/research/week1/
 └── week1_core.py
 ```
 
-The four notebooks are the visible research flow. `week1_core.py` is one flat
-helper file containing only shared mechanics whose silent duplication would
-invalidate the experiment.
+The notebooks contain the visible research decisions. `week1_core.py` is one
+flat helper file for the small amount of settled logic that must not be copied
+between notebooks: schemas, validation, hashing, quality coding, canonical
+materialisation and isolation probes.
 
-## Data locations
+## Current contracts
+
+- Pack interface: `0.2.0`
+- SPEC-CORE: `0.6.0`
+- SPEC-EVAL: `0.6.0`
+- Canonical EDA: `0.2.0`
+
+`SPEC-CORE v0.6.0` is the telemetry-only modelling floor:
+
+```text
+telemetry
+metric_catalogue
+entity_registry
+collection_gaps
+```
+
+The catalogue declares measurement kind, unit, sampling mode, expected cadence
+when known, bounds and censoring. Entity bounds are derived from observations
+available at `as_of_ts`; they are not presented as contractual service windows.
+
+Optional topology is physically separated in `SPEC-CONTEXT`. Faults, condition
+states and tickets are physically separated in `SPEC-EVAL`. A detector must be
+able to run with both directories absent.
+
+## Native data locations
 
 Telecom:
 
 ```text
 MyDrive/anomaly_detection/telco_syntetic_data/
-├── reference_dataset.parquet          # observable data only
+├── reference_dataset.parquet
 ├── topology.csv
 ├── entity_service_windows.csv
+├── engineering_events.csv
 ├── gt_fault_registry.csv
 ├── fault_entity_intervals.csv
-├── gt_fault_groups.csv                 # retained source; not needed by v0.1 pack
-├── tickets.csv
-└── ...                                 # other evaluation files may remain here
+└── tickets.csv
 ```
 
-The notebook also accepts `reference_dataset.csv`, but Parquet is recommended
-for the complete panel. The observable reference dataset must not contain
-`gt_*`, `class`, or `state` columns.
+The reference dataset must be the updated observable-only file. It must not
+contain `gt_*`, `class`, `state`, fault, anomaly or label fields. Parquet is
+recommended for the complete panel.
 
 Petrobras 3W:
 
@@ -46,103 +70,118 @@ MyDrive/anomaly_detection/sources/petrobras_3w/2.0.0/raw/
     └── 0/ ... 9/
 ```
 
-The 3W notebook verifies exactly 2,228 event-instance files and uses three
-hash-pinned real-well files. It does not use simulated files.
+The 3W notebook verifies the official 2,228-file inventory. By default it
+selects one deterministic real recording for every available `(well, event
+class)` pair. It excludes simulated, drawn and duplicate download variants.
+This is the modelling-development population; the old three-file subset is no
+longer used for population statistics.
 
 ## Run order
 
 ### Telecom
 
 1. Run `01A_TELECOM_PACK.ipynb`.
-2. Open the **Choose the sector here** cell in
-   `01B_COMMON_CANONICAL_ADAPTER.ipynb`.
-3. Select Telecom:
-
-   ```python
-   SECTOR = "telecom"
-   ```
-
-4. Run `01B_COMMON_CANONICAL_ADAPTER.ipynb`.
-5. In `02_CANONICAL_EDA.ipynb`, choose `SECTOR = "telecom"` and enter the
-   canonical run ID written by `01B`.
-6. Run `02_CANONICAL_EDA.ipynb`.
+2. In `01B_COMMON_CANONICAL_ADAPTER.ipynb`, set `SECTOR = "telecom"`.
+3. Run Notebook 01B.
+4. In `02_CANONICAL_EDA.ipynb`, set `SECTOR = "telecom"`.
+5. Run Notebook 02.
 
 ### Petrobras 3W
 
 1. Run `01A_PETROBRAS_3W_PACK.ipynb`.
-2. Open the **Choose the sector here** cell in
-   `01B_COMMON_CANONICAL_ADAPTER.ipynb`.
-3. Select Petrobras 3W:
+2. In `01B_COMMON_CANONICAL_ADAPTER.ipynb`, set
+   `SECTOR = "petrobras_3w"`.
+3. Run the same adapter without changing translation code.
+4. In `02_CANONICAL_EDA.ipynb`, set `SECTOR = "petrobras_3w"`.
+5. Run the same EDA notebook.
 
-   ```python
-   SECTOR = "petrobras_3w"
-   ```
+In Colab use **Runtime → Run all**. Output directories are immutable. Change
+the relevant run ID before rebuilding a completed stage.
 
-4. Run the same adapter notebook. No translation code changes.
-5. In `02_CANONICAL_EDA.ipynb`, choose `SECTOR = "petrobras_3w"` and enter the
-   canonical run ID written by `01B`.
-6. Run the same EDA notebook. No analysis code changes.
+## Notebook responsibilities
 
-In Colab choose **Runtime → Run all**. Output directories are immutable. Change
-the relevant pack, canonical, or EDA run ID before repeating a completed stage.
+### 01A Telecom pack
 
-The final `01B` section inventories every generated file, prints every JSON
-manifest/report, and previews every Parquet output. Partitioned observations
-and telemetry are summarized by schema, total rows, and first/last samples
-instead of printing millions of rows. This inspection is Week 1 contract QA;
-the canonical EDA still reads `SPEC-CORE` only.
+- maps Telecom measurements into the authored catalogue;
+- validates the topology mapping;
+- writes observable ONT telemetry to `PACK-CORE`;
+- writes topology to optional `PACK-CONTEXT`;
+- writes faults, entity intervals and tickets to `PACK-EVAL`;
+- proves that deleting evaluation files does not change `PACK-CORE`;
+- records service windows and engineering events as unused source capabilities.
 
-If the canonical run already exists and you only want to inspect it, use the
-sector-switch cell:
+### 01A Petrobras 3W pack
 
-```python
-SECTOR = "telecom"       # or "petrobras_3w"
-BUILD_CANONICAL = False  # read the existing canonical run
-```
+- maps all 27 official measurements;
+- identifies real `WELL-*` recordings;
+- creates a deterministic expanded development population;
+- assigns entire wells to calibration, development or holdout;
+- keeps `class` and `state` in `PACK-EVAL` only;
+- records that phase timestamps are derived from published class labels;
+- proves that redacting `class` and `state` does not change `PACK-CORE`.
 
-## What the notebooks produce
+### 01B common canonical adapter
 
-Each sector notebook writes:
+- validates either pack through the same code path;
+- creates immutable `SPEC-CORE v0.6.0`;
+- copies optional context, splits and evaluation into separate directories;
+- marks invalid and clipped values;
+- derives observation bounds and periodic collection gaps;
+- supports an optional `as_of_ts` boundary;
+- tests truth isolation, a deliberately leaky negative control and temporal
+  isolation;
+- prints all compact outputs and manifests for inspection.
+
+### 02 canonical EDA
+
+- reads `SPEC-CORE` only;
+- performs a full structural audit with a global duplicate check;
+- separates value validity from expected-observation coverage;
+- computes all difference statistics within one entity-metric series;
+- reports rate distributions across entities rather than misleading pooled
+  percentages;
+- plots distributions, missingness, representative series, rolling robust
+  statistics, ACF/PACF and cross-metric correlations;
+- detects candidate periodicity on irregular observations before attempting a
+  guarded short-gap-filled STL decomposition;
+- suppresses population claims when too few entity series are available;
+- saves compact, hash-pinned evidence for Notebook 03.
+
+## Outputs
+
+Sector packs:
 
 ```text
 outputs/packs/<sector>/<pack_run_id>/
 ├── PACK-CORE/
-│   ├── observations/part-*.parquet
-│   ├── metric_catalogue.parquet
-│   ├── entity_registry.parquet
-│   └── entity_relations.parquet
-├── PACK-EVAL/
+├── PACK-CONTEXT/        # optional
+├── PACK-EVAL/           # optional and never read by detector code
+├── SPLITS/              # 3W whole-well partitions
 ├── pack_manifest.json
 └── source_manifest.json
 ```
 
-The common adapter writes:
+Canonical runs:
 
 ```text
-outputs/canonical/v0.5.0/<sector>/<canonical_run_id>/
+outputs/canonical/v0.6.0/<sector>/<canonical_run_id>/
 ├── SPEC-CORE/
-│   ├── telemetry/part-*.parquet
-│   ├── metric_catalogue.parquet
-│   ├── entity_registry.parquet
-│   ├── entity_relations.parquet
-│   ├── collection_gaps.parquet
-│   └── manifest.json
-├── SPEC-EVAL/
+├── SPEC-CONTEXT/        # optional
+├── SPEC-EVAL/           # optional
+├── SPLITS/              # orchestration metadata, not model features
 ├── lineage.json
 ├── workflow_report.json
 └── acceptance_report.json
 ```
 
-Later EDA, feature engineering, and models receive only `SPEC-CORE`.
-`SPEC-EVAL` is opened only after model outputs are frozen.
-
-The canonical EDA writes:
+EDA evidence:
 
 ```text
-outputs/eda/v0.5.0/<sector>/<eda_run_id>/
+outputs/eda/v0.2.0/<sector>/<eda_run_id>/
 ├── analysis_windows.parquet
-├── metric_profile.parquet
+├── full_series_profile.parquet
 ├── series_profile.parquet
+├── metric_profile.parquet
 ├── temporal_evidence.parquet
 ├── seasonality_evidence.parquet
 ├── dependence_evidence.parquet
@@ -150,43 +189,19 @@ outputs/eda/v0.5.0/<sector>/<eda_run_id>/
 └── eda_manifest.json
 ```
 
-`02_CANONICAL_EDA.ipynb` first scans all canonical telemetry for structural
-quality. Statistical exploration then uses a deterministic, label-blind
-calibration window: the first 40% of each selected entity's observed time
-range. This is not assumed to be normal data. The notebook profiles
-distributions, missingness, rolling median and IQR, autocorrelation,
-stationarity evidence, gated robust STL decomposition, and cross-metric
-dependence. Its file-access guard records every input and proves that all reads
-remain inside `SPEC-CORE`.
+## Adding another sector
 
-## What changes for a new sector
+Create one new `01A_<SECTOR>_PACK.ipynb`. It must map native telemetry into the
+Pack v0.2 interface, route labels to `PACK-EVAL`, declare unavailable
+capabilities honestly and pass the original-versus-redacted isolation test.
 
-Create one new `01A_<SECTOR>_PACK.ipynb`. In that notebook:
-
-1. locate and inspect the sector's native files;
-2. map native metric names to standardized `metric_id`, entity type,
-   measurement kind, and unit;
-3. build the entity registry and only relationships present in the source;
-4. write standardized wide observations to `PACK-CORE`;
-5. route native labels to the appropriate optional `PACK-EVAL` table;
-6. run the original-versus-redacted pack isolation test;
-7. record facts the pack could not express without invention.
-
-Do not change `01B_COMMON_CANONICAL_ADAPTER.ipynb` or add a sector branch to
-`week1_core.py`. If a genuine source concept cannot fit the pack, document the
-failure first and change the versioned interface deliberately.
+Do not add a sector branch to `week1_core.py`, Notebook 01B or Notebook 02. If
+a genuine source concept cannot be represented without distortion, record the
+failure before changing the versioned interface.
 
 ## Next stage
 
-After the canonical EDA evidence is reviewed, the intended order is:
-
-```text
-review frozen EDA evidence
-    ↓
-feature engineering
-    ↓
-baseline modelling and incident ranking
-```
-
-The previous EDA and modelling drafts remain available in Git history. They
-were removed from the active folder because they target the earlier contract.
+After both canonical runs and EDA evidence are reviewed, build
+`03_EVALUATION_HARNESS.ipynb`. The harness comes before feature engineering and
+models so random, constant and leakage-prone detectors can test the evaluation
+rules first.
