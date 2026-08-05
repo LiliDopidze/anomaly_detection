@@ -20,14 +20,14 @@ SPEC-CORE ──> 02_CANONICAL_EDA.ipynb ──> frozen EDA evidence
   vocabulary and label translation. The active interface is telemetry-only;
   topology and operational context are not model inputs.
 - `01B_COMMON_CANONICAL_ADAPTER.ipynb` has no sector-specific translation
-  branch. It accepts either standardized pack and writes the same canonical
-  tables.
+  branch. It accepts either standardized pack and preserves the same canonical
+  entity, episode and metric structure.
 - `02_CANONICAL_EDA.ipynb` is shared unchanged across sectors and reads
   `SPEC-CORE` only. It produces reproducible statistical profiles and figures,
   not anomaly labels or model scores.
 - `week1_core.py` contains only settled, shared mechanics: interface
   validation, immutable materialisation, logical hashes, quality codes, gaps,
-  and isolation-test support.
+  episode boundaries and isolation-test support.
 - Datasets and outputs stay in Google Drive. They are not committed to Git.
 
 The research path is:

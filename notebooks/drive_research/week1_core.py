@@ -18,14 +18,15 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 
-CORE_VERSION = "0.6.0"
+CORE_VERSION = "0.7.0"
 EVAL_VERSION = "0.6.0"
-PACK_INTERFACE_VERSION = "0.3.0"
+PACK_INTERFACE_VERSION = "0.4.0"
 
 CORE_SCHEMAS = {
     "telemetry": [
         "event_ts",
         "entity_id",
+        "episode_id",
         "metric_id",
         "value",
         "quality_code",
@@ -49,8 +50,16 @@ CORE_SCHEMAS = {
         "observed_to",
         "validity_basis",
     ],
+    "observation_episodes": [
+        "episode_id",
+        "entity_id",
+        "observed_from",
+        "observed_to",
+        "episode_basis",
+    ],
     "collection_gaps": [
         "entity_id",
+        "episode_id",
         "metric_id",
         "gap_start",
         "gap_end",
@@ -107,11 +116,24 @@ SPLIT_SCHEMAS = {
         "partition",
         "split_version",
     ],
+    "time_partitions": [
+        "partition",
+        "start_ts",
+        "end_ts",
+        "split_version",
+    ],
+    "entity_groups": [
+        "entity_id",
+        "group_type",
+        "group_id",
+        "split_version",
+    ],
 }
 
 PACK_METRIC_SCHEMA = CORE_SCHEMAS["metric_catalogue"]
 PACK_ENTITY_SCHEMA = ["entity_id", "entity_type"]
-PACK_OBSERVATION_KEYS = ["event_ts", "entity_id"]
+PACK_EPISODE_SCHEMA = ["episode_id", "entity_id", "episode_basis"]
+PACK_OBSERVATION_KEYS = ["event_ts", "entity_id", "episode_id"]
 
 MEASUREMENT_KINDS = {
     "gauge",
@@ -281,23 +303,36 @@ def _validate_pack_tables(
     pack_root = Path(pack_root)
     core = pack_root / "PACK-CORE"
     if (pack_root / "PACK-CONTEXT").exists():
-        raise ValueError("Pack v0.3 is telemetry-only; PACK-CONTEXT is not supported")
+        raise ValueError("Pack v0.4 is telemetry-only; PACK-CONTEXT is not supported")
     parts = sorted((core / "observations").glob("part-*.parquet"))
     if not parts:
         raise FileNotFoundError(f"No observation parts in {core / 'observations'}")
 
     catalogue = pd.read_parquet(core / "metric_catalogue.parquet")
     registry = pd.read_parquet(core / "entity_registry.parquet")
+    episodes = pd.read_parquet(core / "observation_episodes.parquet")
     _validate_catalogue(catalogue)
     if list(registry.columns) != PACK_ENTITY_SCHEMA:
         raise ValueError(f"Entity registry must use {PACK_ENTITY_SCHEMA}")
     if registry["entity_id"].duplicated().any():
         raise ValueError("entity_id values must be unique")
+    if list(episodes.columns) != PACK_EPISODE_SCHEMA:
+        raise ValueError(f"Observation episodes must use {PACK_EPISODE_SCHEMA}")
+    if episodes["episode_id"].duplicated().any():
+        raise ValueError("episode_id values must be unique")
 
     metric_ids = catalogue["metric_id"].astype(str).tolist()
     expected_columns = [*PACK_OBSERVATION_KEYS, *metric_ids]
     registry_ids = set(registry["entity_id"].astype(str))
+    episode_ids = set(episodes["episode_id"].astype(str))
+    episode_entity = dict(zip(
+        episodes["episode_id"].astype(str),
+        episodes["entity_id"].astype(str),
+    ))
+    if set(episodes["entity_id"].astype(str)) - registry_ids:
+        raise ValueError("Observation episode refers to an unregistered entity")
     observed_ids = set()
+    observed_episode_ids = set()
     for part in parts:
         columns = pq.ParquetFile(part).schema_arrow.names
         if columns != expected_columns:
@@ -305,17 +340,31 @@ def _validate_pack_tables(
         leaks = _truth_like_columns(columns)
         if leaks:
             raise ValueError(f"Evaluation fields found in PACK-CORE: {leaks}")
-        observed_ids.update(
-            pd.read_parquet(part, columns=["entity_id"])["entity_id"]
-            .dropna()
-            .astype(str)
-            .unique()
-        )
+        identities = pd.read_parquet(
+            part, columns=["entity_id", "episode_id"]
+        ).dropna().astype(str).drop_duplicates()
+        observed_ids.update(identities["entity_id"])
+        observed_episode_ids.update(identities["episode_id"])
+        known = identities["episode_id"].isin(episode_ids)
+        mismatched = identities.loc[
+            known
+            & identities["episode_id"].map(episode_entity).ne(
+                identities["entity_id"]
+            )
+        ]
+        if not mismatched.empty:
+            raise ValueError("Observed episode is attached to the wrong entity")
     missing_entities = observed_ids - registry_ids
     if missing_entities:
         raise ValueError(
             "Observed entities missing from the registry: "
             f"{sorted(missing_entities)[:5]}"
+        )
+    missing_episodes = observed_episode_ids - episode_ids
+    if missing_episodes:
+        raise ValueError(
+            "Observed episodes missing from the episode registry: "
+            f"{sorted(missing_episodes)[:5]}"
         )
 
     table_groups = [
@@ -338,6 +387,7 @@ def _validate_pack_tables(
         "metrics": len(catalogue),
         "observed_entities": len(observed_ids),
         "registered_entities": len(registry),
+        "registered_episodes": len(episodes),
     }
 
 
@@ -354,10 +404,14 @@ def pack_core_hashes(pack_root):
     registry_hash, _ = _table_hash(
         core / "entity_registry.parquet", PACK_ENTITY_SCHEMA
     )
+    episode_hash, _ = _table_hash(
+        core / "observation_episodes.parquet", PACK_EPISODE_SCHEMA
+    )
     return {
         "observations": observations_hash,
         "metric_catalogue": catalogue_hash,
         "entity_registry": registry_hash,
+        "observation_episodes": episode_hash,
     }
 
 
@@ -388,6 +442,7 @@ def finalise_pack(
     for table_name, schema in {
         "metric_catalogue": PACK_METRIC_SCHEMA,
         "entity_registry": PACK_ENTITY_SCHEMA,
+        "observation_episodes": PACK_EPISODE_SCHEMA,
     }.items():
         table_hash, rows = _table_hash(core / f"{table_name}.parquet", schema)
         core_hashes[table_name] = table_hash
@@ -486,7 +541,27 @@ def _entity_registry(presence, pack_registry):
     return result[CORE_SCHEMAS["entity_registry"]]
 
 
-def _collection_gaps(presence, registry, catalogue):
+def _episode_registry(presence, pack_episodes):
+    bounds = (
+        presence.groupby(["episode_id", "entity_id"], as_index=False)["event_ts"]
+        .agg(observed_from="min", observed_to="max")
+    )
+    episodes = pack_episodes.copy()
+    episodes[["episode_id", "entity_id"]] = episodes[
+        ["episode_id", "entity_id"]
+    ].astype(str)
+    result = bounds.merge(
+        episodes,
+        on=["episode_id", "entity_id"],
+        how="left",
+        validate="one_to_one",
+    )
+    if result["episode_basis"].isna().any():
+        raise ValueError("Canonical episode basis is missing")
+    return result[CORE_SCHEMAS["observation_episodes"]]
+
+
+def _collection_gaps(presence, episodes, catalogue):
     """Find missing periodic observations inside observation-derived bounds."""
 
     periodic = catalogue.loc[
@@ -496,26 +571,31 @@ def _collection_gaps(presence, registry, catalogue):
     if presence.empty or periodic.empty:
         return pd.DataFrame(columns=CORE_SCHEMAS["collection_gaps"])
 
-    by_entity = {
-        entity_id: group["event_ts"].drop_duplicates().sort_values().tolist()
-        for entity_id, group in presence.groupby("entity_id", sort=False)
+    by_episode = {
+        (entity_id, episode_id): (
+            group["event_ts"].drop_duplicates().sort_values().tolist()
+        )
+        for (entity_id, episode_id), group in presence.groupby(
+            ["entity_id", "episode_id"], sort=False
+        )
     }
-    bounds = registry.set_index("entity_id")
+    bounds = episodes.set_index("episode_id")
     rows = []
     for metric in periodic.itertuples(index=False):
         cadence_seconds = float(metric.expected_cadence_seconds)
         cadence = pd.Timedelta(seconds=cadence_seconds)
-        for entity_id, timestamps in by_entity.items():
+        for (entity_id, episode_id), timestamps in by_episode.items():
             if not timestamps:
                 continue
-            start = bounds.loc[entity_id, "observed_from"]
-            end = bounds.loc[entity_id, "observed_to"] + cadence
+            start = bounds.loc[episode_id, "observed_from"]
+            end = bounds.loc[episode_id, "observed_to"] + cadence
             previous = start - cadence
             for timestamp in timestamps:
                 gap_start = previous + cadence
                 if gap_start < timestamp:
                     rows.append((
                         entity_id,
+                        episode_id,
                         metric.metric_id,
                         gap_start,
                         timestamp,
@@ -526,6 +606,7 @@ def _collection_gaps(presence, registry, catalogue):
             if previous + cadence < end:
                 rows.append((
                     entity_id,
+                    episode_id,
                     metric.metric_id,
                     previous + cadence,
                     end,
@@ -566,6 +647,9 @@ def materialise_canonical(
     pack_registry = pd.read_parquet(
         pack_root / "PACK-CORE" / "entity_registry.parquet"
     )
+    pack_episodes = pd.read_parquet(
+        pack_root / "PACK-CORE" / "observation_episodes.parquet"
+    )
     metric_ids = catalogue["metric_id"].astype(str).tolist()
     as_of = pd.to_datetime(as_of_ts, utc=True) if as_of_ts is not None else None
 
@@ -587,6 +671,7 @@ def materialise_canonical(
             wide = pd.read_parquet(part)
             wide["event_ts"] = pd.to_datetime(wide["event_ts"], utc=True)
             wide["entity_id"] = wide["entity_id"].astype(str)
+            wide["episode_id"] = wide["episode_id"].astype(str)
             if as_of is not None:
                 wide = wide.loc[wide["event_ts"].le(as_of)]
             if wide.empty:
@@ -602,7 +687,10 @@ def materialise_canonical(
             long = _quality_codes(long, catalogue)
             long = (
                 long[CORE_SCHEMAS["telemetry"]]
-                .sort_values(["event_ts", "entity_id", "metric_id"], kind="stable")
+                .sort_values(
+                    ["event_ts", "entity_id", "episode_id", "metric_id"],
+                    kind="stable",
+                )
                 .reset_index(drop=True)
             )
             long.to_parquet(
@@ -613,7 +701,7 @@ def materialise_canonical(
             output_part += 1
             telemetry_digest.update(
                 canonical_frame_hash(
-                    long, ["event_ts", "entity_id", "metric_id"]
+                    long, ["event_ts", "entity_id", "episode_id", "metric_id"]
                 ).encode("ascii")
             )
             telemetry_rows += len(long)
@@ -624,11 +712,13 @@ def materialise_canonical(
             raise ValueError("No observations are available at the requested as_of_ts")
         presence = pd.concat(presence_parts, ignore_index=True).drop_duplicates()
         registry = _entity_registry(presence, pack_registry)
-        gaps = _collection_gaps(presence, registry, catalogue)
+        episodes = _episode_registry(presence, pack_episodes)
+        gaps = _collection_gaps(presence, episodes, catalogue)
 
         sidecars = {
             "metric_catalogue": catalogue[CORE_SCHEMAS["metric_catalogue"]],
             "entity_registry": registry,
+            "observation_episodes": episodes,
             "collection_gaps": gaps,
         }
         core_hashes = {"telemetry": telemetry_digest.hexdigest()}
@@ -774,18 +864,20 @@ def runtime_probe(core_root):
 
     totals = []
     for part in sorted((Path(core_root) / "telemetry").glob("part-*.parquet")):
-        frame = pd.read_parquet(part, columns=["entity_id", "metric_id", "value"])
+        frame = pd.read_parquet(
+            part, columns=["entity_id", "episode_id", "metric_id", "value"]
+        )
         frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
         totals.append(
-            frame.groupby(["entity_id", "metric_id"], as_index=False)
+            frame.groupby(["entity_id", "episode_id", "metric_id"], as_index=False)
             .agg(value_sum=("value", "sum"), observed=("value", "count"))
         )
     combined = pd.concat(totals, ignore_index=True)
     combined = (
-        combined.groupby(["entity_id", "metric_id"], as_index=False)
+        combined.groupby(["entity_id", "episode_id", "metric_id"], as_index=False)
         .agg(value_sum=("value_sum", "sum"), observed=("observed", "sum"))
     )
-    return canonical_frame_hash(combined, ["entity_id", "metric_id"])
+    return canonical_frame_hash(combined, ["entity_id", "episode_id", "metric_id"])
 
 
 __all__ = [
@@ -796,6 +888,7 @@ __all__ = [
     "EVAL_TABLES",
     "EVAL_VERSION",
     "PACK_ENTITY_SCHEMA",
+    "PACK_EPISODE_SCHEMA",
     "PACK_INTERFACE_VERSION",
     "PACK_METRIC_SCHEMA",
     "PACK_OBSERVATION_KEYS",
