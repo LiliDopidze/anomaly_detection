@@ -17,8 +17,9 @@ SPEC-CORE ──> 02_CANONICAL_EDA.ipynb ──> frozen EDA evidence
 ```
 
 - Each `01A` notebook owns its native filenames, metric meanings, entity
-  vocabulary and label translation. The active interface is telemetry-only;
-  topology and operational context are not model inputs.
+  vocabulary and label translation. The active interface is telemetry-only.
+  Telecom topology is preserved separately in `SPLITS` for holdout design,
+  grouped-fault evaluation and incident aggregation; it is not a model input.
 - `01B_COMMON_CANONICAL_ADAPTER.ipynb` has no sector-specific translation
   branch. It accepts either standardized pack and preserves the same canonical
   entity, episode and metric structure. Pack observations are metric-level, so
