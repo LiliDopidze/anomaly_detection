@@ -21,7 +21,7 @@ materialisation and isolation probes.
 - Pack interface: `0.6.0`
 - SPEC-CORE: `0.9.0`
 - SPEC-EVAL: `0.7.0`
-- Canonical EDA: `0.3.0`
+- Canonical EDA: `0.4.0`
 
 `SPEC-CORE v0.9.0` is the telemetry-only modelling floor:
 
@@ -163,18 +163,16 @@ the relevant run ID before rebuilding a completed stage.
 ### 02 canonical EDA
 
 - reads `SPEC-CORE` only;
-- performs a full structural audit with a global duplicate check;
-- separates value validity from expected-observation coverage;
-- computes all difference statistics within one entity-episode-metric series;
-- prevents differences and rolling statistics from crossing episode boundaries;
-- reports rate distributions across entities rather than misleading pooled
-  percentages;
-- plots distributions, missingness, representative series, rolling robust
-  statistics, ACF/PACF and cross-metric correlations;
-- detects candidate periodicity on irregular observations before attempting a
-  guarded short-gap-filled STL decomposition;
-- suppresses population claims when too few entity series are available;
-- saves compact, hash-pinned evidence for Notebook 03.
+- scans the full population for structure, duplicates and metric-level quality;
+- separates invalid values, periodic coverage and episode-level sensor availability;
+- measures cadence and differences only within an observation episode;
+- selects a few median-sized complete episodes for readable plots;
+- handles gauges, counts, cumulative counters and discrete states differently;
+- never interpolates missing observations;
+- uses ACF, ADF/KPSS and STL only where the measurement kind and contiguous
+  history make them meaningful;
+- compares same-cadence continuous metrics in levels and first differences;
+- saves compact evidence tables and figures for Notebook 03.
 
 ## Outputs
 
@@ -201,16 +199,18 @@ outputs/canonical/v0.9.0/<sector>/<canonical_run_id>/
 EDA evidence:
 
 ```text
-outputs/eda/v0.3.0/<sector>/<eda_run_id>/
-├── analysis_windows.parquet
-├── full_series_profile.parquet
-├── series_profile.parquet
-├── metric_profile.parquet
+outputs/eda/v0.4.0/<sector>/<eda_run_id>/
+├── selected_episodes.parquet
+├── metric_evidence.parquet
+├── series_summary.parquet
+├── cadence_summary.parquet
+├── gap_summary.parquet
 ├── temporal_evidence.parquet
-├── seasonality_evidence.parquet
+├── stationarity_summary.parquet
+├── seasonality_summary.parquet
 ├── dependence_evidence.parquet
 ├── figures/
-└── eda_manifest.json
+└── eda_summary.json
 ```
 
 ## Adding another sector
