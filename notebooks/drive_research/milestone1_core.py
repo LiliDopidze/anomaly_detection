@@ -328,7 +328,7 @@ def _validate_pack_tables(
         if columns != PACK_OBSERVATION_SCHEMA:
             raise ValueError(f"Unexpected observation schema in {part.name}: {columns}")
         observed = pd.read_parquet(part, columns=PACK_OBSERVATION_SCHEMA)
-        identities = observed[PACK_OBSERVATION_KEYS]
+        identities = observed.loc[:, PACK_OBSERVATION_KEYS].copy()
         if identities.isna().any().any():
             raise ValueError(f"Null observation key in {part.name}")
         if identities.duplicated(PACK_OBSERVATION_KEYS).any():
@@ -341,9 +341,8 @@ def _validate_pack_tables(
             raise ValueError(
                 f"Missing or nonnumeric values must be marked invalid in {part.name}"
             )
-        identities[["entity_id", "episode_id", "metric_id"]] = identities[
-            ["entity_id", "episode_id", "metric_id"]
-        ].astype(str)
+        identifier_columns = ["entity_id", "episode_id", "metric_id"]
+        identities[identifier_columns] = identities[identifier_columns].astype(str)
         identities = identities.drop_duplicates()
         observed_ids.update(identities["entity_id"])
         observed_episode_ids.update(identities["episode_id"])
