@@ -19,11 +19,11 @@ materialisation and isolation probes.
 ## Current contracts
 
 - Pack interface: `0.6.0`
-- SPEC-CORE: `0.9.0`
+- SPEC-CORE: `0.9.1`
 - SPEC-EVAL: `0.7.0`
 - Canonical EDA: `0.4.0`
 
-`SPEC-CORE v0.9.0` is the telemetry-only modelling floor:
+`SPEC-CORE v0.9.1` is the telemetry-only modelling floor:
 
 ```text
 telemetry
@@ -149,15 +149,18 @@ the relevant run ID before rebuilding a completed stage.
 ### 01B common canonical adapter
 
 - validates either pack through the same code path;
-- creates immutable `SPEC-CORE v0.9.0`;
+- creates immutable `SPEC-CORE v0.9.1`;
 - copies splits and evaluation into separate directories;
 - preserves sector-supplied invalid and clipped quality codes;
-- derives observation bounds and per-metric periodic collection gaps;
+- derives observation bounds and jitter-tolerant per-metric periodic gaps with
+  bounded-memory queries;
 - tests one-second and five-second metrics in the same episode, including a
   deliberately missing slow observation;
 - supports an optional `as_of_ts` boundary;
-- tests truth isolation, a deliberately leaky negative control and temporal
-  isolation;
+- validates global key uniqueness, references, quality counts and the content
+  fingerprint;
+- tests truth isolation, a deliberately leaky negative control, mixed cadence,
+  jitter tolerance and temporal isolation with small generic fixtures;
 - prints all compact outputs and manifests for inspection.
 
 ### 02 canonical EDA
@@ -189,7 +192,7 @@ outputs/packs/<sector>/<pack_run_id>/
 Canonical runs:
 
 ```text
-outputs/canonical/v0.9.0/<sector>/<canonical_run_id>/
+outputs/canonical/v0.9.1/<sector>/<canonical_run_id>/
 ├── SPEC-CORE/
 ├── SPEC-EVAL/           # optional
 ├── SPLITS/              # orchestration metadata, not model features

@@ -18,9 +18,11 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 
-CORE_VERSION = "0.9.0"
+CORE_VERSION = "0.9.1"
 EVAL_VERSION = "0.7.0"
 PACK_INTERFACE_VERSION = "0.6.0"
+GAP_TOLERANCE_FACTOR = 1.5
+CANONICAL_BATCH_ROWS = 250_000
 
 CORE_SCHEMAS = {
     "telemetry": [
@@ -140,6 +142,19 @@ SAMPLING_MODES = {
 QUALITY_CODES = {"measured", "invalid", "clipped"}
 
 CORE_TABLES = tuple(CORE_SCHEMAS)
+
+
+def _duckdb():
+    """Import DuckDB only for canonical scans, not while authoring a Pack."""
+
+    try:
+        import duckdb
+    except ImportError as error:
+        raise ImportError(
+            "Canonical materialisation requires duckdb. Install it with "
+            "`pip install duckdb`."
+        ) from error
+    return duckdb
 
 
 def file_sha256(path, chunk_size=1024 * 1024):
@@ -504,11 +519,7 @@ def load_pack(pack_root):
     return manifest
 
 
-def _entity_registry(presence, pack_registry):
-    bounds = (
-        presence.groupby("entity_id", as_index=False)["event_ts"]
-        .agg(observed_from="min", observed_to="max")
-    )
+def _entity_registry(bounds, pack_registry):
     registry = pack_registry.copy()
     registry["entity_id"] = registry["entity_id"].astype(str)
     result = bounds.merge(registry, on="entity_id", how="left", validate="one_to_one")
@@ -518,11 +529,7 @@ def _entity_registry(presence, pack_registry):
     return result[CORE_SCHEMAS["entity_registry"]]
 
 
-def _episode_registry(presence, pack_episodes):
-    bounds = (
-        presence.groupby(["episode_id", "entity_id"], as_index=False)["event_ts"]
-        .agg(observed_from="min", observed_to="max")
-    )
+def _episode_registry(bounds, pack_episodes):
     episodes = pack_episodes.copy()
     episodes[["episode_id", "entity_id"]] = episodes[
         ["episode_id", "entity_id"]
@@ -538,60 +545,51 @@ def _episode_registry(presence, pack_episodes):
     return result[CORE_SCHEMAS["observation_episodes"]]
 
 
-def _collection_gaps(presence, catalogue):
-    """Find internal gaps between a metric's first and last observation."""
+def _collection_gaps(connection, tolerance_factor=GAP_TOLERANCE_FACTOR):
+    """Find internal periodic gaps without materialising timestamp lists."""
 
-    periodic = catalogue.loc[
-        catalogue["sampling_mode"].eq("periodic")
-        & catalogue["expected_cadence_seconds"].notna()
-    ]
-    if presence.empty or periodic.empty:
-        return pd.DataFrame(columns=CORE_SCHEMAS["collection_gaps"])
-
-    by_series = {
-        (entity_id, episode_id, metric_id): (
-            group["event_ts"].drop_duplicates().sort_values().tolist()
+    gaps = connection.execute(
+        """
+        WITH ordered AS (
+            SELECT
+                observations.entity_id,
+                observations.episode_id,
+                observations.metric_id,
+                observations.event_ts,
+                lag(observations.event_ts) OVER (
+                    PARTITION BY
+                        observations.entity_id,
+                        observations.episode_id,
+                        observations.metric_id
+                    ORDER BY observations.event_ts
+                ) AS previous_ts,
+                CAST(catalogue.expected_cadence_seconds AS DOUBLE)
+                    AS expected_cadence_seconds
+            FROM selected_observations AS observations
+            JOIN metric_catalogue AS catalogue USING (metric_id)
+            WHERE catalogue.sampling_mode = 'periodic'
+              AND catalogue.expected_cadence_seconds IS NOT NULL
         )
-        for (entity_id, episode_id, metric_id), group in presence.groupby(
-            ["entity_id", "episode_id", "metric_id"], sort=False
-        )
-    }
-    cadence_by_metric = periodic.set_index("metric_id")[
-        "expected_cadence_seconds"
-    ].astype(float).to_dict()
-    rows = []
-    for (entity_id, episode_id, metric_id), timestamps in by_series.items():
-        if metric_id not in cadence_by_metric or not timestamps:
-            continue
-        cadence_seconds = cadence_by_metric[metric_id]
-        cadence = pd.Timedelta(seconds=cadence_seconds)
-        start = timestamps[0]
-        end = timestamps[-1] + cadence
-        previous = start - cadence
-        for timestamp in timestamps:
-            gap_start = previous + cadence
-            if gap_start < timestamp:
-                rows.append((
-                    entity_id,
-                    episode_id,
-                    metric_id,
-                    gap_start,
-                    timestamp,
-                    cadence_seconds,
-                    "metric_observation_bounds",
-                ))
-            previous = timestamp
-        if previous + cadence < end:
-            rows.append((
-                entity_id,
-                episode_id,
-                metric_id,
-                previous + cadence,
-                end,
-                cadence_seconds,
-                "metric_observation_bounds",
-            ))
-    return pd.DataFrame(rows, columns=CORE_SCHEMAS["collection_gaps"])
+        SELECT
+            entity_id,
+            episode_id,
+            metric_id,
+            previous_ts + expected_cadence_seconds * INTERVAL '1 second'
+                AS gap_start,
+            event_ts AS gap_end,
+            expected_cadence_seconds,
+            'metric_observation_bounds_with_tolerance' AS coverage_basis
+        FROM ordered
+        WHERE previous_ts IS NOT NULL
+          AND epoch(event_ts - previous_ts)
+              > expected_cadence_seconds * ?
+        ORDER BY entity_id, episode_id, metric_id, gap_start
+        """,
+        [float(tolerance_factor)],
+    ).df()
+    for column in ("gap_start", "gap_end"):
+        gaps[column] = pd.to_datetime(gaps[column], utc=True)
+    return gaps[CORE_SCHEMAS["collection_gaps"]]
 
 
 def _copy_tables(source_root, destination_root, table_names, schemas):
@@ -629,60 +627,98 @@ def build_canonical(
     )
     as_of = pd.to_datetime(as_of_ts, utc=True) if as_of_ts is not None else None
 
-    with new_output_directory(run_root) as temporary:
+    observation_glob = str(
+        pack_root / "PACK-CORE" / "observations" / "part-*.parquet"
+    ).replace("'", "''")
+    where_clause = ""
+    if as_of is not None:
+        timestamp = as_of.isoformat().replace("'", "''")
+        where_clause = f"WHERE event_ts <= TIMESTAMPTZ '{timestamp}'"
+
+    with new_output_directory(run_root) as temporary, _duckdb().connect() as connection:
         core = temporary / "SPEC-CORE"
         telemetry_directory = core / "telemetry"
         telemetry_directory.mkdir(parents=True)
 
+        connection.register("metric_catalogue", catalogue)
+        connection.execute(f"""
+            CREATE VIEW selected_observations AS
+            SELECT
+                CAST(event_ts AS TIMESTAMPTZ) AS event_ts,
+                CAST(entity_id AS VARCHAR) AS entity_id,
+                CAST(episode_id AS VARCHAR) AS episode_id,
+                CAST(metric_id AS VARCHAR) AS metric_id,
+                value,
+                CAST(quality_code AS VARCHAR) AS quality_code
+            FROM read_parquet('{observation_glob}')
+            {where_clause}
+        """)
+
+        key_audit = connection.execute("""
+            SELECT
+                count(*) AS rows,
+                count(*) - count(DISTINCT (
+                    event_ts, entity_id, episode_id, metric_id
+                )) AS duplicate_keys,
+                sum(CASE WHEN event_ts IS NULL OR entity_id IS NULL
+                              OR episode_id IS NULL OR metric_id IS NULL
+                         THEN 1 ELSE 0 END) AS null_keys
+            FROM selected_observations
+        """).df().iloc[0]
+        if int(key_audit["rows"]) == 0:
+            raise ValueError("No observations are available at the requested as_of_ts")
+        if int(key_audit["duplicate_keys"]):
+            raise ValueError("Duplicate observation keys exist across Pack parts")
+        if int(key_audit["null_keys"]):
+            raise ValueError("Canonical observation keys must not be null")
+
+        episode_bounds = connection.execute("""
+            SELECT
+                episode_id,
+                entity_id,
+                min(event_ts) AS observed_from,
+                max(event_ts) AS observed_to
+            FROM selected_observations
+            GROUP BY episode_id, entity_id
+        """).df()
+        for column in ("observed_from", "observed_to"):
+            episode_bounds[column] = pd.to_datetime(
+                episode_bounds[column], utc=True
+            )
+        entity_bounds = (
+            episode_bounds.groupby("entity_id", as_index=False)
+            .agg(observed_from=("observed_from", "min"),
+                 observed_to=("observed_to", "max"))
+        )
+        registry = _entity_registry(entity_bounds, pack_registry)
+        episodes = _episode_registry(episode_bounds, pack_episodes)
+        gaps = _collection_gaps(connection)
+
         telemetry_digest = hashlib.sha256()
         telemetry_rows = 0
         quality_counts = {}
-        presence_parts = []
-        output_part = 0
-
-        observation_parts = sorted(
-            (pack_root / "PACK-CORE" / "observations").glob("part-*.parquet")
-        )
-        for part in observation_parts:
-            long = pd.read_parquet(part)
+        batches = connection.execute("""
+            SELECT event_ts, entity_id, episode_id, metric_id, value, quality_code
+            FROM selected_observations
+        """).fetch_record_batch(CANONICAL_BATCH_ROWS)
+        for output_part, batch in enumerate(batches):
+            long = batch.to_pandas()[CORE_SCHEMAS["telemetry"]]
             long["event_ts"] = pd.to_datetime(long["event_ts"], utc=True)
-            long[["entity_id", "episode_id", "metric_id"]] = long[
-                ["entity_id", "episode_id", "metric_id"]
-            ].astype(str)
-            if as_of is not None:
-                long = long.loc[long["event_ts"].le(as_of)]
-            if long.empty:
-                continue
-            presence_parts.append(long[PACK_OBSERVATION_KEYS].drop_duplicates())
-            long = (
-                long[CORE_SCHEMAS["telemetry"]]
-                .sort_values(
-                    ["event_ts", "entity_id", "episode_id", "metric_id"],
-                    kind="stable",
-                )
-                .reset_index(drop=True)
-            )
+            long = long.sort_values(
+                ["event_ts", "entity_id", "episode_id", "metric_id"],
+                kind="stable",
+            ).reset_index(drop=True)
             long.to_parquet(
                 telemetry_directory / f"part-{output_part:05d}.parquet",
                 index=False,
                 compression="zstd",
             )
-            output_part += 1
             telemetry_digest.update(
-                _frame_hash(
-                    long, ["event_ts", "entity_id", "episode_id", "metric_id"]
-                ).encode("ascii")
+                _frame_hash(long, PACK_OBSERVATION_KEYS).encode("ascii")
             )
             telemetry_rows += len(long)
             for code, count in long["quality_code"].value_counts().items():
                 quality_counts[str(code)] = quality_counts.get(str(code), 0) + int(count)
-
-        if not presence_parts:
-            raise ValueError("No observations are available at the requested as_of_ts")
-        presence = pd.concat(presence_parts, ignore_index=True).drop_duplicates()
-        registry = _entity_registry(presence, pack_registry)
-        episodes = _episode_registry(presence, pack_episodes)
-        gaps = _collection_gaps(presence, catalogue)
 
         sidecars = {
             "metric_catalogue": catalogue[CORE_SCHEMAS["metric_catalogue"]],
@@ -715,10 +751,11 @@ def build_canonical(
             ).hexdigest(),
             "quality_counts": quality_counts,
             "coverage_basis": (
-                "metric_observation_bounds"
+                "metric_observation_bounds_with_tolerance"
                 if has_periodic_coverage
                 else "not_applicable_recordings"
             ),
+            "gap_tolerance_factor": GAP_TOLERANCE_FACTOR,
             "observation_presence_basis": "metric_level_rows",
         }
         write_json(core / "manifest.json", core_manifest)
@@ -748,7 +785,6 @@ def build_canonical(
             "evaluation_mounted": bool(
                 include_evaluation and pack_manifest["evaluation_tables"]
             ),
-            "adapter_has_sector_branch": False,
             "as_of_ts": as_of,
             "core": core_manifest,
             "split_rows": split_rows,
@@ -769,6 +805,7 @@ def check_core(core_root):
 
     telemetry_rows = 0
     quality_counts = {}
+    telemetry_digest = hashlib.sha256()
     parts = sorted((core_root / "telemetry").glob("part-*.parquet"))
     if not parts:
         raise FileNotFoundError("SPEC-CORE contains no telemetry parts")
@@ -777,22 +814,84 @@ def check_core(core_root):
         if list(frame.columns) != CORE_SCHEMAS["telemetry"]:
             raise ValueError(f"Unexpected telemetry schema in {part.name}")
         unknown_quality = set(frame["quality_code"].dropna()) - QUALITY_CODES
-        if unknown_quality:
+        if unknown_quality or frame["quality_code"].isna().any():
             raise ValueError(f"Unknown quality codes: {sorted(unknown_quality)}")
+        if frame[PACK_OBSERVATION_KEYS].isna().any().any():
+            raise ValueError(f"Null telemetry key in {part.name}")
+        missing_values = pd.to_numeric(frame["value"], errors="coerce").isna()
+        if frame.loc[missing_values, "quality_code"].ne("invalid").any():
+            raise ValueError("Missing or nonnumeric values must be marked invalid")
         telemetry_rows += len(frame)
+        telemetry_digest.update(
+            _frame_hash(frame, PACK_OBSERVATION_KEYS).encode("ascii")
+        )
         for code, count in frame["quality_code"].value_counts().items():
             quality_counts[str(code)] = quality_counts.get(str(code), 0) + int(count)
 
+    table_hashes = {"telemetry": telemetry_digest.hexdigest()}
+    actual_rows = {"telemetry": telemetry_rows}
     for table_name in CORE_TABLES[1:]:
         frame = pd.read_parquet(core_root / f"{table_name}.parquet")
         if list(frame.columns) != CORE_SCHEMAS[table_name]:
             raise ValueError(f"Unexpected {table_name} schema")
-    if telemetry_rows != manifest["row_counts"]["telemetry"]:
-        raise ValueError("Telemetry row count does not match the manifest")
+        table_hashes[table_name] = _frame_hash(frame, CORE_SCHEMAS[table_name])
+        actual_rows[table_name] = len(frame)
+
+    if actual_rows != manifest["row_counts"]:
+        raise ValueError("SPEC-CORE row counts do not match the manifest")
+    if quality_counts != manifest["quality_counts"]:
+        raise ValueError("Telemetry quality counts do not match the manifest")
+    fingerprint = hashlib.sha256(
+        json.dumps(table_hashes, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    if fingerprint != manifest["fingerprint"]:
+        raise ValueError("SPEC-CORE content does not match its manifest")
+
+    telemetry_glob = str(core_root / "telemetry" / "part-*.parquet").replace(
+        "'", "''"
+    )
+    catalogue_path = str(core_root / "metric_catalogue.parquet").replace("'", "''")
+    registry_path = str(core_root / "entity_registry.parquet").replace("'", "''")
+    episodes_path = str(core_root / "observation_episodes.parquet").replace("'", "''")
+    with _duckdb().connect() as connection:
+        key_audit = connection.execute(f"""
+            SELECT
+                count(*) - count(DISTINCT (
+                    telemetry.event_ts,
+                    telemetry.entity_id,
+                    telemetry.episode_id,
+                    telemetry.metric_id
+                )) AS duplicate_keys,
+                sum(CASE WHEN catalogue.metric_id IS NULL THEN 1 ELSE 0 END)
+                    AS unknown_metrics,
+                sum(CASE WHEN registry.entity_id IS NULL THEN 1 ELSE 0 END)
+                    AS unknown_entities,
+                sum(CASE WHEN episodes.episode_id IS NULL THEN 1 ELSE 0 END)
+                    AS unknown_or_mismatched_episodes
+            FROM read_parquet('{telemetry_glob}') AS telemetry
+            LEFT JOIN read_parquet('{catalogue_path}') AS catalogue
+                USING (metric_id)
+            LEFT JOIN read_parquet('{registry_path}') AS registry
+                USING (entity_id)
+            LEFT JOIN read_parquet('{episodes_path}') AS episodes
+                ON telemetry.episode_id = episodes.episode_id
+               AND telemetry.entity_id = episodes.entity_id
+        """).df().iloc[0]
+
+    failures = {
+        name: int(key_audit[name])
+        for name in key_audit.index
+        if int(key_audit[name]) != 0
+    }
+    if failures:
+        raise ValueError(f"SPEC-CORE key audit failed: {failures}")
 
     return {
         "telemetry_rows": telemetry_rows,
         "quality_counts": quality_counts,
+        "duplicate_keys": 0,
+        "foreign_key_failures": 0,
+        "fingerprint_verified": True,
         **{
             name: int(manifest["row_counts"][name])
             for name in CORE_TABLES[1:]
