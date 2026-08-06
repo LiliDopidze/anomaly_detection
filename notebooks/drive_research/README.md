@@ -38,8 +38,9 @@ cadence when known. Each sector pack supplies `quality_code` directly. Entity bo
 available at `as_of_ts`; they are not presented as contractual service windows.
 Every telemetry row also carries an `episode_id`. An episode is one source-
 declared observation run across which time-series differences may be computed.
-It is one continuous stream per Telecom ONT and one source recording per 3W
-file.
+It is one explicitly named synthetic generator-run episode per Telecom ONT and
+one source recording per 3W file. Telecom episode boundaries are not inferred
+from telemetry gaps.
 
 Pack observations are long and metric-level: one row means that one metric
 was observed or attempted at that timestamp. Different metrics may therefore
@@ -122,7 +123,8 @@ the relevant run ID before rebuilding a completed stage.
 ### 01A Telecom pack
 
 - maps Telecom measurements into the authored catalogue;
-- declares one continuous observation episode per ONT;
+- declares one source-run observation episode per ONT;
+- fails when evaluation is requested but either required truth file is absent;
 - writes observable ONT telemetry to `PACK-CORE`;
 - writes fault events and affected-entity intervals to `PACK-EVAL`;
 - writes calibration/development/holdout time ranges to `SPLITS`;
