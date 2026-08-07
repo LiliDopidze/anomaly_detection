@@ -36,7 +36,7 @@ reading anything.
 - Pack interface: `0.6.0`
 - SPEC-CORE: `0.9.1`
 - SPEC-EVAL: `0.7.0`
-- Canonical EDA: `0.4.0`
+- Canonical EDA: `0.5.0`
 
 `SPEC-CORE v0.9.1` is the telemetry-only modelling floor:
 
@@ -187,12 +187,14 @@ relevant run ID before rebuilding a completed stage.
 - scans the full population for structure, duplicates and metric-level quality;
 - separates invalid values, periodic coverage and episode-level sensor availability;
 - measures cadence and differences only within an observation episode;
-- selects a few median-sized complete episodes for readable plots;
+- selects a reproducible hash sample and typical episodes for readable plots;
 - handles gauges, counts, cumulative counters and discrete states differently;
-- never interpolates missing observations;
+- never interpolates missing observations or draws rolling lines across gaps;
+- reports robust tails, between-series baselines and within-series spread;
 - uses ACF, ADF/KPSS and STL only where the measurement kind and contiguous
-  history make them meaningful;
-- compares same-cadence continuous metrics in levels and first differences;
+  history make them meaningful, with at least six cycles for STL;
+- compares same-cadence continuous metrics in levels and first differences,
+  with pair-specific support counts;
 - saves compact evidence tables and figures for Notebook 03.
 
 ## Outputs
@@ -220,12 +222,14 @@ outputs/canonical/v0.9.1/<sector>/<canonical_run_id>/
 EDA evidence:
 
 ```text
-outputs/eda/v0.4.0/<sector>/<eda_run_id>/
+outputs/eda/v0.5.0/<sector>/<eda_run_id>/
+├── structural_summary.parquet
 ├── selected_episodes.parquet
 ├── metric_evidence.parquet
 ├── series_summary.parquet
 ├── cadence_summary.parquet
 ├── gap_summary.parquet
+├── gap_scope_summary.parquet
 ├── temporal_evidence.parquet
 ├── stationarity_summary.parquet
 ├── seasonality_summary.parquet
