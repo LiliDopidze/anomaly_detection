@@ -30,7 +30,8 @@ SPEC-CORE ──> 02_CANONICAL_EDA.ipynb ──> frozen EDA evidence
 - `milestone1_core.py` contains only settled, shared mechanics: interface
   validation, immutable materialisation, one content fingerprint, quality-code checks, gaps,
   episode boundaries and isolation-test support.
-- Datasets and outputs stay in Google Drive. They are not committed to Git.
+- Datasets and outputs stay outside Git. Local WSL runs use
+  `~/anomaly_detection_data/` by default; Colab runs use Google Drive.
 
 The research path is:
 
@@ -39,7 +40,7 @@ SPEC-CORE ──> canonical EDA ──> feature engineering ──> modelling an
 ```
 
 See the
-[Drive run guide](notebooks/drive_research/README.md)
+[Milestone 1 run guide](notebooks/drive_research/README.md)
 for paths, execution order, and the process for adding another sector.
 
 The previous combined notebooks, EDA/model drafts, and package/CLI

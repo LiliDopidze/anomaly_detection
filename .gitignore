@@ -23,7 +23,7 @@ dist/
 *.pem
 *.key
 
-# Data and materialised outputs stay in Drive
+# Data and materialised outputs stay outside Git (local disk, Drive or object storage)
 data/
 Data/
 sources/
