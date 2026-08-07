@@ -1,9 +1,9 @@
 # Milestone 1 research workflow
 
-Keep these five maintained files together in Google Drive:
+The five maintained files live together in the GitHub repository:
 
 ```text
-MyDrive/anomaly_detection/research/milestone1/
+notebooks/drive_research/
 ├── 01A_TELECOM_PACK.ipynb
 ├── 01A_PETROBRAS_3W_PACK.ipynb
 ├── 01B_COMMON_CANONICAL_ADAPTER.ipynb
@@ -15,6 +15,21 @@ The notebooks contain the visible research decisions. `milestone1_core.py` is on
 flat helper file for the small amount of settled logic that must not be copied
 between notebooks: schemas, validation, one content fingerprint, canonical
 materialisation and isolation probes.
+
+## Storage
+
+Code and data are deliberately separate:
+
+```text
+~/projects/anomaly_detection/       # Git repository: notebooks and code
+~/anomaly_detection_data/           # local datasets and materialised outputs
+```
+
+Local WSL runs use `~/anomaly_detection_data/` automatically. Colab runs use
+`MyDrive/anomaly_detection/` automatically. To use another location, set
+`ANOMALY_DATA_ROOT`; `ANOMALY_DRIVE_ROOT` remains accepted only for backwards
+compatibility. The notebooks display the resolved data and code roots before
+reading anything.
 
 ## Current contracts
 
@@ -55,10 +70,12 @@ is no `SPEC-CONTEXT` layer in the active telemetry-only workflow.
 
 ## Native data locations
 
+The examples below are relative to the configured data root.
+
 Telecom:
 
 ```text
-MyDrive/anomaly_detection/telco_syntetic_data/
+telco_syntetic_data/
 ├── reference_dataset.parquet
 ├── gt_fault_registry.csv
 ├── fault_entity_intervals.csv
@@ -82,7 +99,7 @@ approved groups.
 Petrobras 3W:
 
 ```text
-MyDrive/anomaly_detection/sources/petrobras_3w/2.0.0/raw/
+sources/petrobras_3w/2.0.0/raw/
 └── 3w_dataset_2.0.0/
     ├── dataset.ini
     ├── README.md
@@ -115,8 +132,9 @@ longer used for population statistics.
 4. In `02_CANONICAL_EDA.ipynb`, set `SECTOR = "petrobras_3w"`.
 5. Run the same EDA notebook.
 
-In Colab use **Runtime → Run all**. Output directories are immutable. Change
-the relevant run ID before rebuilding a completed stage.
+In VS Code, select the repository `.venv` kernel and use **Run All**. In Colab,
+use **Runtime → Run all**. Output directories are immutable. Change the
+relevant run ID before rebuilding a completed stage.
 
 ## Notebook responsibilities
 
