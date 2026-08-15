@@ -1,6 +1,6 @@
 # Milestone 1 research workflow
 
-The five maintained files live together in the GitHub repository:
+The maintained code lives in the GitHub repository:
 
 ```text
 notebooks/drive_research/
@@ -11,34 +11,43 @@ notebooks/drive_research/
 └── milestone1_core.py
 ```
 
-The notebooks contain the visible research decisions. `milestone1_core.py` is one
-flat helper file for the small amount of settled logic that must not be copied
-between notebooks: schemas, validation, one content fingerprint, canonical
-materialisation and isolation probes.
-
-## Storage
-
-Code and data are deliberately separate:
+The notebooks hold the visible research decisions. `milestone1_core.py` holds
+the settled logic that must not be copied between them: schemas, validation,
+pack writing, canonical materialisation, one content fingerprint, and the
+isolation helpers. It contains no sector logic.
 
 ```text
-~/projects/anomaly_detection/       # Git repository: notebooks and code
-~/anomaly_detection_data/           # local datasets and materialised outputs
+native source  ->  PACK          (sector notebook 01A translates)
+PACK           ->  SPEC-CORE     (common adapter 01B canonicalises)
+                 + SPEC-EVAL + SPLITS
 ```
 
-Local WSL runs use `~/anomaly_detection_data/` automatically. Colab runs use
-`MyDrive/anomaly_detection/` automatically. To use another location, set
-`ANOMALY_DATA_ROOT`; `ANOMALY_DRIVE_ROOT` remains accepted only for backwards
-compatibility. The notebooks display the resolved data and code roots before
-reading anything.
+A detector reads `SPEC-CORE` only and must run with `SPEC-EVAL` absent.
 
-## Current contracts
+## Storage and runtime
 
-- Pack interface: `0.6.0`
-- SPEC-CORE: `0.9.1`
-- SPEC-EVAL: `0.7.0`
-- Canonical EDA: `0.5.0`
+Code and data stay separate:
 
-`SPEC-CORE v0.9.1` is the telemetry-only modelling floor:
+```text
+~/projects/anomaly_detection/       # Git repository
+~/anomaly_detection_data/           # local data and outputs (WSL/Linux default)
+```
+
+Colab uses `MyDrive/anomaly_detection/` by default. To use another location,
+set `ANOMALY_DATA_ROOT`; the earlier `ANOMALY_DRIVE_ROOT` name remains
+accepted. Each notebook prints the resolved runtime, data root and code root
+before reading data.
+
+## Contracts
+
+| Contract       | Version |
+|----------------|---------|
+| Pack interface | `0.7.1` |
+| SPEC-CORE      | `0.10.1`|
+| SPEC-EVAL      | `0.8.0` |
+| Canonical EDA  | `0.6.0` |
+
+`SPEC-CORE v0.10.1` is the telemetry-only modelling floor:
 
 ```text
 telemetry
@@ -48,218 +57,190 @@ observation_episodes
 collection_gaps
 ```
 
-The catalogue declares only measurement kind, unit, sampling mode and expected
-cadence when known. Each sector pack supplies `quality_code` directly. Entity bounds are derived from observations
-available at `as_of_ts`; they are not presented as contractual service windows.
-Every telemetry row also carries an `episode_id`. An episode is one source-
-declared observation run across which time-series differences may be computed.
-It is one explicitly named synthetic generator-run episode per Telecom ONT and
-one source recording per 3W file. Telecom episode boundaries are not inferred
-from telemetry gaps.
+Pack tables use the same names and the same columns, minus the four the
+adapter derives (`observed_from`, `observed_to`, `validity_basis`) and the one
+table it computes (`collection_gaps`). There is one schema definition, not two.
 
-Pack observations are long and metric-level: one row means that one metric
-was observed or attempted at that timestamp. Different metrics may therefore
-have different timestamp grids and cadences without a sector branch in the
-common adapter. A null row is an invalid observation; an absent row is not an
-observation and may become an internal collection gap only between that metric's
-first and last observation when the catalogue declares a periodic obligation.
+### The three rules that make a row mean the same thing in every sector
 
-Faults and condition states are physically separated in `SPEC-EVAL`.
-A detector reads only `SPEC-CORE` and must run with `SPEC-EVAL` absent. There
-is no `SPEC-CONTEXT` layer in the active telemetry-only workflow.
+**1. Presence.** Telemetry is long and metric-level: one row means one metric
+was observed or attempted at that timestamp.
+
+- an **absent row** is not an observation;
+- a **null value with `quality_code='invalid'`** is an attempted observation
+  that failed;
+- an **absent `(episode, metric)` pair** means only that the source supplied no
+  observation attempt; capability metadata is needed to distinguish "not
+  installed" from "installed but never reported".
+
+Both packs now apply this identically. Previously Telecom emitted invalid rows
+for a sensor that was never fitted while 3W omitted it, so `valid_rate` and
+`coverage` meant different things in the two sectors.
+
+**2. Episodes.** Every row carries an `episode_id` — one source-declared
+observation run across which differences may be computed. It is one named
+synthetic generator-run episode per Telecom ONT, and one source recording per
+3W file. Episode boundaries are never inferred from telemetry gaps.
+
+**3. Gaps.** A gap is found inside one `(entity, episode, metric)` series
+wherever a metric declaring a cadence skipped more than
+`GAP_TOLERANCE_FACTOR × cadence`. This applies to `periodic` and `recording`
+metrics alike, so a hole inside a 3W recording is reported while the interval
+*between* two recordings stays correctly undefined.
+
+### Truth isolation
+
+Faults and condition states live in `SPEC-EVAL`, physically separate. There is
+no `SPEC-CONTEXT` layer.
+
+`truth_like_columns()` rejects metric IDs that look like labels. It is anchored
+to exact names (`class`, `state`, `label`, `target`, `fault`, `anomaly`,
+`condition_code`), the prefixes `gt_`, `truth_`, `anomaly_`, and the suffixes
+`_label`, `_labels`, `_anomaly`, `_ground_truth`. Free substring matching was
+removed: it rejected legitimate measurements such as `ground_fault_current`,
+`fault_passage_indicator` and `distance_to_fault`, all of which a power-sector
+pack would need.
 
 ## Native data locations
-
-The examples below are relative to the configured data root.
 
 Telecom:
 
 ```text
-telco_syntetic_data/
-├── reference_dataset.parquet
+<data_root>/telco_syntetic_data/
+├── reference_dataset.parquet   # observable-only; no gt_*, class, state, fault, label
 ├── gt_fault_registry.csv
 ├── fault_entity_intervals.csv
-├── tickets.csv                 # optional; leakage test only
-└── topology.csv                # required Telecom grouping metadata
+├── tickets.csv                 # optional; not read
+└── topology.csv                # required grouping metadata
 ```
 
-The reference dataset must be the updated observable-only file. It must not
-contain `gt_*`, `class`, `state`, fault, anomaly or label fields. Parquet is
-recommended for the complete panel.
-
-Tickets are not translated; when present, the leakage test verifies that removing
-them cannot change model input. `entity_service_windows.csv` and
-`engineering_events.csv` are not read. The Telecom notebook reads only
-`ont_id`, `olt_id`, `pon_port`, `splitter_l1`, `splitter_l2` and `geo_cluster`
-from topology. It writes those memberships to `SPLITS/entity_groups.parquet`;
-topology never enters SPEC-CORE or the detector. Any `gt_*` topology columns
-remain evaluation truth and the isolation test proves they cannot affect the
-approved groups.
+The notebook reads only `ont_id`, `olt_id`, `pon_port`, `splitter_l1`,
+`splitter_l2` and `geo_cluster` from topology, and writes those memberships to
+`SPLITS/entity_groups.parquet`. Topology never enters `SPEC-CORE` or the
+detector. Any `gt_*` topology columns remain evaluation truth, and the
+isolation test proves they cannot affect the approved groups.
 
 Petrobras 3W:
 
 ```text
-sources/petrobras_3w/2.0.0/raw/
-└── 3w_dataset_2.0.0/
-    ├── dataset.ini
-    ├── README.md
-    ├── LICENSE-CC-BY
-    └── 0/ ... 9/
+<data_root>/sources/petrobras_3w/2.0.0/raw/3w_dataset_2.0.0/
+├── dataset.ini
+└── 0/ ... 9/
 ```
 
-The 3W notebook verifies the official 2,228-file inventory. By default it
-selects one deterministic real recording for every available `(well, event
-class)` pair. It excludes simulated, drawn and duplicate download variants.
-This is the modelling-development population; the old three-file subset is no
-longer used for population statistics.
+The notebook verifies the official inventory count
+(`THREEW_EXPECTED_FILES`, default 2228), excludes simulated, drawn and
+duplicate download variants, and selects one deterministic real recording per
+`(well, event-directory)` pair. It then reads the actual `class` values from
+every selected file. Development and holdout coverage is constrained by those
+values, not by the directory name; folder/class mismatches are reported.
+
+Finite-value validation uses only constraints documented in `dataset.ini`:
+choke openings are percentages and valve states are in `{0, 0.5, 1}`.
+Unexplained finite pressure, temperature and flow extremes remain measured and
+are surfaced in the EDA tail audit rather than silently removed.
 
 ## Run order
 
-### Telecom
+Set the sector, then run top to bottom. In VS Code select the repository
+`.venv` kernel and use **Run All**; in Colab use **Runtime → Run all**.
 
-1. Run `01A_TELECOM_PACK.ipynb`.
-2. In `01B_COMMON_CANONICAL_ADAPTER.ipynb`, set `SECTOR = "telecom"`.
-3. Run Notebook 01B.
-4. In `02_CANONICAL_EDA.ipynb`, set `SECTOR = "telecom"`.
-5. Run Notebook 02.
+| Step | Notebook | Setting |
+|------|----------|---------|
+| 1 | `01A_<SECTOR>_PACK.ipynb` | — |
+| 2 | `01B_COMMON_CANONICAL_ADAPTER.ipynb` | `SECTOR = "telecom"` or `"petrobras_3w"` |
+| 3 | `02_CANONICAL_EDA.ipynb` | same `SECTOR` |
 
-### Petrobras 3W
+Notebooks 01B and 02 run unchanged across sectors — that is the claim they
+exist to demonstrate. Output directories are immutable; change the relevant
+run ID before rebuilding a completed stage. Every setting is also readable
+from an environment variable, so the whole pipeline can be executed headlessly
+for regression testing.
 
-1. Run `01A_PETROBRAS_3W_PACK.ipynb`.
-2. In `01B_COMMON_CANONICAL_ADAPTER.ipynb`, set
-   `SECTOR = "petrobras_3w"`.
-3. Run the same adapter without changing translation code.
-4. In `02_CANONICAL_EDA.ipynb`, set `SECTOR = "petrobras_3w"`.
-5. Run the same EDA notebook.
+## Splits
 
-In VS Code, select the repository `.venv` kernel and use **Run All**. In Colab,
-use **Runtime → Run all**. Output directories are immutable. Change the
-relevant run ID before rebuilding a completed stage.
+`SPLITS` is orchestration metadata, never model input.
 
-## Notebook responsibilities
+| Table | Telecom | 3W | Tests |
+|-------|---------|-----|-------|
+| `time_partitions` | yes | — | temporal drift |
+| `entity_partitions` | yes (whole `geo_cluster`) | yes (whole well) | unseen entity |
+| `entity_groups` | yes (OLT/PON/splitter/geo) | — | grouped-fault evaluation |
 
-### 01A Telecom pack
-
-- maps Telecom measurements into the authored catalogue;
-- declares one source-run observation episode per ONT;
-- fails when evaluation is requested but either required truth file is absent;
-- writes observable ONT telemetry to `PACK-CORE`;
-- writes fault events and affected-entity intervals to `PACK-EVAL`;
-- writes calibration/development/holdout time ranges to `SPLITS`;
-- derives OLT, PON, splitter and geographic groups from topology;
-- proves that deleting evaluation files and topology truth columns changes
-  neither `PACK-CORE` nor the approved topology groups.
-
-### 01A Petrobras 3W pack
-
-- maps official measurements that contain at least one value in the selected
-  real-well population;
-- omits an all-null metric from an episode instead of fabricating invalid
-  observations for a sensor that was unavailable;
-- preserves every selected source recording as a distinct episode;
-- identifies real `WELL-*` recordings;
-- creates a deterministic expanded development population;
-- assigns entire wells to calibration, development or holdout;
-- keeps `class` and `state` in `PACK-EVAL` only;
-- records that phase timestamps are derived from published class labels;
-- proves that redacting `class` and `state` does not change `PACK-CORE`.
-
-### 01B common canonical adapter
-
-- validates either pack through the same code path;
-- creates immutable `SPEC-CORE v0.9.1`;
-- copies splits and evaluation into separate directories;
-- preserves sector-supplied invalid and clipped quality codes;
-- derives observation bounds and jitter-tolerant per-metric periodic gaps with
-  bounded-memory queries;
-- tests one-second and five-second metrics in the same episode, including a
-  deliberately missing slow observation;
-- supports an optional `as_of_ts` boundary;
-- validates global key uniqueness, references, quality counts and the content
-  fingerprint;
-- tests truth isolation, a deliberately leaky negative control, mixed cadence,
-  jitter tolerance and temporal isolation with small generic fixtures;
-- prints all compact outputs and manifests for inspection.
-
-### 02 canonical EDA
-
-- reads `SPEC-CORE` only;
-- scans the full population for structure, duplicates and metric-level quality;
-- separates invalid values, periodic coverage and episode-level sensor availability;
-- measures cadence and differences only within an observation episode;
-- selects a reproducible hash sample and typical episodes for readable plots;
-- handles gauges, counts, cumulative counters and discrete states differently;
-- never interpolates missing observations or draws rolling lines across gaps;
-- reports robust tails, between-series baselines and within-series spread;
-- uses ACF, ADF/KPSS and STL only where the measurement kind and contiguous
-  history make them meaningful, with at least six cycles for STL;
-- compares same-cadence continuous metrics in levels and first differences,
-  with pair-specific support counts;
-- saves compact evidence tables and figures for Notebook 03.
+Both sectors now carry an `entity_partitions` table, so Notebook 03 can pose
+the *same* generalisation question in both. Previously Telecom split on time
+and 3W on entity, which meant the two sectors were answering different
+questions and no cross-sector number was comparable.
 
 ## Outputs
 
-Sector packs:
-
 ```text
 outputs/packs/<sector>/<pack_run_id>/
-├── PACK-CORE/
-├── PACK-EVAL/           # optional and never read by detector code
-├── SPLITS/              # time, whole-well or topology groups
-└── pack_manifest.json    # source files, row counts and one fingerprint
-```
+├── PACK-CORE/{telemetry/, metric_catalogue, entity_registry, observation_episodes}
+├── PACK-EVAL/      # optional, never read by detector code
+├── SPLITS/
+└── pack_manifest.json
 
-Canonical runs:
+outputs/canonical/v0.10.1/<sector>/<canonical_run_id>/
+├── SPEC-CORE/      # + collection_gaps, derived bounds, manifest with fingerprint
+├── SPEC-EVAL/      # optional
+├── SPLITS/
+└── run_manifest.json
 
-```text
-outputs/canonical/v0.9.1/<sector>/<canonical_run_id>/
-├── SPEC-CORE/
-├── SPEC-EVAL/           # optional
-├── SPLITS/              # orchestration metadata, not model features
-└── run_manifest.json     # source pack and canonical run summary
-```
-
-EDA evidence:
-
-```text
-outputs/eda/v0.5.0/<sector>/<eda_run_id>/
-├── structural_summary.parquet
-├── selected_episodes.parquet
-├── metric_evidence.parquet
-├── series_summary.parquet
-├── cadence_summary.parquet
-├── gap_summary.parquet
-├── gap_scope_summary.parquet
-├── temporal_evidence.parquet
-├── stationarity_summary.parquet
-├── seasonality_summary.parquet
-├── dependence_evidence.parquet
+outputs/eda/v0.6.0/<sector>/<eda_run_id>/
+├── *.parquet       # compact evidence tables
 ├── figures/
 └── eda_summary.json
 ```
 
+EDA outputs are immutable. The notebook uses a temporary figure directory and
+publishes all tables and figures together only after successful completion.
+It profiles a balanced metric set, uses gap-safe transformations, Spearman
+correlations, cadence-aware autocorrelation lags, bounded stationarity tests,
+and explicit test statuses. No EDA value is imputed or deleted.
+
 ## Adding another sector
 
-Create one new `01A_<SECTOR>_PACK.ipynb`. It must map native telemetry into the
-Pack v0.6 long metric-level interface, declare observation episodes, assign
-simple source-quality codes, route labels to `PACK-EVAL`
-and pass the
-original-versus-redacted isolation test.
+Write one `01A_<SECTOR>_PACK.ipynb` containing three things:
 
-Topology is an optional sector capability, not a universal model requirement.
-When a sector has reliable relationship data, store memberships in `SPLITS`
-for split design, grouped-fault evaluation and incident aggregation. Do not add
-topology columns to telemetry or make the detector depend on them.
+1. a **phrasebook** — the native-field to `metric_id` map, with measurement
+   kind, unit, sampling mode and cadence;
+2. a **telemetry generator** — any iterable yielding long DataFrames with the
+   telemetry columns, emitting a `(episode, metric)` pair only where the source
+   attempted to observe it;
+3. a **truth translator** — native labels routed to `PACK-EVAL` only.
 
-Do not add a sector branch to `milestone1_core.py`, Notebook 01B or Notebook 02. If
-a genuine source concept cannot be represented without distortion, record the
-failure before changing the versioned interface.
+Then call `save_pack(...)`. It owns directory layout, part numbering,
+validation, the fingerprint and the manifest, so a sector notebook never
+handles any of them.
+
+The pack must pass the original-versus-redacted isolation test. Topology is an
+optional sector capability: when a sector has reliable relationship data, store
+memberships in `SPLITS`; do not add topology columns to telemetry or let a
+detector depend on them.
+
+Do not add a sector branch to `milestone1_core.py`, Notebook 01B or Notebook
+02. If a genuine source concept cannot be represented without distortion,
+record the failure in the contract-fit report before changing the versioned
+interface. That report is the actual research output of Milestone 1.
 
 ## Next stage
 
-Before building `03_EVALUATION_HARNESS.ipynb`, freeze the alert-to-fault
-matching policy and physically separate development truth from final holdout
-truth. The existing `SPLITS` tables provide whole-well, temporal and available
-infrastructure-group boundaries; they are orchestration metadata, not model
-features. The harness comes before feature engineering and models so random,
-constant and leakage-prone detectors can test the evaluation rules first.
+Before building `03_EVALUATION_HARNESS.ipynb`:
+
+1. **Freeze the alert-to-fault matching policy** and physically separate
+   development truth from final holdout truth.
+2. **Decide how latency is reported.** Telecom `observable_ts` is generator
+   ground truth; 3W `observable_ts` is derived from published class phases and
+   says so in `label_source`. Scoring both against one detection-latency
+   number compares a physical quantity with a labelling convention. Either
+   report latency per sector, or define an explicit sector-neutral reference
+   point.
+3. **Read `check_evaluation()` and `fault_coverage()` first.** They distinguish
+   declared, scoreable, unscoreable and cross-partition faults. Each fault is
+   assigned once; a fault cannot inflate two partition totals. A partition
+   holding one or two scoreable faults of a type cannot support a reliable
+   per-type detection rate.
+
+Build the harness before features and models, so random, constant and
+leakage-prone detectors can test the evaluation rules first.
