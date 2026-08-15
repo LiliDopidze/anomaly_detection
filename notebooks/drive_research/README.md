@@ -8,13 +8,20 @@ notebooks/drive_research/
 ├── 01A_PETROBRAS_3W_PACK.ipynb
 ├── 01B_COMMON_CANONICAL_ADAPTER.ipynb
 ├── 02_CANONICAL_EDA.ipynb
-└── milestone1_core.py
+├── 03_EVALUATION_HARNESS.ipynb
+├── milestone1_core.py
+└── evaluation_core.py
 ```
 
 The notebooks hold the visible research decisions. `milestone1_core.py` holds
 the settled logic that must not be copied between them: schemas, validation,
 pack writing, canonical materialisation, one content fingerprint, and the
 isolation helpers. It contains no sector logic.
+
+`evaluation_core.py` is the same deliberate pattern for Notebook 03: one flat
+file containing tested truth partitioning, score-to-alert conversion, matching
+and metric calculations. Evaluation policy and adversarial controls remain
+visible in the notebook. It is not a package, CLI or sector-specific layer.
 
 ```text
 native source  ->  PACK          (sector notebook 01A translates)
@@ -150,6 +157,7 @@ Set the sector, then run top to bottom. In VS Code select the repository
 | 1 | `01A_<SECTOR>_PACK.ipynb` | — |
 | 2 | `01B_COMMON_CANONICAL_ADAPTER.ipynb` | `SECTOR = "telecom"` or `"petrobras_3w"` |
 | 3 | `02_CANONICAL_EDA.ipynb` | same `SECTOR` |
+| 4 | `03_EVALUATION_HARNESS.ipynb` | same `SECTOR` |
 
 Notebooks 01B and 02 run unchanged across sectors — that is the claim they
 exist to demonstrate. Output directories are immutable; change the relevant
@@ -191,6 +199,14 @@ outputs/eda/v0.6.0/<sector>/<eda_run_id>/
 ├── *.parquet       # compact evidence tables
 ├── figures/
 └── eda_summary.json
+
+outputs/evaluation/v0.1.0/<sector>/<evaluation_run_id>/
+├── TRUTH/calibration/
+├── TRUTH/development/
+├── TRUTH/holdout_sealed/
+├── CONTROLS/
+├── evaluation_policy.json
+└── evaluation_manifest.json
 ```
 
 EDA outputs are immutable. The notebook uses a temporary figure directory and
@@ -224,23 +240,29 @@ Do not add a sector branch to `milestone1_core.py`, Notebook 01B or Notebook
 record the failure in the contract-fit report before changing the versioned
 interface. That report is the actual research output of Milestone 1.
 
+## Evaluation harness
+
+Notebook 03 freezes the common score and alert schemas, physically separates
+development from sealed holdout truth, and tests event matching before a real
+model exists. Telecom uses chronological partitions as its primary evaluation;
+3W uses whole-well partitions. The choice is made from split capabilities and
+can be overridden explicitly with `EVALUATION_PRIMARY_SPLIT`.
+
+An alert is matched from the later of `observable_ts` and the affected-entity
+interval start until the earlier of their two end times. One alert matches at
+most one fault, one fault receives one event-level credit, and later eligible
+alerts are duplicates. Event recall, pre-impact recall, precision, false-alert
+rate, latency, shared-fault recall and entity coverage are reported separately.
+Ratios include Wilson 95% intervals; fewer than five events of a type is marked
+descriptive only.
+
+Constant, random, perfect-event, late, duplicate and deliberately leaky
+controls must pass before outputs are published. Latency remains sector-specific
+because Telecom and 3W derive `observable_ts` differently.
+
 ## Next stage
 
-Before building `03_EVALUATION_HARNESS.ipynb`:
-
-1. **Freeze the alert-to-fault matching policy** and physically separate
-   development truth from final holdout truth.
-2. **Decide how latency is reported.** Telecom `observable_ts` is generator
-   ground truth; 3W `observable_ts` is derived from published class phases and
-   says so in `label_source`. Scoring both against one detection-latency
-   number compares a physical quantity with a labelling convention. Either
-   report latency per sector, or define an explicit sector-neutral reference
-   point.
-3. **Read `check_evaluation()` and `fault_coverage()` first.** They distinguish
-   declared, scoreable, unscoreable and cross-partition faults. Each fault is
-   assigned once; a fault cannot inflate two partition totals. A partition
-   holding one or two scoreable faults of a type cannot support a reliable
-   per-type detection rate.
-
-Build the harness before features and models, so random, constant and
-leakage-prone detectors can test the evaluation rules first.
+Build `04_GENERIC_BASELINE_MODELS.ipynb` using calibration and development
+SPEC-CORE only. Notebook 04 may pass development scores to the evaluator, but
+must not open `TRUTH/holdout_sealed`; that directory is first used by Notebook
+05 after the feature definition, model and threshold are frozen.
