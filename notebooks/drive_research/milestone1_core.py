@@ -530,7 +530,9 @@ def _collection_gaps(connection, tolerance_factor=GAP_TOLERANCE_FACTOR):
             WHERE c.expected_cadence_seconds IS NOT NULL
         )
         SELECT entity_id, episode_id, metric_id,
-               previous_ts + expected_cadence_seconds * INTERVAL '1 second' AS gap_start,
+               previous_ts
+                   + CAST(round(expected_cadence_seconds * 1000000) AS BIGINT)
+                     * INTERVAL '1 microsecond' AS gap_start,
                event_ts AS gap_end,
                expected_cadence_seconds,
                'within_episode_declared_cadence' AS coverage_basis
