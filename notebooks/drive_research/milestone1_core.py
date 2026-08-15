@@ -134,15 +134,6 @@ def _duckdb():
     return duckdb
 
 
-def _record_batches(result, batch_size):
-    """Return Arrow batches across supported DuckDB versions."""
-
-    try:
-        return result.to_arrow_reader(batch_size)
-    except AttributeError:
-        return result.fetch_record_batch(batch_size)
-
-
 def file_sha256(path, chunk_size=1 << 20):
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
@@ -641,10 +632,9 @@ def build_canonical(pack_root, run_root, *, include_evaluation=True, as_of_ts=No
         telemetry_digest = hashlib.sha256()
         telemetry_rows = 0
         quality_counts = {}
-        query = connection.execute(f"""
+        batches = connection.execute(f"""
             SELECT {', '.join(CORE_SCHEMAS['telemetry'])} FROM selected_observations
-        """)
-        batches = _record_batches(query, CANONICAL_BATCH_ROWS)
+        """).fetch_record_batch(CANONICAL_BATCH_ROWS)
         for number, batch in enumerate(batches):
             frame = batch.to_pandas()[CORE_SCHEMAS["telemetry"]]
             frame["event_ts"] = pd.to_datetime(frame["event_ts"], utc=True)
