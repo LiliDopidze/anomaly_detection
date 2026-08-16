@@ -45,6 +45,13 @@ set `ANOMALY_DATA_ROOT`; the earlier `ANOMALY_DRIVE_ROOT` name remains
 accepted. Each notebook prints the resolved runtime, data root and code root
 before reading data.
 
+For large canonical runs, DuckDB is limited to 3 GB and two threads by default
+and spills ordered operations to local temporary storage. Override these only
+when the machine has more capacity with `ANOMALY_DUCKDB_MEMORY_LIMIT` and
+`ANOMALY_DUCKDB_THREADS`. Notebook 01B performs bounded build checks by default;
+set `RUN_FULL_CORE_AUDIT=1` only for an intentional second full reread and
+rehash of the completed output.
+
 ## Contracts
 
 | Contract       | Version |
