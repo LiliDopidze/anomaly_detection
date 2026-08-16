@@ -220,7 +220,9 @@ EDA outputs are immutable. The notebook uses a temporary figure directory and
 publishes all tables and figures together only after successful completion.
 It profiles a balanced metric set, uses gap-safe transformations, Spearman
 correlations, cadence-aware autocorrelation lags, bounded stationarity tests,
-and explicit test statuses. No EDA value is imputed or deleted.
+and explicit test statuses. Population summaries stay in spillable DuckDB;
+the pandas time-series panel is capped by `EDA_MAX_PANEL_ROWS` (750,000 by
+default) using centred contiguous windows. No EDA value is imputed or deleted.
 
 ## Adding another sector
 
