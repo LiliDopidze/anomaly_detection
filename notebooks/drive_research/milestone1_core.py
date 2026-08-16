@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import tempfile
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -132,6 +134,20 @@ def _duckdb():
     except ImportError as error:  # pragma: no cover - environment dependent
         raise ImportError("Install duckdb: pip install duckdb") from error
     return duckdb
+
+
+@contextmanager
+def _duckdb_connection():
+    """Use bounded memory and local spill space for large canonical scans."""
+
+    memory_limit = os.getenv("ANOMALY_DUCKDB_MEMORY_LIMIT", "3GB")
+    threads = int(os.getenv("ANOMALY_DUCKDB_THREADS", "2"))
+    with tempfile.TemporaryDirectory(prefix="anomaly-duckdb-") as spill_directory:
+        with _duckdb().connect() as connection:
+            connection.execute("SET memory_limit = ?", [memory_limit])
+            connection.execute("SET threads = ?", [threads])
+            connection.execute("SET temp_directory = ?", [spill_directory])
+            yield connection
 
 
 def file_sha256(path, chunk_size=1 << 20):
@@ -462,8 +478,8 @@ def pack_fingerprint(pack_root):
     return _combine(table_hashes)
 
 
-def read_pack(pack_root):
-    """Validate a completed pack and return its manifest."""
+def _validated_pack(pack_root):
+    """Validate a completed Pack in one telemetry pass."""
 
     pack_root = Path(pack_root)
     manifest = read_json(pack_root / "pack_manifest.json")
@@ -479,9 +495,13 @@ def read_pack(pack_root):
     observed = {
         "entities": set(), "episodes": set(), "metrics": set(), "episode_owner": {},
     }
+    telemetry_digest = hashlib.sha256()
+    telemetry_rows = 0
     for part in _parts(core / "telemetry"):
         frame = pd.read_parquet(part)
         _validate_telemetry(frame, part.name)
+        telemetry_digest.update(table_digest(frame, TELEMETRY_KEYS).encode("ascii"))
+        telemetry_rows += len(frame)
         identities = frame[["entity_id", "episode_id", "metric_id"]].astype(str).drop_duplicates()
         observed["entities"].update(identities["entity_id"])
         observed["episodes"].update(identities["episode_id"])
@@ -498,9 +518,25 @@ def read_pack(pack_root):
             if list(frame.columns) != schemas[name]:
                 raise ValueError(f"Unexpected schema in {folder}/{name}")
 
-    if pack_fingerprint(pack_root) != manifest["fingerprint"]:
+    table_hashes = {"telemetry": telemetry_digest.hexdigest()}
+    for name, frame in (
+        ("metric_catalogue", catalogue),
+        ("entity_registry", entities),
+        ("observation_episodes", episodes),
+    ):
+        table_hashes[name] = table_digest(frame, PACK_SCHEMAS[name])
+
+    if telemetry_rows != manifest["core_row_counts"]["telemetry"]:
+        raise ValueError("PACK-CORE telemetry row count no longer matches its manifest")
+    if _combine(table_hashes) != manifest["fingerprint"]:
         raise ValueError("PACK-CORE content no longer matches its manifest")
-    return manifest
+    return manifest, table_hashes
+
+
+def read_pack(pack_root):
+    """Validate a completed Pack and return its manifest."""
+
+    return _validated_pack(pack_root)[0]
 
 
 # --------------------------------------------------------------------------
@@ -509,14 +545,15 @@ def read_pack(pack_root):
 
 
 def _collection_gaps(connection, tolerance_factor=GAP_TOLERANCE_FACTOR):
-    """Internal gaps for any metric that declares a cadence.
+    """Return internal gaps and the exact global duplicate-key count.
 
     Gaps are found inside one ``(entity, episode, metric)`` series, so a
     recording never implies an obligation to the next recording, while a hole
-    inside a single recording is still reported.
+    inside a single recording is still reported. Duplicate detection uses the
+    same ordered pass instead of a second, memory-heavy distinct aggregation.
     """
 
-    gaps = connection.execute(
+    exceptions = connection.execute(
         """
         WITH ordered AS (
             SELECT t.entity_id, t.episode_id, t.metric_id, t.event_ts,
@@ -526,10 +563,11 @@ def _collection_gaps(connection, tolerance_factor=GAP_TOLERANCE_FACTOR):
                    ) AS previous_ts,
                    CAST(c.expected_cadence_seconds AS DOUBLE) AS expected_cadence_seconds
             FROM selected_observations AS t
-            JOIN metric_catalogue AS c USING (metric_id)
-            WHERE c.expected_cadence_seconds IS NOT NULL
+            LEFT JOIN metric_catalogue AS c USING (metric_id)
         )
-        SELECT entity_id, episode_id, metric_id,
+        SELECT CASE WHEN event_ts = previous_ts THEN 'duplicate' ELSE 'gap' END
+                   AS row_kind,
+               entity_id, episode_id, metric_id,
                previous_ts
                    + CAST(round(expected_cadence_seconds * 1000000) AS BIGINT)
                      * INTERVAL '1 microsecond' AS gap_start,
@@ -538,14 +576,24 @@ def _collection_gaps(connection, tolerance_factor=GAP_TOLERANCE_FACTOR):
                'within_episode_declared_cadence' AS coverage_basis
         FROM ordered
         WHERE previous_ts IS NOT NULL
-          AND epoch(event_ts - previous_ts) > expected_cadence_seconds * ?
+          AND (
+              event_ts = previous_ts
+              OR (
+                  expected_cadence_seconds IS NOT NULL
+                  AND epoch(event_ts - previous_ts) > expected_cadence_seconds * ?
+              )
+          )
         ORDER BY entity_id, episode_id, metric_id, gap_start
         """,
         [float(tolerance_factor)],
     ).df()
+    duplicate_keys = int(exceptions["row_kind"].eq("duplicate").sum())
+    gaps = exceptions.loc[exceptions["row_kind"].eq("gap")].drop(
+        columns="row_kind"
+    )
     for column in ("gap_start", "gap_end"):
         gaps[column] = pd.to_datetime(gaps[column], utc=True)
-    return gaps[CORE_SCHEMAS["collection_gaps"]]
+    return gaps[CORE_SCHEMAS["collection_gaps"]], duplicate_keys
 
 
 def _copy_tables(source_root, destination_root, names, schemas):
@@ -564,7 +612,7 @@ def build_canonical(pack_root, run_root, *, include_evaluation=True, as_of_ts=No
     """Convert any valid sector pack into immutable canonical directories."""
 
     pack_root, run_root = Path(pack_root), Path(run_root)
-    pack_manifest = read_pack(pack_root)
+    pack_manifest, _ = _validated_pack(pack_root)
     core_source = pack_root / "PACK-CORE"
     catalogue = pd.read_parquet(core_source / "metric_catalogue.parquet")
     pack_entities = pd.read_parquet(core_source / "entity_registry.parquet")
@@ -576,7 +624,7 @@ def build_canonical(pack_root, run_root, *, include_evaluation=True, as_of_ts=No
     if as_of is not None:
         where = f"WHERE event_ts <= TIMESTAMPTZ '{as_of.isoformat()}'"
 
-    with new_output_directory(run_root) as temporary, _duckdb().connect() as connection:
+    with new_output_directory(run_root) as temporary, _duckdb_connection() as connection:
         core = temporary / "SPEC-CORE"
         telemetry_directory = core / "telemetry"
         telemetry_directory.mkdir(parents=True)
@@ -594,15 +642,10 @@ def build_canonical(pack_root, run_root, *, include_evaluation=True, as_of_ts=No
         """)
 
         audit = connection.execute("""
-            SELECT count(*) AS rows,
-                   count(*) - count(DISTINCT (event_ts, entity_id, episode_id, metric_id))
-                       AS duplicate_keys
-            FROM selected_observations
+            SELECT count(*) AS rows FROM selected_observations
         """).df().iloc[0]
         if int(audit["rows"]) == 0:
             raise ValueError("No observations are available at the requested as_of_ts")
-        if int(audit["duplicate_keys"]):
-            raise ValueError("Duplicate telemetry keys exist across Pack parts")
 
         episode_bounds = connection.execute("""
             SELECT episode_id, entity_id,
@@ -650,13 +693,17 @@ def build_canonical(pack_root, run_root, *, include_evaluation=True, as_of_ts=No
             for code, count in frame["quality_code"].value_counts().items():
                 quality_counts[str(code)] = quality_counts.get(str(code), 0) + int(count)
 
+        collection_gaps, duplicate_keys = _collection_gaps(connection)
+        if duplicate_keys:
+            raise ValueError("Duplicate telemetry keys exist across Pack parts")
+
         table_hashes = {"telemetry": telemetry_digest.hexdigest()}
         row_counts = {"telemetry": telemetry_rows}
         sidecars = {
             "metric_catalogue": catalogue[CORE_SCHEMAS["metric_catalogue"]],
             "entity_registry": entities,
             "observation_episodes": episodes,
-            "collection_gaps": _collection_gaps(connection),
+            "collection_gaps": collection_gaps,
         }
         for name, frame in sidecars.items():
             frame.to_parquet(core / f"{name}.parquet", index=False)
@@ -743,14 +790,22 @@ def check_core(core_root):
         for name in ("metric_catalogue", "entity_registry", "observation_episodes")
     }
     telemetry_glob = str(core_root / "telemetry" / "part-*.parquet").replace("'", "''")
-    with _duckdb().connect() as connection:
+    with _duckdb_connection() as connection:
         audit = connection.execute(f"""
-            SELECT count(*) - count(DISTINCT (t.event_ts, t.entity_id, t.episode_id, t.metric_id))
+            WITH ordered AS (
+                SELECT t.*,
+                       lag(event_ts) OVER (
+                           PARTITION BY entity_id, episode_id, metric_id
+                           ORDER BY event_ts
+                       ) AS previous_ts
+                FROM read_parquet('{telemetry_glob}') AS t
+            )
+            SELECT sum(CASE WHEN t.event_ts = t.previous_ts THEN 1 ELSE 0 END)
                        AS duplicate_keys,
                    sum(CASE WHEN c.metric_id IS NULL THEN 1 ELSE 0 END) AS unknown_metrics,
                    sum(CASE WHEN r.entity_id IS NULL THEN 1 ELSE 0 END) AS unknown_entities,
                    sum(CASE WHEN e.episode_id IS NULL THEN 1 ELSE 0 END) AS unknown_episodes
-            FROM read_parquet('{telemetry_glob}') AS t
+            FROM ordered AS t
             LEFT JOIN read_parquet('{paths["metric_catalogue"]}') AS c USING (metric_id)
             LEFT JOIN read_parquet('{paths["entity_registry"]}') AS r USING (entity_id)
             LEFT JOIN read_parquet('{paths["observation_episodes"]}') AS e
@@ -799,7 +854,7 @@ def _entity_windows(run_root):
             windows = registry[["entity_id", "observed_from", "observed_to"]].copy()
         else:
             telemetry_glob = str(core / "telemetry" / "part-*.parquet").replace("'", "''")
-            with _duckdb().connect() as connection:
+            with _duckdb_connection() as connection:
                 windows = connection.execute(f"""
                     SELECT CAST(entity_id AS VARCHAR) AS entity_id,
                            min(event_ts) AS observed_from,
