@@ -1,0 +1,2 @@
+fault_type,task0_recall,v1_3_recall,recall_change,assessment
+fixture_fault,1.0,1.0,0.0,No slow-developing fault class exists in the disposable acceptance fixture; estimate slow-class changes when Notebook 04 is run on the full Telecom data.

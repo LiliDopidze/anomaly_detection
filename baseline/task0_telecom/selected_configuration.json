@@ -1,0 +1,59 @@
+{
+  "candidate_count": 45,
+  "canonical_fingerprint": "telecom-fixture-fingerprint",
+  "decision_horizon_seconds": 172800,
+  "development_exposure_value": 20.0,
+  "false_alert_budget": 0.01,
+  "false_alert_ci_high": 0.1844439727056968,
+  "false_alert_rate": 0.0,
+  "feature_settings": {
+    "analysis_partition": "calibration",
+    "base_cadence_seconds": 900,
+    "cadence_values_seconds": [
+      900
+    ],
+    "canonical_fingerprint": "telecom-fixture-fingerprint",
+    "eda_version": "1.1.0",
+    "measurement_kind_transformations": {
+      "bounded_fraction": "level_change_rolling_robust_z",
+      "cumulative_counter": "nonnegative_increment_and_reset",
+      "discrete_state": "level_and_state_change",
+      "gauge": "change_and_rolling_robust_z",
+      "interval_count": "log1p_then_change_and_rolling_robust_z"
+    },
+    "minimum_history_observations": 24,
+    "minimum_history_seconds": 21600,
+    "persistence_observations": [
+      1,
+      2,
+      4
+    ],
+    "persistence_seconds": [
+      900,
+      1800,
+      3600
+    ],
+    "primary_split": "time",
+    "recovery_observations": 4,
+    "rolling_window_observations": 96,
+    "rolling_window_seconds": 86400,
+    "seasonal_feature_reason": "EDA evidence is reported; the first baseline remains intentionally small",
+    "seasonal_features_enabled": false,
+    "sector": "telecom"
+  },
+  "holdout_used": false,
+  "leading_feature_note": "largest absolute robust feature deviation",
+  "model_core_version": "1.2.1",
+  "model_id": "statistical",
+  "model_version": "1.2.1",
+  "pca_variance_target": 0.9,
+  "persistence_observations": 4,
+  "primary_exposure_unit": "entity_day",
+  "primary_selection_metric": "preimpact_event_recall",
+  "recovery_observations": 4,
+  "scaled_feature_cap": 50.0,
+  "sector": "telecom",
+  "selection_status": "budget_qualified_by_point_estimate_only",
+  "threshold": 20.35675291780744,
+  "threshold_quantile": 0.99
+}
