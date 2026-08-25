@@ -1,0 +1,20 @@
+Task 0 printed timings
+======================
+Prepared calibration features: 0.0 min
+Prepared development features: 0.0 min
+Fitted and scored three models: 0.0 min
+Evaluated the complete grid: 0.0 min
+
+Notebook execution metadata
+===========================
+Feature preparation plus fit/score cell: 0.418390 s
+Grid comparison cell: 1.491216 s
+
+Task 3 checkpoint
+=================
+Grid comparison cell after alert-logic optimisation: 1.386905 s
+model_comparison.csv SHA-256 before and after:
+c92ff6f05ac8dbd493f404e695b6b88d7ee0ef495fa6afc4345de1ff2a136df7
+
+The disposable regression fixture is intentionally small. These timings test
+regression behaviour and are not estimates for the full Telecom dataset.

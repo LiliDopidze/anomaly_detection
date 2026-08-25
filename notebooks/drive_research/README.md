@@ -1,277 +1,225 @@
-# Milestone 1 research workflow
+# Sector-agnostic anomaly detection research workflow
 
-The maintained code lives in the GitHub repository:
+This folder keeps the research pipeline deliberately small. Sector-specific
+code ends at the pack notebooks; every notebook after that runs unchanged for
+Telecom and Petrobras 3W.
 
 ```text
-notebooks/drive_research/
-├── 01A_TELECOM_PACK.ipynb
-├── 01A_PETROBRAS_3W_PACK.ipynb
-├── 01B_COMMON_CANONICAL_ADAPTER.ipynb
-├── 02_CANONICAL_EDA.ipynb
-├── 03_EVALUATION_HARNESS.ipynb
-├── milestone1_core.py
-└── evaluation_core.py
+native data
+  -> 01A sector pack
+  -> 01B common canonical adapter
+  -> 02 canonical EDA
+  -> 03 evaluation contract
+  -> 04 simple anomaly models
+  -> 05 incident ranking and sealed holdout
 ```
 
-The notebooks hold the visible research decisions. `milestone1_core.py` holds
-the settled logic that must not be copied between them: schemas, validation,
-pack writing, canonical materialisation, one content fingerprint, and the
-isolation helpers. It contains no sector logic.
+The detector and all modelling code read `SPEC-CORE` only. Labels remain in
+the physically separate `SPEC-EVAL` directory and are read only by evaluation.
 
-`evaluation_core.py` is the same deliberate pattern for Notebook 03: one flat
-file containing tested truth partitioning, score-to-alert conversion, matching
-and metric calculations. Evaluation policy and adversarial controls remain
-visible in the notebook. It is not a package, CLI or sector-specific layer.
+## Maintained notebooks
 
-```text
-native source  ->  PACK          (sector notebook 01A translates)
-PACK           ->  SPEC-CORE     (common adapter 01B canonicalises)
-                 + SPEC-EVAL + SPLITS
+| Order | Notebook | Responsibility |
+|---:|---|---|
+| 1 | `01A_TELECOM_PACK.ipynb` or `01A_PETROBRAS_3W_PACK.ipynb` | Translate one native sector into the pack interface. |
+| 2 | `01B_COMMON_CANONICAL_ADAPTER.ipynb` | Validate and materialise canonical `SPEC-CORE`, `SPEC-EVAL` and splits. |
+| 3 | `02_CANONICAL_EDA.ipynb` | Describe calibration data only and record modelling decisions. |
+| 4 | `03_EVALUATION_CONTRACT.ipynb` | Freeze alert matching, metrics, false-alert exposure and sealed truth. |
+| 5 | `04_SIMPLE_ANOMALY_MODELS.ipynb` | Compare four understandable unsupervised baselines on development truth. |
+| 6 | `05_INCIDENT_RANKING_AND_HOLDOUT.ipynb` | Freeze the selected model, form incidents, rank them and optionally score holdout once. |
+
+The earlier `03_EVALUATION_HARNESS.ipynb`, `03A_OUTPUT_REVIEW.ipynb`,
+`04_GENERIC_BASELINE_MODELS.ipynb` and `04A_CLIENT_PROGRESS_REVIEW.ipynb` are
+retained only as experimental history. Do not include them in the final run.
+
+## Shared files
+
+- `milestone1_core.py` contains the already-frozen canonical contract and
+  adapter mechanics.
+- `evaluation_core.py` contains the settled alert matching and metric
+  calculations used by Notebooks 03–05.
+- `simple_model_core.py` contains the repeated, settled feature and scoring
+  mechanics used by Notebooks 04–05.
+
+These are flat helper files, not a package or application. Research decisions
+remain visible in the notebooks.
+
+## Runtime and data location
+
+The same notebooks run in Colab or locally.
+
+- Colab default: `/content/drive/MyDrive/anomaly_detection`
+- Linux/WSL default: `~/anomaly_detection_data`
+- Override either with `ANOMALY_DATA_ROOT`.
+
+In VS Code, select the repository `.venv` Python kernel. In Colab, upload this
+folder to `<data_root>/research/milestone1/`. Each notebook prints its resolved
+data, input and output paths before doing work.
+
+Set one sector before running:
+
+```python
+SECTOR = "telecom"          # or "petrobras_3w"
 ```
 
-A detector reads `SPEC-CORE` only and must run with `SPEC-EVAL` absent.
+Notebooks 02–05 also accept `ANOMALY_SECTOR` for headless runs. Notebook 01B
+uses `ADAPTER_SECTOR` instead; setting only `ANOMALY_SECTOR` does not control
+the canonical adapter. Output folders are immutable. Change the relevant run
+ID before intentionally rebuilding an existing result.
 
-## Storage and runtime
+## What each final stage does
 
-Code and data stay separate:
+### 02 — Canonical EDA
+
+EDA reads calibration telemetry only. This prevents development and holdout
+behaviour from influencing feature or model choices. It checks:
+
+- entities, episodes, metrics, time span and duplicate keys;
+- invalid/clipped rates, including variation between entity-series;
+- robust distributions and representative time-series plots;
+- autocorrelation and a limited daily-seasonality check where enough cycles exist;
+- level and differenced cross-metric dependence.
+
+Its only durable outputs are:
 
 ```text
-~/projects/anomaly_detection/       # Git repository
-~/anomaly_detection_data/           # local data and outputs (WSL/Linux default)
+outputs/eda/v1.3.0/<sector>/<eda_run_id>/
+├── eda_summary.csv
+└── eda_decisions.json
 ```
 
-Colab uses `MyDrive/anomaly_detection/` by default. To use another location,
-set `ANOMALY_DATA_ROOT`; the earlier `ANOMALY_DRIVE_ROOT` name remains
-accepted. Each notebook prints the resolved runtime, data root and code root
-before reading data.
+`eda_decisions.json` records short and long cadence-based rolling windows plus
+one persistence and recovery duration per sector. The long window prevents a
+sustained shift from immediately becoming its own reference. Clipped values are
+retained as observed saturated measurements, while their rate is reported
+separately. Seasonality is described but not automatically removed: it must be
+stable and beneficial on development data before becoming a transformation.
 
-For large canonical runs, DuckDB is limited to 3 GB and two threads by default
-and spills ordered operations to local temporary storage. Override these only
-when the machine has more capacity with `ANOMALY_DUCKDB_MEMORY_LIMIT` and
-`ANOMALY_DUCKDB_THREADS`. Notebook 01B performs bounded build checks by default;
-set `RUN_FULL_CORE_AUDIT=1` only for an intentional second full reread and
-rehash of the completed output.
+### 03 — Evaluation contract
 
-## Contracts
+This notebook is not a model. It freezes how model output will be judged before
+model selection begins. It defines:
 
-| Contract       | Version |
-|----------------|---------|
-| Pack interface | `0.7.1` |
-| SPEC-CORE      | `0.10.1`|
-| SPEC-EVAL      | `0.8.0` |
-| Canonical EDA  | `0.6.0` |
+- the alert-to-fault decision horizon;
+- duplicate-alert treatment;
+- event recall, pre-impact recall, precision, delay and false-alert exposure;
+- development and sealed-holdout truth directories.
 
-`SPEC-CORE v0.10.1` is the telemetry-only modelling floor:
-
-```text
-telemetry
-metric_catalogue
-entity_registry
-observation_episodes
-collection_gaps
-```
-
-Pack tables use the same names and the same columns, minus the four the
-adapter derives (`observed_from`, `observed_to`, `validity_basis`) and the one
-table it computes (`collection_gaps`). There is one schema definition, not two.
-
-### The three rules that make a row mean the same thing in every sector
-
-**1. Presence.** Telemetry is long and metric-level: one row means one metric
-was observed or attempted at that timestamp.
-
-- an **absent row** is not an observation;
-- a **null value with `quality_code='invalid'`** is an attempted observation
-  that failed;
-- an **absent `(episode, metric)` pair** means only that the source supplied no
-  observation attempt; capability metadata is needed to distinguish "not
-  installed" from "installed but never reported".
-
-Both packs now apply this identically. Previously Telecom emitted invalid rows
-for a sensor that was never fitted while 3W omitted it, so `valid_rate` and
-`coverage` meant different things in the two sectors.
-
-**2. Episodes.** Every row carries an `episode_id` — one source-declared
-observation run across which differences may be computed. It is one named
-synthetic generator-run episode per Telecom ONT, and one source recording per
-3W file. Episode boundaries are never inferred from telemetry gaps.
-
-**3. Gaps.** A gap is found inside one `(entity, episode, metric)` series
-wherever a metric declaring a cadence skipped more than
-`GAP_TOLERANCE_FACTOR × cadence`. This applies to `periodic` and `recording`
-metrics alike, so a hole inside a 3W recording is reported while the interval
-*between* two recordings stays correctly undefined.
-
-### Truth isolation
-
-Faults and condition states live in `SPEC-EVAL`, physically separate. There is
-no `SPEC-CONTEXT` layer.
-
-`truth_like_columns()` rejects metric IDs that look like labels. It is anchored
-to exact names (`class`, `state`, `label`, `target`, `fault`, `anomaly`,
-`condition_code`), the prefixes `gt_`, `truth_`, `anomaly_`, and the suffixes
-`_label`, `_labels`, `_anomaly`, `_ground_truth`. Free substring matching was
-removed: it rejected legitimate measurements such as `ground_fault_current`,
-`fault_passage_indicator` and `distance_to_fault`, all of which a power-sector
-pack would need.
-
-## Native data locations
-
-Telecom:
+Nine controls verify perfect alerts, constant-low and constant-high scores,
+recovery behaviour, late and duplicate alerts, malformed alerts, a deliberately
+leaky reader and the absence of point-adjusted evaluation. The leaky reader must
+fail when truth is unmounted.
 
 ```text
-<data_root>/telco_syntetic_data/
-├── reference_dataset.parquet   # observable-only; no gt_*, class, state, fault, label
-├── gt_fault_registry.csv
-├── fault_entity_intervals.csv
-├── tickets.csv                 # optional; not read
-└── topology.csv                # required grouping metadata
-```
-
-The notebook reads only `ont_id`, `olt_id`, `pon_port`, `splitter_l1`,
-`splitter_l2` and `geo_cluster` from topology, and writes those memberships to
-`SPLITS/entity_groups.parquet`. Topology never enters `SPEC-CORE` or the
-detector. Any `gt_*` topology columns remain evaluation truth, and the
-isolation test proves they cannot affect the approved groups.
-
-Petrobras 3W:
-
-```text
-<data_root>/sources/petrobras_3w/2.0.0/raw/3w_dataset_2.0.0/
-├── dataset.ini
-└── 0/ ... 9/
-```
-
-The notebook verifies the official inventory count
-(`THREEW_EXPECTED_FILES`, default 2228), excludes simulated, drawn and
-duplicate download variants, and selects one deterministic real recording per
-`(well, event-directory)` pair. It then reads the actual `class` values from
-every selected file. Development and holdout coverage is constrained by those
-values, not by the directory name; folder/class mismatches are reported.
-
-Finite-value validation uses only constraints documented in `dataset.ini`:
-choke openings are percentages and valve states are in `{0, 0.5, 1}`.
-Unexplained finite pressure, temperature and flow extremes remain measured and
-are surfaced in the EDA tail audit rather than silently removed.
-
-## Run order
-
-Set the sector, then run top to bottom. In VS Code select the repository
-`.venv` kernel and use **Run All**; in Colab use **Runtime → Run all**.
-
-| Step | Notebook | Setting |
-|------|----------|---------|
-| 1 | `01A_<SECTOR>_PACK.ipynb` | — |
-| 2 | `01B_COMMON_CANONICAL_ADAPTER.ipynb` | `SECTOR = "telecom"` or `"petrobras_3w"` |
-| 3 | `02_CANONICAL_EDA.ipynb` | same `SECTOR` |
-| 4 | `03_EVALUATION_HARNESS.ipynb` | same `SECTOR` |
-
-Notebooks 01B and 02 run unchanged across sectors — that is the claim they
-exist to demonstrate. Output directories are immutable; change the relevant
-run ID before rebuilding a completed stage. Every setting is also readable
-from an environment variable, so the whole pipeline can be executed headlessly
-for regression testing.
-
-## Splits
-
-`SPLITS` is orchestration metadata, never model input.
-
-| Table | Telecom | 3W | Tests |
-|-------|---------|-----|-------|
-| `time_partitions` | yes | — | temporal drift |
-| `entity_partitions` | yes (whole `geo_cluster`) | yes (whole well) | unseen entity |
-| `entity_groups` | yes (OLT/PON/splitter/geo) | — | grouped-fault evaluation |
-
-Both sectors now carry an `entity_partitions` table, so Notebook 03 can pose
-the *same* generalisation question in both. Previously Telecom split on time
-and 3W on entity, which meant the two sectors were answering different
-questions and no cross-sector number was comparable.
-
-## Outputs
-
-```text
-outputs/packs/<sector>/<pack_run_id>/
-├── PACK-CORE/{telemetry/, metric_catalogue, entity_registry, observation_episodes}
-├── PACK-EVAL/      # optional, never read by detector code
-├── SPLITS/
-└── pack_manifest.json
-
-outputs/canonical/v0.10.1/<sector>/<canonical_run_id>/
-├── SPEC-CORE/      # + collection_gaps, derived bounds, manifest with fingerprint
-├── SPEC-EVAL/      # optional
-├── SPLITS/
-└── run_manifest.json
-
-outputs/eda/v0.6.0/<sector>/<eda_run_id>/
-├── *.parquet       # compact evidence tables
-├── figures/
-└── eda_summary.json
-
-outputs/evaluation/v0.1.0/<sector>/<evaluation_run_id>/
-├── TRUTH/calibration/
-├── TRUTH/development/
-├── TRUTH/holdout_sealed/
-├── CONTROLS/
+outputs/evaluation/v1.3.0/<sector>/<evaluation_run_id>/
 ├── evaluation_policy.json
-└── evaluation_manifest.json
+├── development/{fault_events,fault_entity_intervals}.parquet
+└── holdout_sealed/{fault_events,fault_entity_intervals}.parquet
 ```
 
-EDA outputs are immutable. The notebook uses a temporary figure directory and
-publishes all tables and figures together only after successful completion.
-It profiles a balanced metric set, uses gap-safe transformations, Spearman
-correlations, cadence-aware autocorrelation lags, bounded stationarity tests,
-and explicit test statuses. Population summaries stay in spillable DuckDB;
-the pandas time-series panel is capped by `EDA_MAX_PANEL_ROWS` (750,000 by
-default) using centred contiguous windows. No EDA value is imputed or deleted.
+### 04 — Simple anomaly models
 
-## Adding another sector
+All models use the same causal, measurement-aware feature table. Rolling
+history is measured in elapsed time and converted using each metric's declared
+cadence, so the same code remains valid when a future source mixes cadences:
 
-Write one `01A_<SECTOR>_PACK.ipynb` containing three things:
+- gauges: long-run-scaled change plus short- and long-window robust deviations;
+- interval counts: `log1p`, then the same causal change and deviation features;
+- cumulative counters: non-negative increment plus reset flag;
+- discrete states: current state plus change flag.
 
-1. a **phrasebook** — the native-field to `metric_id` map, with measurement
-   kind, unit, sampling mode and cadence;
-2. a **telemetry generator** — any iterable yielding long DataFrames with the
-   telemetry columns, emitting a `(episode, metric)` pair only where the source
-   attempted to observe it;
-3. a **truth translator** — native labels routed to `PACK-EVAL` only.
+Raw gauge and count levels are deliberately excluded: legitimate asset-level
+offsets should not become anomalies merely because a new well or device has a
+different operating level. Bounded fractions and discrete state codes remain
+directly comparable. The first multivariate baseline requires aligned metric
+cadence and fails clearly instead of silently resampling a mixed-cadence source.
 
-Then call `save_pack(...)`. It owns directory layout, part numbering,
-validation, the fingerprint and the manifest, so a sector notebook never
-handles any of them.
+Only calibration data fits imputers, scaling, models and operating thresholds.
+Development labels compare exactly four baselines:
 
-The pack must pass the original-versus-redacted isolation test. Topology is an
-optional sector capability: when a sector has reliable relationship data, store
-memberships in `SPLITS`; do not add topology columns to telemetry or let a
-detector depend on them.
+1. robust statistical score — maximum `log1p` absolute robust feature score;
+2. Isolation Forest — multivariate nonlinear baseline;
+3. PCA reconstruction error (SPE) — detects broken correlation structure;
+4. PCA Hotelling T-squared — detects movement along retained PCA directions.
 
-Do not add a sector branch to `milestone1_core.py`, Notebook 01B or Notebook
-02. If a genuine source concept cannot be represented without distortion,
-record the failure in the contract-fit report before changing the versioned
-interface. That report is the actual research output of Milestone 1.
+PCA retains approximately 90% of calibration variance while leaving at least
+one direction to reconstruct. A calibration-time degeneracy check stops a
+collapsed SPE baseline from being reported as a working detector.
 
-## Evaluation harness
+Each model uses three calibration thresholds and one EDA-declared persistence
+setting: exactly 12 operating candidates. A threshold is the median of
+within-block calibration quantiles (entity blocks for Telecom, episode blocks
+for 3W), so one long or contaminated block cannot dominate it. This controls a
+point-level exceedance quantile, not the operational alert rate; the latter is
+measured empirically.
 
-Notebook 03 freezes the common score and alert schemas, physically separates
-development from sealed holdout truth, and tests event matching before a real
-model exists. Telecom uses chronological partitions as its primary evaluation;
-3W uses whole-well partitions. The choice is made from split capabilities and
-can be overridden explicitly with `EVALUATION_PRIMARY_SPLIT`.
+VUS-PR over development thresholds and decision tolerances is the primary
+threshold-free model comparison. The 12-row operating table then shows what a
+frozen policy does. If VUS-PR and the operating-point winner disagree, the
+notebook reports both. False-alert point rates use raw alerts, while their 95%
+Poisson bounds use topology/time clusters to avoid pretending correlated alarms
+are independent. Recall confidence bounds, clipped rates and results by fault
+type are retained. Robust-scaled features are capped at ±50 before Isolation
+Forest and PCA to prevent numerical overflow from corrupt but finite values.
 
-An alert is matched from the later of `observable_ts` and the affected-entity
-interval start until the earlier of their two end times. One alert matches at
-most one fault, one fault receives one event-level credit, and later eligible
-alerts are duplicates. Event recall, pre-impact recall, precision, false-alert
-rate, latency, shared-fault recall and entity coverage are reported separately.
-Ratios include Wilson 95% intervals; fewer than five events of a type is marked
-descriptive only.
+```text
+outputs/models/v1.3.0/<sector>/<model_run_id>/
+├── model_comparison.csv
+├── model_comparison_by_fault_type.csv
+├── vus_pr_points.csv
+├── vus_pr_summary.csv
+├── seed_stability.csv
+├── warmup_bias.csv
+├── coverage_heterogeneity.csv
+├── development_alerts.parquet
+├── selected_model.joblib
+├── selected_configuration.json
+└── holdout_prediction_template.json
+```
 
-Constant, random, perfect-event, late, duplicate and deliberately leaky
-controls must pass before outputs are published. Latency remains sector-specific
-because Telecom and 3W derive `observable_ts` differently.
+### 05 — Incident ranking and holdout
 
-## Next stage
+The development run reuses the selected alerts written by Notebook 04, avoiding
+a second full scoring pass. The frozen model scores holdout only when explicitly
+requested. Consecutive anomalous scores form alerts; sustained recovery closes
+them. Telecom topology groups simultaneous
+alerts into shared incidents without entering the detector. 3W incidents remain
+recording/well based because no shared topology is supplied.
 
-Build `04_GENERIC_BASELINE_MODELS.ipynb` using calibration and development
-SPEC-CORE only. Notebook 04 may pass development scores to the evaluator, but
-must not open `TRUTH/holdout_sealed`; that directory is first used by Notebook
-05 after the feature definition, model and threshold are frozen.
+Incidents are ranked lexicographically by operational evidence: affected
+entities, number of anomalous metrics, peak score divided by the frozen
+threshold, and start time. Group priority is derived from observed group
+cardinality rather than a Telecom-specific list.
+
+The default is development review. Before `RUN_HOLDOUT=1`, copy
+`holdout_prediction_template.json` to `holdout_prediction.json` and pre-register
+an expected value and confirmation range for every primary metric. Opening
+holdout writes `holdout_receipt.json` beside sealed truth. An existing receipt
+blocks every later attempt, making holdout mechanically single-use for that
+evaluation run.
+
+```text
+outputs/final/v1.3.0/<sector>/<final_run_id>/<development-or-holdout>/
+├── ranked_incidents.csv
+├── evaluation_summary.csv
+├── fault_type_results.csv
+├── model_comparison_by_fault_type.csv
+└── holdout_prediction_comparison.csv   # holdout only
+```
+
+## Recommended execution
+
+For each sector:
+
+1. Run the relevant 01A pack notebook.
+2. Run 01B for that sector.
+3. Run 02 and review its compact summary and plots.
+4. Run 03 and confirm all nine evaluator controls pass.
+5. Run 04 and review VUS-PR plus the 12-row operating comparison.
+6. Run 05 with `RUN_HOLDOUT=0`; inspect the ranked development incidents.
+7. Freeze the policy and model, complete `holdout_prediction.json`, then run 05
+   once with `RUN_HOLDOUT=1`.
+
+Do not compare raw metric values or alert counts across sectors. Compare the
+same operational metrics under each sector's declared exposure unit and split
+design.

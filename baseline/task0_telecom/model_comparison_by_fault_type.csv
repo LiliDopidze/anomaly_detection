@@ -1,0 +1,2 @@
+fault_type,scoreable_faults,detected_faults,recall,reporting_status
+fixture_fault,1,1,1.0,descriptive_only
