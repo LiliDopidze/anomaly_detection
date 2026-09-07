@@ -1,225 +1,140 @@
 # Sector-agnostic anomaly detection research workflow
 
-This folder keeps the research pipeline deliberately small. Sector-specific
-code ends at the pack notebooks; every notebook after that runs unchanged for
-Telecom and Petrobras 3W.
+The maintained workflow is deliberately small. Sector-specific logic ends in
+Notebook 01A; every later notebook uses the same canonical contract.
 
 ```text
 native data
   -> 01A sector pack
   -> 01B common canonical adapter
-  -> 02 canonical EDA
-  -> 03 evaluation contract
-  -> 04 simple anomaly models
-  -> 05 incident ranking and sealed holdout
+  -> 02 calibration-only EDA
+  -> 03 evaluation harness
+  -> 04 frozen-residual models
+  -> 05 ranked cases and optional one-time holdout
+  -> 06 product demonstration
 ```
 
-The detector and all modelling code read `SPEC-CORE` only. Labels remain in
-the physically separate `SPEC-EVAL` directory and are read only by evaluation.
+`SPEC-CORE` contains model-visible telemetry. `SPEC-EVAL` contains labels and
+is physically separate. Detector code never reads `SPEC-EVAL`; only the
+evaluation functions do.
 
-## Maintained notebooks
+## Run order
 
-| Order | Notebook | Responsibility |
+| Order | Notebook | Result |
 |---:|---|---|
-| 1 | `01A_TELECOM_PACK.ipynb` or `01A_PETROBRAS_3W_PACK.ipynb` | Translate one native sector into the pack interface. |
-| 2 | `01B_COMMON_CANONICAL_ADAPTER.ipynb` | Validate and materialise canonical `SPEC-CORE`, `SPEC-EVAL` and splits. |
-| 3 | `02_CANONICAL_EDA.ipynb` | Describe calibration data only and record modelling decisions. |
-| 4 | `03_EVALUATION_CONTRACT.ipynb` | Freeze alert matching, metrics, false-alert exposure and sealed truth. |
-| 5 | `04_SIMPLE_ANOMALY_MODELS.ipynb` | Compare four understandable unsupervised baselines on development truth. |
-| 6 | `05_INCIDENT_RANKING_AND_HOLDOUT.ipynb` | Freeze the selected model, form incidents, rank them and optionally score holdout once. |
+| 1 | `01A_TELECOM_PACK.ipynb` or `01A_PETROBRAS_3W_PACK.ipynb` | Sector-specific Pack |
+| 2 | `01B_COMMON_CANONICAL_ADAPTER.ipynb` | Canonical `SPEC-CORE`, `SPEC-EVAL`, splits |
+| 3 | `02_CANONICAL_EDA.ipynb` | Calibration EDA, readiness and modelling hand-off |
+| 4 | `03_EVALUATION_HARNESS.ipynb` | Frozen matching, case and holdout policy |
+| 5 | `04_SIMPLE_ANOMALY_MODELS.ipynb` | Development comparison and gated reference portfolio |
+| 6 | `05_INCIDENT_RANKING_AND_HOLDOUT.ipynb` | Ranked development cases, or one sealed holdout run |
+| 7 | `06_PRODUCT_DEMO.ipynb` | Read-only interactive client view |
 
-The earlier `03_EVALUATION_HARNESS.ipynb`, `03A_OUTPUT_REVIEW.ipynb`,
-`04_GENERIC_BASELINE_MODELS.ipynb` and `04A_CLIENT_PROGRESS_REVIEW.ipynb` are
-retained only as experimental history. Do not include them in the final run.
+`03A_OUTPUT_REVIEW.ipynb` is an optional read-only inspection notebook. It is
+not a pipeline stage and does not create or change analytical results.
 
-## Shared files
+## What remains common and what changes by sector
 
-- `milestone1_core.py` contains the already-frozen canonical contract and
-  adapter mechanics.
-- `evaluation_core.py` contains the settled alert matching and metric
-  calculations used by Notebooks 03–05.
-- `simple_model_core.py` contains the repeated, settled feature and scoring
-  mechanics used by Notebooks 04–05.
+Only Notebook 01A changes for a new sector. It maps native fields to:
 
-These are flat helper files, not a package or application. Research decisions
-remain visible in the notebooks.
+- metric ID, measurement kind, unit, sampling mode and cadence;
+- entity and episode identity;
+- source quality rules backed by evidence;
+- sector labels routed only to Pack evaluation;
+- available topology and the correct split unit.
 
-## Runtime and data location
+The canonical adapter, EDA, evaluation, modelling, case formation and demo are
+common. A new sector must pass the same Pack validation and truth-isolation
+tests before those notebooks run.
+
+## Modelling approach
+
+Notebook 04 no longer uses a rolling centre as the normal reference. A rolling
+reference can absorb the slow degradation the detector is meant to find. The
+new V1 sequence is:
+
+1. transform each metric from its declared `measurement_kind`;
+2. freeze median and robust scale on calibration data only;
+3. calculate residuals against that frozen reference;
+4. score rapid deviations, residual CUSUM drift and dispersion change;
+5. compare optional PCA SPE and Isolation Forest on those same residuals;
+6. consolidate channel alerts into cases;
+7. select at equal case workload on development truth.
+
+Clipped values are not treated as ordinary measurements. They are withheld
+from asset-health features and retained as data-quality indicators. Petrobras
+3W additionally invalidates only three empirically verified repeated historian
+sentinels; other finite extremes remain visible for review.
+
+Case grouping uses a finite time gap and requires all entities in a multi-entity
+case to share one resolvable topology group. This prevents uncontrolled A-B-C
+transitive chains. Cases are ranked by anomaly evidence. Operational priority
+is intentionally blank until validated criticality and impact data exist.
+
+## Runtime and data paths
 
 The same notebooks run in Colab or locally.
 
 - Colab default: `/content/drive/MyDrive/anomaly_detection`
 - Linux/WSL default: `~/anomaly_detection_data`
-- Override either with `ANOMALY_DATA_ROOT`.
+- Override: `ANOMALY_DATA_ROOT`
 
-In VS Code, select the repository `.venv` Python kernel. In Colab, upload this
-folder to `<data_root>/research/milestone1/`. Each notebook prints its resolved
-data, input and output paths before doing work.
+In Colab, keep the notebooks and the three helper files in
+`MyDrive/anomaly_detection/research/milestone1/`. Locally, select the repository
+virtual environment as the notebook kernel.
 
-Set one sector before running:
+For Notebooks 02–06 set:
 
 ```python
 SECTOR = "telecom"          # or "petrobras_3w"
 ```
 
-Notebooks 02–05 also accept `ANOMALY_SECTOR` for headless runs. Notebook 01B
-uses `ADAPTER_SECTOR` instead; setting only `ANOMALY_SECTOR` does not control
-the canonical adapter. Output folders are immutable. Change the relevant run
-ID before intentionally rebuilding an existing result.
+Headless execution can set `ANOMALY_SECTOR`. Notebook 01B uses
+`ADAPTER_SECTOR`. Output directories are immutable; use a new run ID when an
+input or method changes.
 
-## What each final stage does
+## Durable outputs
 
-### 02 — Canonical EDA
-
-EDA reads calibration telemetry only. This prevents development and holdout
-behaviour from influencing feature or model choices. It checks:
-
-- entities, episodes, metrics, time span and duplicate keys;
-- invalid/clipped rates, including variation between entity-series;
-- robust distributions and representative time-series plots;
-- autocorrelation and a limited daily-seasonality check where enough cycles exist;
-- level and differenced cross-metric dependence.
-
-Its only durable outputs are:
+The pipeline intentionally writes a small number of understandable artefacts:
 
 ```text
-outputs/eda/v1.3.0/<sector>/<eda_run_id>/
-├── eda_summary.csv
-└── eda_decisions.json
+outputs/eda/v2.0.0/<sector>/<run>/
+  metric_summary.csv
+  temporal_summary.csv
+  baseline_review.parquet
+  readiness.parquet
+  eda_decisions.json
+
+outputs/evaluation/v2.0.0/<sector>/<run>/
+  evaluation_policy.json
+  truth_partition_audit.csv
+  development/*.parquet
+  holdout_sealed/*.parquet
+
+outputs/models/v2.0.0/<sector>/<run>/
+  residual_bundle.joblib
+  selected_configuration.json
+  calibration_thresholds.csv
+  development_comparison.csv
+  development_readiness.parquet
+  selected_alerts.parquet
+  selected_cases.parquet
+  selected_case_members.parquet
+  development_metrics.csv
+  fault_type_results.csv
+
+outputs/cases/v2.0.0/<sector>/<run>/
+  ranked_cases.csv
+  alerts.parquet
+  case_members.parquet
+  evaluation_metrics.csv
+  fault_type_results.csv
+  case_run.json
 ```
 
-`eda_decisions.json` records short and long cadence-based rolling windows plus
-one persistence and recovery duration per sector. The long window prevents a
-sustained shift from immediately becoming its own reference. Clipped values are
-retained as observed saturated measurements, while their rate is reported
-separately. Seasonality is described but not automatically removed: it must be
-stable and beneficial on development data before becoming a transformation.
-
-### 03 — Evaluation contract
-
-This notebook is not a model. It freezes how model output will be judged before
-model selection begins. It defines:
-
-- the alert-to-fault decision horizon;
-- duplicate-alert treatment;
-- event recall, pre-impact recall, precision, delay and false-alert exposure;
-- development and sealed-holdout truth directories.
-
-Nine controls verify perfect alerts, constant-low and constant-high scores,
-recovery behaviour, late and duplicate alerts, malformed alerts, a deliberately
-leaky reader and the absence of point-adjusted evaluation. The leaky reader must
-fail when truth is unmounted.
-
-```text
-outputs/evaluation/v1.3.0/<sector>/<evaluation_run_id>/
-├── evaluation_policy.json
-├── development/{fault_events,fault_entity_intervals}.parquet
-└── holdout_sealed/{fault_events,fault_entity_intervals}.parquet
-```
-
-### 04 — Simple anomaly models
-
-All models use the same causal, measurement-aware feature table. Rolling
-history is measured in elapsed time and converted using each metric's declared
-cadence, so the same code remains valid when a future source mixes cadences:
-
-- gauges: long-run-scaled change plus short- and long-window robust deviations;
-- interval counts: `log1p`, then the same causal change and deviation features;
-- cumulative counters: non-negative increment plus reset flag;
-- discrete states: current state plus change flag.
-
-Raw gauge and count levels are deliberately excluded: legitimate asset-level
-offsets should not become anomalies merely because a new well or device has a
-different operating level. Bounded fractions and discrete state codes remain
-directly comparable. The first multivariate baseline requires aligned metric
-cadence and fails clearly instead of silently resampling a mixed-cadence source.
-
-Only calibration data fits imputers, scaling, models and operating thresholds.
-Development labels compare exactly four baselines:
-
-1. robust statistical score — maximum `log1p` absolute robust feature score;
-2. Isolation Forest — multivariate nonlinear baseline;
-3. PCA reconstruction error (SPE) — detects broken correlation structure;
-4. PCA Hotelling T-squared — detects movement along retained PCA directions.
-
-PCA retains approximately 90% of calibration variance while leaving at least
-one direction to reconstruct. A calibration-time degeneracy check stops a
-collapsed SPE baseline from being reported as a working detector.
-
-Each model uses three calibration thresholds and one EDA-declared persistence
-setting: exactly 12 operating candidates. A threshold is the median of
-within-block calibration quantiles (entity blocks for Telecom, episode blocks
-for 3W), so one long or contaminated block cannot dominate it. This controls a
-point-level exceedance quantile, not the operational alert rate; the latter is
-measured empirically.
-
-VUS-PR over development thresholds and decision tolerances is the primary
-threshold-free model comparison. The 12-row operating table then shows what a
-frozen policy does. If VUS-PR and the operating-point winner disagree, the
-notebook reports both. False-alert point rates use raw alerts, while their 95%
-Poisson bounds use topology/time clusters to avoid pretending correlated alarms
-are independent. Recall confidence bounds, clipped rates and results by fault
-type are retained. Robust-scaled features are capped at ±50 before Isolation
-Forest and PCA to prevent numerical overflow from corrupt but finite values.
-
-```text
-outputs/models/v1.3.0/<sector>/<model_run_id>/
-├── model_comparison.csv
-├── model_comparison_by_fault_type.csv
-├── vus_pr_points.csv
-├── vus_pr_summary.csv
-├── seed_stability.csv
-├── warmup_bias.csv
-├── coverage_heterogeneity.csv
-├── development_alerts.parquet
-├── selected_model.joblib
-├── selected_configuration.json
-└── holdout_prediction_template.json
-```
-
-### 05 — Incident ranking and holdout
-
-The development run reuses the selected alerts written by Notebook 04, avoiding
-a second full scoring pass. The frozen model scores holdout only when explicitly
-requested. Consecutive anomalous scores form alerts; sustained recovery closes
-them. Telecom topology groups simultaneous
-alerts into shared incidents without entering the detector. 3W incidents remain
-recording/well based because no shared topology is supplied.
-
-Incidents are ranked lexicographically by operational evidence: affected
-entities, number of anomalous metrics, peak score divided by the frozen
-threshold, and start time. Group priority is derived from observed group
-cardinality rather than a Telecom-specific list.
-
-The default is development review. Before `RUN_HOLDOUT=1`, copy
-`holdout_prediction_template.json` to `holdout_prediction.json` and pre-register
-an expected value and confirmation range for every primary metric. Opening
-holdout writes `holdout_receipt.json` beside sealed truth. An existing receipt
-blocks every later attempt, making holdout mechanically single-use for that
-evaluation run.
-
-```text
-outputs/final/v1.3.0/<sector>/<final_run_id>/<development-or-holdout>/
-├── ranked_incidents.csv
-├── evaluation_summary.csv
-├── fault_type_results.csv
-├── model_comparison_by_fault_type.csv
-└── holdout_prediction_comparison.csv   # holdout only
-```
-
-## Recommended execution
-
-For each sector:
-
-1. Run the relevant 01A pack notebook.
-2. Run 01B for that sector.
-3. Run 02 and review its compact summary and plots.
-4. Run 03 and confirm all nine evaluator controls pass.
-5. Run 04 and review VUS-PR plus the 12-row operating comparison.
-6. Run 05 with `RUN_HOLDOUT=0`; inspect the ranked development incidents.
-7. Freeze the policy and model, complete `holdout_prediction.json`, then run 05
-   once with `RUN_HOLDOUT=1`.
-
-Do not compare raw metric values or alert counts across sectors. Compare the
-same operational metrics under each sector's declared exposure unit and split
-design.
+Development results are selection evidence, not final performance claims.
+If no configuration meets the predeclared case-workload budget, Notebook 04
+records `no_configuration_within_budget`. Notebook 05 may still rank those
+development cases for diagnosis, but it will refuse to open holdout.
+Run Notebook 05 with `RUN_HOLDOUT=1` only after the feature, detector, case and
+evaluation policy is frozen. The holdout receipt then blocks reuse.
