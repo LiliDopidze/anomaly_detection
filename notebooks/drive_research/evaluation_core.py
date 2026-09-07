@@ -13,10 +13,16 @@ import pandas as pd
 from scipy.stats import chi2
 
 
-EVALUATION_CORE_VERSION = "1.3.0"
+EVALUATION_CORE_VERSION = "2.0.0"
 PARTITIONS = ("calibration", "development", "holdout")
 SCORE_COLUMNS = [
     "event_ts", "entity_id", "episode_id", "anomaly_score", "model_id",
+]
+
+CASE_COLUMNS = [
+    "case_id", "case_start", "case_end", "peak_ts",
+    "scope_type", "scope_id", "affected_entity_count",
+    "anomaly_evidence_score", "channels", "leading_features",
 ]
 ALERT_COLUMNS = [
     "alert_id", "model_id", "entity_id", "episode_id", "alert_start",
@@ -309,8 +315,13 @@ def validate_scores(scores):
     clean["entity_id"] = clean["entity_id"].astype(str)
     clean["model_id"] = clean["model_id"].astype(str)
     clean["anomaly_score"] = pd.to_numeric(clean["anomaly_score"], errors="raise")
-    if not np.isfinite(clean["anomaly_score"]).all():
-        raise ValueError("Anomaly scores must be finite")
+    if np.isinf(clean["anomaly_score"]).any():
+        raise ValueError("Anomaly scores must not contain infinity")
+
+    # A detector may need a short warm-up before it can emit a score. Those
+    # rows are represented by NaN and are not alerts. Removing them also lets
+    # the timestamp-gap rule below reset persistence across an unscored span.
+    clean = clean.loc[clean["anomaly_score"].notna()].copy()
     clean["episode_id"] = clean["episode_id"].astype(str)
     if "leading_feature" not in clean:
         clean["leading_feature"] = pd.NA
@@ -577,23 +588,47 @@ def _fault_windows(events, intervals, decision_horizon_seconds):
             f"Examples: {examples}"
         )
 
-    for entity_id, entity_windows in windows.groupby("entity_id", sort=False):
-        ordered = entity_windows.sort_values("match_start").reset_index(drop=True)
-        for index, fault in ordered.iloc[:-1].iterrows():
-            overlaps = ordered.iloc[index + 1:].loc[
-                ordered.iloc[index + 1:]["match_start"].lt(fault["match_end"])
-                & ordered.iloc[index + 1:]["fault_id"].astype(str).ne(
-                    str(fault["fault_id"])
-                )
-            ]
-            if not overlaps.empty:
-                other = overlaps.iloc[0]
-                raise ValueError(
-                    "Greedy matching is unsafe because scoreable faults "
-                    f"{fault['fault_id']} and {other['fault_id']} have "
-                    f"overlapping windows on entity {entity_id}"
-                )
     return windows
+
+
+def _maximum_event_matches(candidates, ordered_alerts):
+    """Return a deterministic maximum-cardinality alert-to-fault match."""
+
+    if candidates.empty:
+        return {}
+
+    ranked = candidates.copy()
+    ranked["alert_key"] = ranked["alert_id"].astype(str)
+    ranked["fault_key"] = ranked["fault_id"].astype(str)
+    ranked = (
+        ranked.sort_values([
+            "alert_key", "match_end", "match_start", "fault_key",
+        ])
+        .drop_duplicates(["alert_key", "fault_key"])
+    )
+    choices = {
+        alert_key: group["fault_key"].tolist()
+        for alert_key, group in ranked.groupby("alert_key", sort=False)
+    }
+
+    fault_to_alert = {}
+    alert_to_fault = {}
+
+    def assign(alert_key, visited_faults):
+        for fault_key in choices.get(alert_key, []):
+            if fault_key in visited_faults:
+                continue
+            visited_faults.add(fault_key)
+            previous_alert = fault_to_alert.get(fault_key)
+            if previous_alert is None or assign(previous_alert, visited_faults):
+                fault_to_alert[fault_key] = alert_key
+                alert_to_fault[alert_key] = fault_key
+                return True
+        return False
+
+    for alert_id in ordered_alerts["alert_id"].astype(str):
+        assign(alert_id, set())
+    return alert_to_fault
 
 
 def _match_alerts(alerts, events, intervals, decision_horizon_seconds):
@@ -609,30 +644,39 @@ def _match_alerts(alerts, events, intervals, decision_horizon_seconds):
     ].copy()
     candidates = candidates.sort_values(["match_end", "match_start", "fault_id"])
     by_alert = {
-        key: frame for key, frame in candidates.groupby("alert_id", sort=False)
+        str(key): frame for key, frame in candidates.groupby("alert_id", sort=False)
     }
     empty = candidates.iloc[:0]
 
-    matched_faults = set()
-    matched_pairs = set()
-    rows = []
     ordered_alerts = alerts.sort_values(
         ["alert_start", "peak_score", "alert_id"],
         ascending=[True, False, True],
     )
+    primary_matches = _maximum_event_matches(candidates, ordered_alerts)
+    matched_faults = set(primary_matches.values())
+    entity_by_alert = dict(zip(
+        alerts["alert_id"].astype(str), alerts["entity_id"].astype(str)
+    ))
+    matched_pairs = {
+        (fault_id, entity_by_alert[alert_id])
+        for alert_id, fault_id in primary_matches.items()
+    }
+
+    rows = []
     for alert in ordered_alerts.itertuples(index=False):
-        choices = by_alert.get(alert.alert_id, empty)
-        available = choices.loc[
-            ~choices["fault_id"].astype(str).isin(matched_faults)
-        ]
-        if not available.empty:
-            selected, status = available.iloc[0], "matched"
-            matched_faults.add(str(selected["fault_id"]))
-            matched_pairs.add((str(selected["fault_id"]), str(alert.entity_id)))
+        alert_key = str(alert.alert_id)
+        choices = by_alert.get(alert_key, empty)
+        primary_fault = primary_matches.get(alert_key)
+        if primary_fault is not None:
+            selected = choices.loc[
+                choices["fault_id"].astype(str).eq(primary_fault)
+            ].iloc[0]
+            status = "matched"
         elif not choices.empty:
             new_pair = choices.loc[
                 [
-                    (str(fault_id), str(alert.entity_id)) not in matched_pairs
+                    str(fault_id) in matched_faults
+                    and (str(fault_id), str(alert.entity_id)) not in matched_pairs
                     for fault_id in choices["fault_id"]
                 ]
             ]
@@ -868,6 +912,9 @@ def evaluate_alerts(
     )
     duplicates = int(matches["match_status"].eq("duplicate").sum())
     false_low, false_high = _poisson_rate_interval(
+        false_alerts, exposure_value
+    )
+    cluster_low, cluster_high = _poisson_rate_interval(
         false_alert_clusters, exposure_value
     )
     total_low, total_high = _poisson_rate_interval(len(matches), exposure_value)
@@ -901,6 +948,18 @@ def evaluate_alerts(
             "ci_low": false_low,
             "ci_high": false_high,
             "unit": f"alerts/{exposure_unit.replace('_', '-')}",
+        },
+        {
+            "metric": f"false_alert_clusters_per_{exposure_unit}",
+            "value": (
+                false_alert_clusters / exposure_value
+                if exposure_value > 0 else np.nan
+            ),
+            "numerator": false_alert_clusters,
+            "denominator": exposure_value,
+            "ci_low": cluster_low,
+            "ci_high": cluster_high,
+            "unit": f"clusters/{exposure_unit.replace('_', '-')}",
         },
         {
             "metric": f"total_alerts_per_{exposure_unit}",
@@ -955,6 +1014,226 @@ def evaluate_alerts(
         "metrics": pd.DataFrame(metric_rows),
         "fault_type_results": by_type,
     }
+
+
+def form_cases(alerts, entity_groups=None, *, gap_seconds, thresholds):
+    """Consolidate channel alerts without uncontrolled topology chaining.
+
+    A new alert may join an existing case only when it is close in time and
+    all entities in the resulting case still share a common topology group.
+    This prevents A-B-C chains whose endpoints have no resolvable scope.
+    """
+
+    alerts = validate_alerts(alerts)
+    if alerts.empty:
+        return (
+            pd.DataFrame(columns=CASE_COLUMNS),
+            pd.DataFrame(columns=["case_id", "alert_id", "entity_id", "model_id"]),
+        )
+    thresholds = {str(key): float(value) for key, value in thresholds.items()}
+    missing = set(alerts["model_id"].astype(str)) - set(thresholds)
+    if missing:
+        raise ValueError(f"Missing channel thresholds: {sorted(missing)}")
+
+    groups = pd.DataFrame(columns=["entity_id", "group_type", "group_id"])
+    if entity_groups is not None and not entity_groups.empty:
+        required = {"entity_id", "group_type", "group_id"}
+        absent = required - set(entity_groups.columns)
+        if absent:
+            raise ValueError(f"Entity groups are missing columns: {sorted(absent)}")
+        groups = entity_groups[list(required)].dropna().astype(str).drop_duplicates()
+    memberships = {
+        entity: set(zip(rows["group_type"], rows["group_id"]))
+        for entity, rows in groups.groupby("entity_id")
+    }
+    group_sizes = groups.groupby(["group_type", "group_id"])["entity_id"].nunique().to_dict()
+    maximum_gap = pd.Timedelta(seconds=float(gap_seconds))
+
+    open_cases = []
+    active_cases = []
+    ordered = alerts.sort_values(["alert_start", "alert_end", "alert_id"])
+    for alert in ordered.itertuples(index=False):
+        entity = str(alert.entity_id)
+        alert_groups = memberships.get(entity, set())
+        active_cases = [
+            number for number in active_cases
+            if alert.alert_start <= open_cases[number]["end"] + maximum_gap
+        ]
+        compatible = []
+        for number in active_cases:
+            case = open_cases[number]
+            shared = case["common_groups"] & alert_groups
+            if entity in case["entities"] or shared:
+                compatible.append((case["end"], number, shared))
+        if compatible:
+            _, number, shared = max(compatible)
+            case = open_cases[number]
+            case["alerts"].append(alert)
+            case["entities"].add(entity)
+            case["end"] = max(case["end"], alert.alert_end)
+            if len(case["entities"]) > 1:
+                case["common_groups"] = shared
+        else:
+            open_cases.append({
+                "alerts": [alert],
+                "entities": {entity},
+                "start": alert.alert_start,
+                "end": alert.alert_end,
+                "common_groups": set(alert_groups),
+            })
+            active_cases.append(len(open_cases) - 1)
+
+    def exceedance(row):
+        threshold = thresholds[str(row.model_id)]
+        return 1.0 + (float(row.peak_score) - threshold) / max(abs(threshold), 1e-12)
+
+    case_rows, member_rows = [], []
+    for number, case in enumerate(open_cases, start=1):
+        case_id = f"C-{number:06d}"
+        members = case["alerts"]
+        peak = max(
+            members,
+            key=exceedance,
+        )
+        evidence = max(exceedance(row) for row in members)
+        if len(case["entities"]) == 1:
+            scope_type, scope_id = "entity", next(iter(case["entities"]))
+        elif case["common_groups"]:
+            scope_type, scope_id = min(
+                case["common_groups"],
+                key=lambda group: (group_sizes.get(group, np.inf), group[0], group[1]),
+            )
+        else:  # guarded by the merge rule; kept as an explicit invariant
+            raise AssertionError("A multi-entity case has no common topology scope")
+        case_rows.append({
+            "case_id": case_id,
+            "case_start": case["start"],
+            "case_end": case["end"],
+            "peak_ts": peak.peak_ts,
+            "scope_type": scope_type,
+            "scope_id": scope_id,
+            "affected_entity_count": len(case["entities"]),
+            "anomaly_evidence_score": float(evidence),
+            "channels": ", ".join(sorted({str(row.model_id) for row in members})),
+            "leading_features": ", ".join(sorted({
+                str(row.leading_feature) for row in members
+                if pd.notna(row.leading_feature)
+            })),
+        })
+        member_rows.extend({
+            "case_id": case_id,
+            "alert_id": str(row.alert_id),
+            "entity_id": str(row.entity_id),
+            "model_id": str(row.model_id),
+        } for row in members)
+    return (
+        pd.DataFrame(case_rows, columns=CASE_COLUMNS),
+        pd.DataFrame(member_rows),
+    )
+
+
+def evaluate_cases(
+    cases,
+    case_members,
+    events,
+    intervals,
+    *,
+    exposure_value,
+    exposure_unit,
+    decision_horizon_seconds,
+    min_reliable_faults=5,
+):
+    """One-to-one case-to-fault evaluation at operational workload level."""
+
+    missing = set(CASE_COLUMNS) - set(cases.columns)
+    if missing:
+        raise ValueError(f"Missing case columns: {sorted(missing)}")
+    if exposure_unit not in {"entity_day", "episode", "observed_hour"}:
+        raise ValueError("Unsupported exposure unit")
+    cases = cases[CASE_COLUMNS].copy()
+    for column in ("case_start", "case_end", "peak_ts"):
+        cases[column] = pd.to_datetime(cases[column], utc=True, errors="raise")
+
+    windows = _fault_windows(events, intervals, decision_horizon_seconds)
+    candidates = case_members[["case_id", "entity_id"]].drop_duplicates().merge(
+        windows, on="entity_id", how="inner"
+    ).merge(cases[["case_id", "case_start"]], on="case_id", how="inner")
+    candidates = candidates.loc[
+        candidates["case_start"].ge(candidates["match_start"])
+        & (candidates["match_end"].isna() | candidates["case_start"].lt(candidates["match_end"]))
+    ].drop_duplicates(["case_id", "fault_id"])
+    matching_candidates = candidates.rename(columns={"case_id": "alert_id"})
+    ordered = cases.rename(columns={
+        "case_id": "alert_id", "case_start": "alert_start",
+        "anomaly_evidence_score": "peak_score",
+    })
+    matched = _maximum_event_matches(matching_candidates, ordered)
+
+    match_rows = []
+    for case in cases.itertuples(index=False):
+        fault_id = matched.get(str(case.case_id))
+        choices = candidates.loc[candidates["case_id"].astype(str).eq(str(case.case_id))]
+        selected = choices.loc[choices["fault_id"].astype(str).eq(fault_id)] if fault_id else choices.iloc[:0]
+        status = "matched" if fault_id else ("duplicate" if not choices.empty else "false_case")
+        record = {"case_id": case.case_id, "match_status": status, "fault_id": pd.NA,
+                  "fault_type": pd.NA, "detection_delay_seconds": np.nan, "preimpact": False}
+        if not selected.empty:
+            row = selected.iloc[0]
+            reference = row["observable_ts"] if pd.notna(row["observable_ts"]) else row["onset_ts"]
+            record.update({
+                "fault_id": row["fault_id"],
+                "fault_type": row["fault_type"],
+                "detection_delay_seconds": (case.case_start - reference).total_seconds(),
+                "preimpact": pd.notna(row["impact_ts"]) and case.case_start < row["impact_ts"],
+            })
+        match_rows.append(record)
+    matches = pd.DataFrame(match_rows)
+
+    detections = matches.loc[matches["match_status"].eq("matched")]
+    fault_results = events.copy().merge(
+        detections[["fault_id", "case_id", "detection_delay_seconds", "preimpact"]],
+        on="fault_id", how="left", validate="one_to_one",
+    )
+    fault_results["detected"] = fault_results["case_id"].notna()
+    fault_results["preimpact"] = fault_results["preimpact"].eq(True)
+    detected = int(fault_results["detected"].sum())
+    credited_cases = len(detections)
+    nuisance_cases = len(cases) - credited_cases
+
+    rows = []
+    def ratio(name, numerator, denominator):
+        low, high = _wilson_interval(numerator, denominator)
+        rows.append({"metric": name, "value": numerator / denominator if denominator else np.nan,
+                     "numerator": numerator, "denominator": denominator,
+                     "ci_low": low, "ci_high": high, "unit": "ratio"})
+    ratio("event_recall", detected, len(fault_results))
+    ratio("case_precision", credited_cases, len(cases))
+    impact_known = fault_results["impact_ts"].notna()
+    ratio("preimpact_event_recall", int((fault_results["detected"] & fault_results["preimpact"] & impact_known).sum()), int(impact_known.sum()))
+    for name, count, unit_name in (
+        (f"false_cases_per_{exposure_unit}", nuisance_cases, "cases"),
+        (f"total_cases_per_{exposure_unit}", len(cases), "cases"),
+    ):
+        low, high = _poisson_rate_interval(count, exposure_value)
+        rows.append({"metric": name, "value": count / exposure_value if exposure_value else np.nan,
+                     "numerator": count, "denominator": exposure_value,
+                     "ci_low": low, "ci_high": high,
+                     "unit": f"{unit_name}/{exposure_unit.replace('_', '-')}"})
+    delays = fault_results.loc[fault_results["detected"], "detection_delay_seconds"].dropna()
+    rows.append({"metric": "median_detection_delay_seconds",
+                 "value": delays.median() if len(delays) else np.nan,
+                 "numerator": len(delays), "denominator": len(fault_results),
+                 "ci_low": np.nan, "ci_high": np.nan, "unit": "seconds"})
+
+    by_type = fault_results.groupby("fault_type", as_index=False).agg(
+        scoreable_faults=("fault_id", "nunique"), detected_faults=("detected", "sum")
+    )
+    by_type["recall"] = by_type["detected_faults"] / by_type["scoreable_faults"]
+    by_type["reporting_status"] = np.where(
+        by_type["scoreable_faults"].ge(min_reliable_faults), "estimable", "descriptive_only"
+    )
+    return {"case_matches": matches, "fault_results": fault_results,
+            "metrics": pd.DataFrame(rows), "fault_type_results": by_type}
 
 
 def evaluate_vus_pr(

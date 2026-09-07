@@ -21,8 +21,14 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import RobustScaler
 
 
-MODEL_CORE_VERSION = "1.3.0"
-MODEL_IDS = ("statistical", "isolation_forest", "pca", "pca_t2")
+MODEL_CORE_VERSION = "2.0.0"
+MODEL_IDS = (
+    "rapid_residual",
+    "drift_cusum",
+    "dispersion_change",
+    "pca_spe",
+    "isolation_forest",
+)
 IDENTITY_COLUMNS = ["event_ts", "entity_id", "episode_id"]
 SCALED_FEATURE_CAP = 50.0
 PCA_VARIANCE_TARGET = 0.90
@@ -84,15 +90,25 @@ def materialize_wide_partition(
     core_root, destination = Path(core_root), Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     metrics = catalogue["metric_id"].astype(str).tolist()
-    metric_columns = ",\n".join(
-        "max(CASE WHEN metric_id = {metric} "
-        "AND quality_code <> 'invalid' "
-        "AND value IS NOT NULL AND isfinite(value) "
-        "THEN value END) AS {alias}".format(
-            metric=_sql_literal(metric_id), alias=_sql_identifier(metric_id)
-        )
-        for metric_id in metrics
-    )
+    metric_columns = []
+    for metric_id in metrics:
+        metric = _sql_literal(metric_id)
+        metric_columns.extend([
+            (
+                "max(CASE WHEN metric_id = {metric} "
+                "AND quality_code <> 'invalid' "
+                "AND value IS NOT NULL AND isfinite(value) "
+                "THEN value END) AS {alias}"
+            ).format(metric=metric, alias=_sql_identifier(metric_id)),
+            (
+                "max(CASE WHEN metric_id = {metric} "
+                "AND quality_code = 'clipped' THEN 1 ELSE 0 END) AS {alias}"
+            ).format(
+                metric=metric,
+                alias=_sql_identifier(f"{metric_id}__clipped"),
+            ),
+        ])
+    metric_columns = ",\n".join(metric_columns)
     telemetry_glob = str(core_root / "telemetry" / "*.parquet")
     split_type, rows = partition_definition(split_root, partition)
     connection = duckdb.connect()
@@ -545,6 +561,102 @@ def fit_isolation_seed_models(
     }
 
 
+def fit_isolation_feature_subset(
+    bundle,
+    calibration_features,
+    excluded_features,
+    *,
+    maximum_training_rows=100_000,
+    random_seed=42,
+    model_id="isolation_forest_feature_subset",
+):
+    """Fit one diagnostic Isolation Forest after removing named features."""
+
+    excluded = set(excluded_features)
+    kept = [
+        name for name in bundle["feature_columns"]
+        if name not in excluded
+    ]
+    if not excluded or len(kept) == len(bundle["feature_columns"]):
+        raise ValueError("No fitted feature was excluded")
+    if not kept:
+        raise ValueError("Feature sensitivity removed every fitted feature")
+
+    sample = calibration_sample(
+        calibration_features, maximum_training_rows, random_seed
+    )[bundle["feature_columns"]].replace([np.inf, -np.inf], np.nan)
+    values = bundle["imputer"].transform(sample)
+    scaled = bundle["scaler"].transform(values)
+    indices = [bundle["feature_columns"].index(name) for name in kept]
+    model_values = np.clip(
+        scaled[:, indices],
+        -float(bundle["scaled_feature_cap"]),
+        float(bundle["scaled_feature_cap"]),
+    )
+    model = IsolationForest(
+        n_estimators=200,
+        max_samples="auto",
+        contamination="auto",
+        random_state=int(random_seed),
+        n_jobs=-1,
+    ).fit(model_values)
+    return {
+        "model_id": str(model_id),
+        "model": model,
+        "feature_columns": kept,
+        "feature_indices": indices,
+        "excluded_features": sorted(excluded),
+    }
+
+
+def score_isolation_feature_subset_file(
+    bundle,
+    sensitivity,
+    features_path,
+    destination,
+    batch_rows=100_000,
+):
+    """Score a diagnostic feature-subset Isolation Forest in batches."""
+
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    parquet = pq.ParquetFile(features_path)
+    columns = [*IDENTITY_COLUMNS, *bundle["feature_columns"]]
+    writer = None
+    try:
+        for batch in parquet.iter_batches(batch_size=batch_rows, columns=columns):
+            frame = batch.to_pandas()
+            clean = frame[bundle["feature_columns"]].replace(
+                [np.inf, -np.inf], np.nan
+            )
+            values = bundle["imputer"].transform(clean)
+            scaled = bundle["scaler"].transform(values)
+            subset = scaled[:, sensitivity["feature_indices"]]
+            subset = np.clip(
+                subset,
+                -float(bundle["scaled_feature_cap"]),
+                float(bundle["scaled_feature_cap"]),
+            )
+            score = -sensitivity["model"].decision_function(subset)
+            names = np.asarray(sensitivity["feature_columns"])
+            leading = names[np.argmax(np.abs(subset), axis=1)]
+            output = frame[IDENTITY_COLUMNS].reset_index(drop=True)
+            output[sensitivity["model_id"]] = score
+            output[f"{sensitivity['model_id']}__leading_feature"] = leading
+            table = pa.Table.from_pandas(output, preserve_index=False)
+            if writer is None:
+                writer = pq.ParquetWriter(
+                    destination, table.schema, compression="zstd"
+                )
+            writer.write_table(table)
+    finally:
+        if writer is not None:
+            writer.close()
+    if writer is None:
+        raise ValueError("Feature file produced no sensitivity scores")
+    return destination
+
+
 def score_isolation_seed_file(
     bundle,
     seed_models,
@@ -727,6 +839,53 @@ def alerts_from_score_file(
     return output
 
 
+def alert_grid_from_score_file(
+    score_path,
+    thresholds,
+    *,
+    persistence,
+    recovery_consecutive,
+):
+    """Create all channel/threshold alert sets with one scan per channel."""
+
+    from evaluation_core import ALERT_COLUMNS, SCORE_COLUMNS, scores_to_alerts
+
+    result = {}
+    for model_id, model_thresholds in thresholds.groupby("model_id", sort=False):
+        candidate_rows = list(model_thresholds.itertuples(index=False))
+        collected = {float(row.threshold_quantile): [] for row in candidate_rows}
+        columns = [*IDENTITY_COLUMNS, model_id, f"{model_id}__leading_feature"]
+        for episode in iter_episode_frames(score_path, columns=columns):
+            scores = episode[IDENTITY_COLUMNS].copy()
+            scores["anomaly_score"] = episode[model_id].to_numpy()
+            scores["model_id"] = model_id
+            scores["leading_feature"] = episode[
+                f"{model_id}__leading_feature"
+            ].to_numpy()
+            for row in candidate_rows:
+                produced = scores_to_alerts(
+                    scores[[*SCORE_COLUMNS, "leading_feature"]],
+                    float(row.threshold),
+                    min_consecutive=int(persistence[model_id]),
+                    recovery_consecutive=int(recovery_consecutive),
+                )
+                if not produced.empty:
+                    collected[float(row.threshold_quantile)].append(produced)
+
+        for quantile, frames in collected.items():
+            if frames:
+                alerts = pd.concat(frames, ignore_index=True).sort_values(
+                    ["alert_start", "entity_id", "episode_id"]
+                ).reset_index(drop=True)
+                alerts["alert_id"] = [
+                    f"A-{number:09d}" for number in range(1, len(alerts) + 1)
+                ]
+            else:
+                alerts = pd.DataFrame(columns=ALERT_COLUMNS)
+            result[(str(model_id), float(quantile))] = alerts
+    return result
+
+
 def candidate_key(model_id, threshold_quantile, persistence_observations):
     """Return a stable key for one development configuration."""
 
@@ -891,3 +1050,338 @@ def partition_exposure(score_path, exposure_unit, cadence_seconds):
 def score_percentiles(bundle, model_id, values):
     reference = np.asarray(bundle["score_reference"][model_id])
     return np.searchsorted(reference, np.asarray(values), side="right") / len(reference)
+
+
+# ---------------------------------------------------------------------------
+# Frozen-residual modelling API
+# ---------------------------------------------------------------------------
+
+def measurement_features(panel, catalogue):
+    """Apply the declared measurement-kind transformations to one episode.
+
+    The function is causal.  Clipped values are withheld from asset-health
+    features and retained as explicit data-quality indicators.
+    """
+
+    panel = panel.sort_values("event_ts").reset_index(drop=True)
+    output = panel[IDENTITY_COLUMNS].copy()
+    metadata = catalogue.set_index("metric_id")
+    timestamps = pd.to_datetime(panel["event_ts"], utc=True)
+
+    for metric_id in catalogue["metric_id"].astype(str):
+        values = pd.to_numeric(panel.get(metric_id), errors="coerce")
+        clipped_name = f"{metric_id}__clipped"
+        clipped = pd.to_numeric(
+            panel.get(clipped_name, pd.Series(0, index=panel.index)),
+            errors="coerce",
+        ).fillna(0).astype(bool)
+        values = values.mask(clipped)
+        kind = str(metadata.loc[metric_id, "measurement_kind"])
+        cadence = pd.to_numeric(
+            metadata.loc[metric_id, "expected_cadence_seconds"],
+            errors="coerce",
+        )
+
+        if kind == "bounded_fraction":
+            level = np.log10(values.clip(lower=1e-12))
+            output[f"{metric_id}__zero"] = values.eq(0).astype(float)
+        elif kind == "interval_count":
+            level = np.log1p(values.clip(lower=0))
+        else:
+            level = values.astype(float)
+
+        previous = level.shift()
+        difference = level - previous
+        if pd.notna(cadence) and cadence > 0:
+            elapsed = timestamps.diff().dt.total_seconds()
+            difference = difference.mask(elapsed.gt(float(cadence) * 1.5))
+
+        if kind == "cumulative_counter":
+            output[f"{metric_id}__increment"] = difference.mask(difference.lt(0))
+            output[f"{metric_id}__reset"] = difference.lt(0).where(difference.notna()).astype(float)
+        elif kind == "discrete_state":
+            output[f"{metric_id}__state"] = level
+            output[f"{metric_id}__transition"] = difference.ne(0).where(difference.notna()).astype(float)
+        else:
+            output[f"{metric_id}__level"] = level
+            output[f"{metric_id}__difference"] = difference
+
+        output[clipped_name] = clipped.astype(float)
+    return output
+
+
+def materialize_measurement_features(
+    wide_path,
+    catalogue,
+    destination,
+    *,
+    score_start=None,
+    score_end=None,
+):
+    """Write transformed features one complete episode at a time."""
+
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    writer = None
+    try:
+        for panel in iter_episode_frames(wide_path):
+            features = measurement_features(panel, catalogue)
+            times = pd.to_datetime(features["event_ts"], utc=True)
+            if score_start is not None:
+                features = features.loc[times.ge(score_start)]
+                times = pd.to_datetime(features["event_ts"], utc=True)
+            if score_end is not None:
+                features = features.loc[times.lt(score_end)]
+            if features.empty:
+                continue
+            table = pa.Table.from_pandas(features, preserve_index=False)
+            if writer is None:
+                writer = pq.ParquetWriter(destination, table.schema, compression="zstd")
+            writer.write_table(table)
+    finally:
+        if writer is not None:
+            writer.close()
+    if writer is None:
+        raise ValueError("Partition produced no transformed feature rows")
+    return destination
+
+
+def _robust_reference(frame):
+    centre = frame.median()
+    scale = (frame.quantile(0.75) - frame.quantile(0.25)) / 1.349
+
+    # Quantised and zero-inflated features often have an IQR of zero even
+    # though their occasional non-zero changes are perfectly valid. In that
+    # case use the typical non-zero deviation instead of an arbitrary tiny
+    # denominator, which would manufacture enormous residual scores.
+    deviation = frame.sub(centre).abs()
+    fallback = deviation.mask(deviation.eq(0)).median()
+    floor = np.maximum(centre.abs() * 1e-6, 1e-6)
+    scale = scale.where(scale.gt(floor), fallback)
+    scale = scale.where(scale.gt(floor), 1.0)
+    return centre, scale
+
+
+def _reference_sample(path, maximum_rows, random_seed):
+    source = _sql_literal(str(Path(path)))
+    with duckdb.connect() as connection:
+        return connection.execute(f"""
+            SELECT * FROM read_parquet({source})
+            USING SAMPLE reservoir({int(maximum_rows)} ROWS)
+            REPEATABLE ({int(random_seed)})
+        """).df()
+
+
+def _residual_frame(bundle, frame):
+    """Standardise against calibration-frozen references."""
+
+    features = bundle["feature_columns"]
+    values = frame[features].replace([np.inf, -np.inf], np.nan).astype(float)
+    centre = pd.DataFrame(
+        np.tile(bundle["global_centre"].to_numpy(), (len(frame), 1)),
+        columns=features,
+        index=frame.index,
+    )
+    scale = pd.DataFrame(
+        np.tile(bundle["global_scale"].to_numpy(), (len(frame), 1)),
+        columns=features,
+        index=frame.index,
+    )
+    if bundle["entity_centre"] is not None:
+        entity_ids = frame["entity_id"].astype(str)
+        entity_centre = bundle["entity_centre"].reindex(entity_ids).set_axis(frame.index)
+        entity_scale = bundle["entity_scale"].reindex(entity_ids).set_axis(frame.index)
+        centre = entity_centre.combine_first(centre)
+        scale = entity_scale.combine_first(scale)
+    return (values - centre) / scale
+
+
+def fit_residual_bundle(
+    calibration_features,
+    *,
+    use_entity_reference,
+    maximum_training_rows=150_000,
+    random_seed=42,
+    isolation_trees=200,
+):
+    """Fit frozen robust references and optional residual ML models."""
+
+    sample = _reference_sample(
+        calibration_features, maximum_training_rows, random_seed
+    )
+    sample["entity_id"] = sample["entity_id"].astype(str)
+    candidates = [
+        column for column in sample
+        if column not in IDENTITY_COLUMNS and not column.endswith("__clipped")
+    ]
+    usable = [
+        column for column in candidates
+        if sample[column].notna().mean() >= 0.20
+        and sample[column].dropna().nunique() > 1
+    ]
+    if not usable:
+        raise ValueError("No usable calibration features")
+
+    global_centre, global_scale = _robust_reference(sample[usable])
+    entity_centre = entity_scale = None
+    if use_entity_reference:
+        counts = sample.groupby("entity_id")[usable].count()
+        centre = sample.groupby("entity_id")[usable].median()
+        q25 = sample.groupby("entity_id")[usable].quantile(0.25)
+        q75 = sample.groupby("entity_id")[usable].quantile(0.75)
+        scales = (q75 - q25) / 1.349
+        valid = counts.ge(30)
+        entity_centre = centre.where(valid)
+        floors = np.maximum(entity_centre.abs() * 1e-6, 1e-6)
+        entity_scale = scales.where(valid & scales.gt(floors))
+
+    bundle = {
+        "model_core_version": MODEL_CORE_VERSION,
+        "feature_columns": usable,
+        "global_centre": global_centre,
+        "global_scale": global_scale,
+        "entity_centre": entity_centre,
+        "entity_scale": entity_scale,
+        "use_entity_reference": bool(use_entity_reference),
+        "training_rows": len(sample),
+        "random_seed": int(random_seed),
+        "isolation_trees": int(isolation_trees),
+    }
+    residuals = _residual_frame(bundle, sample[[*IDENTITY_COLUMNS, *usable]])
+    clean = residuals.fillna(0).clip(-50, 50)
+    bundle["residual_scale"] = clean.std().replace(0, 1).fillna(1)
+
+    if len(usable) >= 2:
+        component_limit = min(len(usable) - 1, 12)
+        pca = PCA(n_components=component_limit, svd_solver="full").fit(clean)
+        cumulative = np.cumsum(pca.explained_variance_ratio_)
+        keep = min(int(np.searchsorted(cumulative, 0.90) + 1), component_limit)
+        bundle["pca"] = PCA(n_components=keep, svd_solver="full").fit(clean)
+        bundle["isolation_forest"] = IsolationForest(
+            n_estimators=int(isolation_trees),
+            max_samples=min(1024, len(clean)),
+            contamination="auto",
+            random_state=int(random_seed),
+            n_jobs=-1,
+        ).fit(clean)
+    else:
+        bundle["pca"] = None
+        bundle["isolation_forest"] = None
+    return bundle
+
+
+def _row_max(values, names):
+    array = values.to_numpy(dtype=float)
+    available = np.isfinite(array)
+    safe = np.where(available, array, -np.inf)
+    positions = safe.argmax(axis=1)
+    maximum = safe[np.arange(len(safe)), positions]
+    maximum[~available.any(axis=1)] = np.nan
+    leading = np.asarray(names, dtype=object)[positions]
+    leading[~available.any(axis=1)] = None
+    return maximum, leading
+
+
+def _cusum_scores(residuals, names, allowance=0.5):
+    values = residuals[names].to_numpy(dtype=float)
+    positive = np.zeros(values.shape[1])
+    negative = np.zeros(values.shape[1])
+    scores = np.full(len(values), np.nan)
+    leading = np.full(len(values), None, dtype=object)
+    for row_number, row in enumerate(values):
+        valid = np.isfinite(row)
+        positive[~valid] = 0
+        negative[~valid] = 0
+        positive[valid] = np.maximum(0, positive[valid] + row[valid] - allowance)
+        negative[valid] = np.maximum(0, negative[valid] - row[valid] - allowance)
+        combined = np.maximum(positive, negative)
+        if valid.any():
+            position = int(np.argmax(combined))
+            scores[row_number] = combined[position]
+            leading[row_number] = names[position]
+    return scores, leading
+
+
+def score_residual_episode(bundle, features, *, cadence_seconds, dispersion_window_seconds):
+    """Score one episode with rapid, drift, dispersion and residual ML channels."""
+
+    residuals = _residual_frame(bundle, features)
+    available = residuals.notna().sum(axis=1)
+    minimum = max(1, int(np.ceil(len(bundle["feature_columns"]) * 0.20)))
+    ready = available.ge(minimum)
+
+    rapid_values, rapid_leading = _row_max(residuals.abs(), bundle["feature_columns"])
+    level_features = [
+        name for name in bundle["feature_columns"]
+        if name.endswith(("__level", "__increment"))
+    ] or bundle["feature_columns"]
+    drift_values, drift_leading = _cusum_scores(residuals, level_features)
+
+    window = max(4, round(float(dispersion_window_seconds) / float(cadence_seconds)))
+    spread = residuals[level_features].rolling(window, min_periods=max(3, window // 2)).std()
+    reference_spread = bundle["residual_scale"].reindex(level_features).replace(0, 1)
+    dispersion = np.abs(np.log(spread.div(reference_spread).clip(lower=0.05)))
+    dispersion_values, dispersion_leading = _row_max(dispersion, level_features)
+
+    clean = residuals.fillna(0).clip(-50, 50)
+    pca_values = np.full(len(features), np.nan)
+    isolation_values = np.full(len(features), np.nan)
+    pca_leading = np.full(len(features), None, dtype=object)
+    isolation_leading = rapid_leading.copy()
+    if bundle["pca"] is not None:
+        projected = bundle["pca"].transform(clean)
+        reconstruction = bundle["pca"].inverse_transform(projected)
+        error = (clean.to_numpy() - reconstruction) ** 2
+        pca_values = error.mean(axis=1)
+        pca_leading = np.asarray(bundle["feature_columns"], dtype=object)[error.argmax(axis=1)]
+        isolation_values = -bundle["isolation_forest"].decision_function(clean)
+
+    output = features[IDENTITY_COLUMNS].copy()
+    output["available_features"] = available.to_numpy()
+    output["readiness"] = np.where(ready, "monitored", "temporarily_unscoreable")
+    channels = {
+        "rapid_residual": (rapid_values, rapid_leading),
+        "drift_cusum": (drift_values, drift_leading),
+        "dispersion_change": (dispersion_values, dispersion_leading),
+        "pca_spe": (pca_values, pca_leading),
+        "isolation_forest": (isolation_values, isolation_leading),
+    }
+    for channel, (values, leading) in channels.items():
+        output[channel] = np.where(ready, values, np.nan)
+        output[f"{channel}__leading_feature"] = pd.Series(
+            leading, index=output.index, dtype="string"
+        )
+    return output
+
+
+def score_residual_file(
+    bundle,
+    features_path,
+    destination,
+    *,
+    cadence_seconds,
+    dispersion_window_seconds,
+):
+    """Score a transformed feature file episode by episode."""
+
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    writer = None
+    try:
+        for episode in iter_episode_frames(features_path):
+            scores = score_residual_episode(
+                bundle,
+                episode,
+                cadence_seconds=cadence_seconds,
+                dispersion_window_seconds=dispersion_window_seconds,
+            )
+            table = pa.Table.from_pandas(scores, preserve_index=False)
+            if writer is None:
+                writer = pq.ParquetWriter(destination, table.schema, compression="zstd")
+            writer.write_table(table)
+    finally:
+        if writer is not None:
+            writer.close()
+    if writer is None:
+        raise ValueError("Feature file produced no residual scores")
+    return destination
