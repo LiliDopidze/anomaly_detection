@@ -13,7 +13,7 @@ import pandas as pd
 from scipy.stats import chi2
 
 
-EVALUATION_CORE_VERSION = "2.0.0"
+EVALUATION_CORE_VERSION = "2.3.0"
 PARTITIONS = ("calibration", "development", "holdout")
 SCORE_COLUMNS = [
     "event_ts", "entity_id", "episode_id", "anomaly_score", "model_id",
@@ -544,6 +544,31 @@ def validate_alerts(alerts):
     return clean
 
 
+def _horizon_seconds(fault_types, rule):
+    """Return one non-negative decision horizon per fault.
+
+    ``rule`` may be one number for every fault type or a dictionary keyed by
+    ``fault_type``.  A dictionary must be complete: silently falling back to a
+    generic window would make a class-specific evaluation look more rigorous
+    than it is.
+    """
+
+    if isinstance(rule, dict):
+        horizons = fault_types.astype(str).map(rule)
+        missing = sorted(fault_types.loc[horizons.isna()].astype(str).unique())
+        if missing:
+            raise ValueError(
+                "Decision horizons are missing for fault types: "
+                f"{missing}"
+            )
+    else:
+        horizons = pd.Series(rule, index=fault_types.index)
+    horizons = pd.to_numeric(horizons, errors="coerce")
+    if horizons.isna().any() or (~np.isfinite(horizons)).any() or horizons.lt(0).any():
+        raise ValueError("Decision horizons must be finite non-negative seconds")
+    return horizons.astype(float)
+
+
 def _fault_windows(events, intervals, decision_horizon_seconds):
     windows = intervals[[
         "fault_id", "entity_id", "start_ts", "end_ts"
@@ -563,16 +588,20 @@ def _fault_windows(events, intervals, decision_horizon_seconds):
     windows["match_start"] = pd.concat(
         [reference, windows["start_ts"]], axis=1
     ).max(axis=1)
+    horizons = _horizon_seconds(
+        windows["fault_type"], decision_horizon_seconds
+    )
+    windows["decision_horizon_seconds"] = horizons
     horizon_end = windows["match_start"] + pd.to_timedelta(
-        decision_horizon_seconds, unit="s"
+        horizons, unit="s"
     )
     windows["match_end"] = pd.concat(
         [windows["event_end"], windows["interval_end"], horizon_end], axis=1
     ).min(axis=1)
-    invalid_end = (
-        windows["match_end"].lt(windows["match_start"])
-        if decision_horizon_seconds == 0
-        else windows["match_end"].le(windows["match_start"])
+    invalid_end = windows["match_end"].le(windows["match_start"])
+    zero_horizon = horizons.eq(0)
+    invalid_end = invalid_end & ~(
+        zero_horizon & windows["match_end"].eq(windows["match_start"])
     )
     invalid = windows["match_start"].isna() | (
         windows["match_end"].notna() & invalid_end

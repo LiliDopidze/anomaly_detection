@@ -39,7 +39,7 @@ not a pipeline stage and does not create or change analytical results.
 
 ## What remains common and what changes by sector
 
-Only Notebook 01A changes for a new sector. It maps native fields to:
+Notebook 01A changes for a new sector. It maps native fields to:
 
 - metric ID, measurement kind, unit, sampling mode and cadence;
 - entity and episode identity;
@@ -47,9 +47,18 @@ Only Notebook 01A changes for a new sector. It maps native fields to:
 - sector labels routed only to Pack evaluation;
 - available topology and the correct split unit.
 
-The canonical adapter, EDA, evaluation, modelling, case formation and demo are
-common. A new sector must pass the same Pack validation and truth-isolation
-tests before those notebooks run.
+The canonical adapter, EDA, modelling mechanics, case formation and demo stay
+common. A new sector also needs a short, explicit policy entry for analysis
+cadence, decision horizons and case workload; those are operational choices,
+not properties the common code should guess. It must pass the same Pack
+validation and truth-isolation tests before those notebooks run.
+
+Petrobras 3W defaults to up to five deterministic real recordings per
+well/event pair. A fixed 35/40/25 whole-well split gives development more real
+wells while preserving the previously sealed ten-well holdout. It is not
+searched using labels, so raising the sample is nested. The Pack writes
+the actual well, episode and class denominators; repeated recordings from one
+well are never presented as independent wells.
 
 ## Modelling approach
 
@@ -60,8 +69,8 @@ new V1 sequence is:
 1. transform each metric from its declared `measurement_kind`;
 2. freeze median and robust scale on calibration data only;
 3. calculate residuals against that frozen reference;
-4. score rapid deviations and residual CUSUM drift;
-5. calibrate the two channel thresholds independently;
+4. score rapid deviations, residual CUSUM drift and residual dispersion change;
+5. calibrate each channel threshold from calibration blocks;
 6. consolidate channel alerts into cases;
 7. select using the upper confidence bound on case workload.
 
@@ -70,9 +79,24 @@ seconds. Notebook 04 converts those durations to observations from each
 sector's canonical cadence. This keeps a one-minute rule equal to one minute
 whether measurements arrive every second or every fifteen minutes.
 
-Dispersion, PCA SPE and Isolation Forest are deferred from the primary
-selection surface. They return only if a later controlled comparison shows
-incremental recall or delay improvement at the same case workload.
+The three nested portfolios are rapid only, rapid plus drift, and rapid plus
+drift plus dispersion. A common calibration quantile keeps the development
+search to 18 predeclared configurations; the available independent faults do
+not support a large hyperparameter search. PCA SPE, Isolation Forest and deep
+sequence classifiers remain challengers until they show incremental event
+recall or delay improvement at the same case workload and whole-well split.
+
+Raw 3W telemetry remains canonical at one second. Modelling aggregates it to a
+10-second cadence using measurement-kind rules, leaving about 90 observations
+inside the shortest 15-minute decision window. This is a compute/variance
+choice, not a modification of the source data.
+
+The 2024 GRU study on 3W is treated as a supervised classification benchmark,
+not as the evaluation design for this product. It uses label-dependent training
+and observation-level splitting; this workflow keeps labels out of the detector,
+splits by well, and reports event recall plus case workload. A supervised GRU
+may be added later only as a separately named challenger under the same sealed
+whole-well holdout.
 
 Clipped values are not treated as ordinary measurements. They are withheld
 from asset-health features and retained as data-quality indicators. Petrobras
@@ -111,20 +135,26 @@ input or method changes.
 The pipeline intentionally writes a small number of understandable artefacts:
 
 ```text
-outputs/eda/v2.1.0/<sector>/<run>/
+outputs/packs/petrobras_3w/<run>/
+  population_report.csv
+  class_coverage_report.csv
+  sentinel_audit.csv
+
+outputs/eda/v2.3.0/<sector>/<run>/
   metric_summary.csv
   temporal_summary.csv
   baseline_review.parquet
   readiness.parquet
   eda_decisions.json
 
-outputs/evaluation/v2.2.0/<sector>/<run>/
+outputs/evaluation/v2.3.0/<sector>/<run>/
   evaluation_policy.json
+  statistical_resolution.csv
   truth_partition_audit.csv
   development/*.parquet
   holdout_sealed/*.parquet
 
-outputs/models/v2.2.0/<sector>/<run>/
+outputs/models/v2.3.0/<sector>/<run>/
   residual_bundle.joblib
   selected_configuration.json
   calibration_thresholds.csv
@@ -136,10 +166,11 @@ outputs/models/v2.2.0/<sector>/<run>/
   development_case_trace.parquet
   development_metrics.csv
   fault_type_results.csv
+  clustered_recall_interval.csv
   legacy_workload_comparison.csv      # when frozen v2.0 outputs are available
   legacy_fault_type_comparison.csv    # when frozen v2.0 outputs are available
 
-outputs/cases/v2.2.0/<sector>/<run>/
+outputs/cases/v2.3.0/<sector>/<run>/
   ranked_cases.csv
   alerts.parquet
   case_members.parquet

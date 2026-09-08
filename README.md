@@ -13,7 +13,8 @@ production platform.
                                                 ├──> SPEC-CORE
                                                 └──> SPEC-EVAL
 
-SPEC-CORE ──> 02_CANONICAL_EDA.ipynb ──> frozen EDA evidence
+SPEC-CORE ──> 02_CANONICAL_EDA.ipynb ──> 03_EVALUATION_HARNESS.ipynb
+          ──> 04_SIMPLE_ANOMALY_MODELS.ipynb ──> ranked cases and demo
 ```
 
 - Each `01A` notebook owns its native filenames, metric meanings, entity
@@ -27,6 +28,12 @@ SPEC-CORE ──> 02_CANONICAL_EDA.ipynb ──> frozen EDA evidence
 - `02_CANONICAL_EDA.ipynb` is shared unchanged across sectors and reads
   `SPEC-CORE` only. It produces reproducible statistical profiles and figures,
   not anomaly labels or model scores.
+- `03_EVALUATION_HARNESS.ipynb` freezes event matching, class-specific 3W
+  decision horizons, case workload and statistical-resolution reporting before
+  model comparison.
+- `04_SIMPLE_ANOMALY_MODELS.ipynb` compares a deliberately small nested set of
+  rapid, drift and dispersion residual detectors. More complex models are
+  challengers, not assumed improvements.
 - `milestone1_core.py` contains only settled, shared mechanics: interface
   validation, immutable materialisation, one content fingerprint, quality-code checks, gaps,
   episode boundaries and isolation-test support.
@@ -36,7 +43,8 @@ SPEC-CORE ──> 02_CANONICAL_EDA.ipynb ──> frozen EDA evidence
 The research path is:
 
 ```text
-SPEC-CORE ──> canonical EDA ──> feature engineering ──> modelling and ranking
+SPEC-CORE ──> calibration EDA ──> frozen residuals ──> case-level evaluation
+          ──> ranked incidents
 ```
 
 See the

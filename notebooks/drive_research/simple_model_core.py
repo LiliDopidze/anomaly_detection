@@ -22,7 +22,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import RobustScaler
 
 
-MODEL_CORE_VERSION = "2.2.0"
+MODEL_CORE_VERSION = "2.3.0"
 MODEL_IDS = (
     "rapid_residual",
     "drift_cusum",
@@ -1093,11 +1093,58 @@ def measurement_features(panel, catalogue):
     return output
 
 
+def resample_wide_panel(panel, catalogue, cadence_seconds):
+    """Aggregate a common-cadence wide panel without changing the source data.
+
+    Gauges use a median, interval counts add within the bin, and counters or
+    discrete states keep the last observation.  Clipping flags use a maximum.
+    The current research sectors have one native cadence per panel; a future
+    mixed-cadence source should be resampled before it is made wide.
+    """
+
+    cadence_seconds = float(cadence_seconds)
+    native = pd.to_numeric(
+        catalogue["expected_cadence_seconds"], errors="coerce"
+    ).dropna().unique()
+    if len(native) != 1:
+        raise ValueError("Wide-panel resampling requires one native cadence")
+    if cadence_seconds < float(native[0]):
+        raise ValueError("Model cadence cannot be faster than the source cadence")
+    if cadence_seconds == float(native[0]):
+        return panel
+
+    metadata = catalogue.set_index("metric_id")
+    aggregations = {}
+
+    def interval_sum(values):
+        return values.sum(min_count=1)
+
+    for metric_id in catalogue["metric_id"].astype(str):
+        kind = str(metadata.loc[metric_id, "measurement_kind"])
+        aggregations[metric_id] = (
+            interval_sum if kind == "interval_count"
+            else "last" if kind in {"cumulative_counter", "discrete_state"}
+            else "median"
+        )
+        aggregations[f"{metric_id}__clipped"] = "max"
+
+    rule = pd.Timedelta(seconds=cadence_seconds)
+    indexed = panel.set_index(pd.to_datetime(panel["event_ts"], utc=True))
+    values = indexed[list(aggregations)].resample(
+        rule, origin="start"
+    ).agg(aggregations)
+    values = values.reset_index(names="event_ts")
+    values.insert(1, "entity_id", str(panel["entity_id"].iloc[0]))
+    values.insert(2, "episode_id", str(panel["episode_id"].iloc[0]))
+    return values
+
+
 def materialize_measurement_features(
     wide_path,
     catalogue,
     destination,
     *,
+    target_cadence_seconds=None,
     score_start=None,
     score_end=None,
 ):
@@ -1108,7 +1155,16 @@ def materialize_measurement_features(
     writer = None
     try:
         for panel in iter_episode_frames(wide_path):
-            features = measurement_features(panel, catalogue)
+            feature_catalogue = catalogue
+            if target_cadence_seconds is not None:
+                panel = resample_wide_panel(
+                    panel, catalogue, target_cadence_seconds
+                )
+                feature_catalogue = catalogue.copy()
+                feature_catalogue["expected_cadence_seconds"] = (
+                    target_cadence_seconds
+                )
+            features = measurement_features(panel, feature_catalogue)
             times = pd.to_datetime(features["event_ts"], utc=True)
             if score_start is not None:
                 features = features.loc[times.ge(score_start)]
