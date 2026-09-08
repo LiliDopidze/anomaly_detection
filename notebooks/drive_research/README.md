@@ -3,6 +3,10 @@
 The maintained workflow is deliberately small. Sector-specific logic ends in
 Notebook 01A; every later notebook uses the same canonical contract.
 
+The current deliverable is a **defensible analytical product core and client
+demonstration**, not a production monitoring service. Production ingestion,
+security, workflow integration and service operations remain separate work.
+
 ```text
 native data
   -> 01A sector pack
@@ -56,10 +60,14 @@ new V1 sequence is:
 1. transform each metric from its declared `measurement_kind`;
 2. freeze median and robust scale on calibration data only;
 3. calculate residuals against that frozen reference;
-4. score rapid deviations, residual CUSUM drift and dispersion change;
-5. compare optional PCA SPE and Isolation Forest on those same residuals;
+4. score rapid deviations and residual CUSUM drift;
+5. calibrate the two channel thresholds independently;
 6. consolidate channel alerts into cases;
-7. select at equal case workload on development truth.
+7. select using the upper confidence bound on case workload.
+
+Dispersion, PCA SPE and Isolation Forest are deferred from the primary
+selection surface. They return only if a later controlled comparison shows
+incremental recall or delay improvement at the same case workload.
 
 Clipped values are not treated as ordinary measurements. They are withheld
 from asset-health features and retained as data-quality indicators. Petrobras
@@ -98,20 +106,20 @@ input or method changes.
 The pipeline intentionally writes a small number of understandable artefacts:
 
 ```text
-outputs/eda/v2.0.0/<sector>/<run>/
+outputs/eda/v2.1.0/<sector>/<run>/
   metric_summary.csv
   temporal_summary.csv
   baseline_review.parquet
   readiness.parquet
   eda_decisions.json
 
-outputs/evaluation/v2.0.0/<sector>/<run>/
+outputs/evaluation/v2.1.0/<sector>/<run>/
   evaluation_policy.json
   truth_partition_audit.csv
   development/*.parquet
   holdout_sealed/*.parquet
 
-outputs/models/v2.0.0/<sector>/<run>/
+outputs/models/v2.1.0/<sector>/<run>/
   residual_bundle.joblib
   selected_configuration.json
   calibration_thresholds.csv
@@ -120,15 +128,19 @@ outputs/models/v2.0.0/<sector>/<run>/
   selected_alerts.parquet
   selected_cases.parquet
   selected_case_members.parquet
+  development_case_trace.parquet
   development_metrics.csv
   fault_type_results.csv
+  legacy_workload_comparison.csv      # when frozen v2.0 outputs are available
+  legacy_fault_type_comparison.csv    # when frozen v2.0 outputs are available
 
-outputs/cases/v2.0.0/<sector>/<run>/
+outputs/cases/v2.1.0/<sector>/<run>/
   ranked_cases.csv
   alerts.parquet
   case_members.parquet
   evaluation_metrics.csv
   fault_type_results.csv
+  case_score_trace.parquet
   case_run.json
 ```
 
@@ -138,3 +150,7 @@ records `no_configuration_within_budget`. Notebook 05 may still rank those
 development cases for diagnosis, but it will refuse to open holdout.
 Run Notebook 05 with `RUN_HOLDOUT=1` only after the feature, detector, case and
 evaluation policy is frozen. The holdout receipt then blocks reuse.
+
+Petrobras 3W is the primary real-data validation sector. Telecom is a
+synthetic methodological testbed: it is useful for controlled mechanism and
+leakage tests, but it does not establish real-world fibre-fault realism.
