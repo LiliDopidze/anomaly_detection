@@ -65,6 +65,11 @@ new V1 sequence is:
 6. consolidate channel alerts into cases;
 7. select using the upper confidence bound on case workload.
 
+Alert persistence, recovery and case consolidation are declared in elapsed
+seconds. Notebook 04 converts those durations to observations from each
+sector's canonical cadence. This keeps a one-minute rule equal to one minute
+whether measurements arrive every second or every fifteen minutes.
+
 Dispersion, PCA SPE and Isolation Forest are deferred from the primary
 selection surface. They return only if a later controlled comparison shows
 incremental recall or delay improvement at the same case workload.
@@ -113,13 +118,13 @@ outputs/eda/v2.1.0/<sector>/<run>/
   readiness.parquet
   eda_decisions.json
 
-outputs/evaluation/v2.1.0/<sector>/<run>/
+outputs/evaluation/v2.2.0/<sector>/<run>/
   evaluation_policy.json
   truth_partition_audit.csv
   development/*.parquet
   holdout_sealed/*.parquet
 
-outputs/models/v2.1.0/<sector>/<run>/
+outputs/models/v2.2.0/<sector>/<run>/
   residual_bundle.joblib
   selected_configuration.json
   calibration_thresholds.csv
@@ -134,7 +139,7 @@ outputs/models/v2.1.0/<sector>/<run>/
   legacy_workload_comparison.csv      # when frozen v2.0 outputs are available
   legacy_fault_type_comparison.csv    # when frozen v2.0 outputs are available
 
-outputs/cases/v2.1.0/<sector>/<run>/
+outputs/cases/v2.2.0/<sector>/<run>/
   ranked_cases.csv
   alerts.parquet
   case_members.parquet

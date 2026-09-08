@@ -8,6 +8,7 @@ application.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import duckdb
@@ -21,7 +22,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import RobustScaler
 
 
-MODEL_CORE_VERSION = "2.1.0"
+MODEL_CORE_VERSION = "2.2.0"
 MODEL_IDS = (
     "rapid_residual",
     "drift_cusum",
@@ -40,6 +41,16 @@ SHORT_SCALE_FLOOR_FRACTION = 0.25
 RELATIVE_SCALE_FLOOR = 1e-6
 ABSOLUTE_SCALE_FLOOR = 1e-12
 PCA_EIGENVALUE_FLOOR = 1e-12
+
+
+def duration_to_observations(duration_seconds, cadence_seconds):
+    """Convert an elapsed-duration rule to a whole number of observations."""
+
+    duration_seconds = float(duration_seconds)
+    cadence_seconds = float(cadence_seconds)
+    if duration_seconds <= 0 or cadence_seconds <= 0:
+        raise ValueError("Duration and cadence must be positive")
+    return max(1, math.ceil(duration_seconds / cadence_seconds))
 
 
 def _sql_literal(value):
