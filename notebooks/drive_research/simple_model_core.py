@@ -21,7 +21,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import RobustScaler
 
 
-MODEL_CORE_VERSION = "2.0.0"
+MODEL_CORE_VERSION = "2.1.0"
 MODEL_IDS = (
     "rapid_residual",
     "drift_cusum",
@@ -771,34 +771,6 @@ def calibration_thresholds(
     return pd.DataFrame(rows)
 
 
-def score_quantile_thresholds(score_path, quantiles):
-    """Return pooled score quantiles for a threshold sweep."""
-
-    connection = duckdb.connect()
-    source = _sql_literal(str(Path(score_path)))
-    rows = []
-    for model_id in MODEL_IDS:
-        for quantile in quantiles:
-            threshold = connection.execute(
-                f"SELECT approx_quantile({_sql_identifier(model_id)}, "
-                "CAST(? AS FLOAT)) "
-                f"FROM read_parquet({source})",
-                [float(quantile)],
-            ).fetchone()[0]
-            if threshold is None or not np.isfinite(threshold):
-                raise ValueError(
-                    f"{model_id} has no finite development threshold at "
-                    f"quantile {quantile}"
-                )
-            rows.append({
-                "model_id": model_id,
-                "threshold_quantile": float(quantile),
-                "threshold": float(threshold),
-            })
-    connection.close()
-    return pd.DataFrame(rows)
-
-
 def alerts_from_score_file(
     score_path,
     model_id,
@@ -1172,8 +1144,8 @@ def _reference_sample(path, maximum_rows, random_seed):
         """).df()
 
 
-def _residual_frame(bundle, frame):
-    """Standardise against calibration-frozen references."""
+def _reference_components(bundle, frame):
+    """Return transformed values and their frozen centre and scale."""
 
     features = bundle["feature_columns"]
     values = frame[features].replace([np.inf, -np.inf], np.nan).astype(float)
@@ -1193,6 +1165,13 @@ def _residual_frame(bundle, frame):
         entity_scale = bundle["entity_scale"].reindex(entity_ids).set_axis(frame.index)
         centre = entity_centre.combine_first(centre)
         scale = entity_scale.combine_first(scale)
+    return values, centre, scale
+
+
+def _residual_frame(bundle, frame):
+    """Standardise against calibration-frozen references."""
+
+    values, centre, scale = _reference_components(bundle, frame)
     return (values - centre) / scale
 
 
@@ -1200,9 +1179,11 @@ def fit_residual_bundle(
     calibration_features,
     *,
     use_entity_reference,
+    reference_exclusions=None,
     maximum_training_rows=150_000,
     random_seed=42,
     isolation_trees=200,
+    fit_multivariate=False,
 ):
     """Fit frozen robust references and optional residual ML models."""
 
@@ -1222,7 +1203,29 @@ def fit_residual_bundle(
     if not usable:
         raise ValueError("No usable calibration features")
 
-    global_centre, global_scale = _robust_reference(sample[usable])
+    requested = pd.DataFrame(
+        reference_exclusions,
+        columns=["entity_id", "metric_id"],
+    ).dropna().astype(str).drop_duplicates()
+    reference_sample = sample[usable].copy()
+    applied = []
+    for entity_id, metric_id in requested.itertuples(index=False):
+        columns = [
+            name for name in usable
+            if name.startswith(f"{metric_id}__")
+        ]
+        rows = sample["entity_id"].eq(entity_id)
+        if rows.any() and columns:
+            reference_sample.loc[rows, columns] = np.nan
+            applied.append((entity_id, metric_id))
+    exclusions = pd.DataFrame(
+        applied, columns=["entity_id", "metric_id"]
+    )
+
+    fallback_centre, fallback_scale = _robust_reference(sample[usable])
+    global_centre, global_scale = _robust_reference(reference_sample)
+    global_centre = global_centre.combine_first(fallback_centre)
+    global_scale = global_scale.combine_first(fallback_scale)
     entity_centre = entity_scale = None
     if use_entity_reference:
         counts = sample.groupby("entity_id")[usable].count()
@@ -1235,6 +1238,18 @@ def fit_residual_bundle(
         floors = np.maximum(entity_centre.abs() * 1e-6, 1e-6)
         entity_scale = scales.where(valid & scales.gt(floors))
 
+        # EDA may flag an entity-metric calibration baseline as atypical or
+        # unstable. Keep the entity monitored, but use the pooled reference
+        # for that metric instead of freezing the suspect entity baseline.
+        for entity_id, metric_id in exclusions.itertuples(index=False):
+            columns = [
+                name for name in usable
+                if name.startswith(f"{metric_id}__")
+            ]
+            if entity_id in entity_centre.index and columns:
+                entity_centre.loc[entity_id, columns] = np.nan
+                entity_scale.loc[entity_id, columns] = np.nan
+
     bundle = {
         "model_core_version": MODEL_CORE_VERSION,
         "feature_columns": usable,
@@ -1243,15 +1258,17 @@ def fit_residual_bundle(
         "entity_centre": entity_centre,
         "entity_scale": entity_scale,
         "use_entity_reference": bool(use_entity_reference),
+        "reference_exclusions": exclusions.to_dict("records"),
         "training_rows": len(sample),
         "random_seed": int(random_seed),
         "isolation_trees": int(isolation_trees),
+        "fit_multivariate": bool(fit_multivariate),
     }
     residuals = _residual_frame(bundle, sample[[*IDENTITY_COLUMNS, *usable]])
     clean = residuals.fillna(0).clip(-50, 50)
     bundle["residual_scale"] = clean.std().replace(0, 1).fillna(1)
 
-    if len(usable) >= 2:
+    if fit_multivariate and len(usable) >= 2:
         component_limit = min(len(usable) - 1, 12)
         pca = PCA(n_components=component_limit, svd_solver="full").fit(clean)
         cumulative = np.cumsum(pca.explained_variance_ratio_)
@@ -1302,7 +1319,14 @@ def _cusum_scores(residuals, names, allowance=0.5):
     return scores, leading
 
 
-def score_residual_episode(bundle, features, *, cadence_seconds, dispersion_window_seconds):
+def score_residual_episode(
+    bundle,
+    features,
+    *,
+    cadence_seconds,
+    dispersion_window_seconds,
+    cusum_allowance,
+):
     """Score one episode with rapid, drift, dispersion and residual ML channels."""
 
     residuals = _residual_frame(bundle, features)
@@ -1315,7 +1339,9 @@ def score_residual_episode(bundle, features, *, cadence_seconds, dispersion_wind
         name for name in bundle["feature_columns"]
         if name.endswith(("__level", "__increment"))
     ] or bundle["feature_columns"]
-    drift_values, drift_leading = _cusum_scores(residuals, level_features)
+    drift_values, drift_leading = _cusum_scores(
+        residuals, level_features, allowance=float(cusum_allowance)
+    )
 
     window = max(4, round(float(dispersion_window_seconds) / float(cadence_seconds)))
     spread = residuals[level_features].rolling(window, min_periods=max(3, window // 2)).std()
@@ -1361,8 +1387,15 @@ def score_residual_file(
     *,
     cadence_seconds,
     dispersion_window_seconds,
+    cusum_allowance,
+    score_start=None,
+    score_end=None,
 ):
-    """Score a transformed feature file episode by episode."""
+    """Score complete episodes, then keep only the requested partition.
+
+    The ordering is important: lookback rows initialise dispersion and CUSUM
+    state, but are removed before thresholds, alerts or evaluation see them.
+    """
 
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1374,7 +1407,16 @@ def score_residual_file(
                 episode,
                 cadence_seconds=cadence_seconds,
                 dispersion_window_seconds=dispersion_window_seconds,
+                cusum_allowance=cusum_allowance,
             )
+            timestamps = pd.to_datetime(scores["event_ts"], utc=True)
+            if score_start is not None:
+                scores = scores.loc[timestamps.ge(score_start)]
+                timestamps = pd.to_datetime(scores["event_ts"], utc=True)
+            if score_end is not None:
+                scores = scores.loc[timestamps.lt(score_end)]
+            if scores.empty:
+                continue
             table = pa.Table.from_pandas(scores, preserve_index=False)
             if writer is None:
                 writer = pq.ParquetWriter(destination, table.schema, compression="zstd")
@@ -1385,3 +1427,118 @@ def score_residual_file(
     if writer is None:
         raise ValueError("Feature file produced no residual scores")
     return destination
+
+
+def case_score_trace(
+    score_path,
+    feature_path,
+    cases,
+    members,
+    alerts,
+    bundle,
+    thresholds,
+    channels,
+    *,
+    window_seconds,
+    maximum_cases=20,
+):
+    """Return compact score and reference evidence around top cases."""
+
+    columns = [
+        "case_id", "event_ts", "entity_id", "episode_id", "channel",
+        "anomaly_score", "threshold", "leading_feature",
+        "observed_transformed", "expected_transformed",
+        "standardized_residual",
+    ]
+    if cases.empty or members.empty or alerts.empty:
+        return pd.DataFrame(columns=columns)
+
+    selected = cases.nlargest(
+        int(maximum_cases), "anomaly_evidence_score"
+    )[["case_id", "peak_ts"]]
+    windows = (
+        members.merge(
+            alerts[["alert_id", "episode_id"]],
+            on="alert_id", how="left", validate="many_to_one",
+        )
+        .merge(selected, on="case_id", how="inner", validate="many_to_one")
+        [["case_id", "entity_id", "episode_id", "peak_ts"]]
+        .drop_duplicates()
+    )
+    radius = pd.Timedelta(seconds=float(window_seconds))
+    windows["trace_start"] = pd.to_datetime(windows["peak_ts"], utc=True) - radius
+    windows["trace_end"] = pd.to_datetime(windows["peak_ts"], utc=True) + radius
+    windows = windows.drop(columns="peak_ts")
+
+    feature_columns = bundle["feature_columns"]
+    score_select = []
+    for channel in channels:
+        score_select.extend([
+            f"s.{_sql_identifier(channel)}",
+            f"s.{_sql_identifier(channel + '__leading_feature')}",
+        ])
+    feature_select = [f"f.{_sql_identifier(name)}" for name in feature_columns]
+    with duckdb.connect() as connection:
+        connection.register("trace_windows", windows)
+        data = connection.execute(f"""
+            SELECT w.case_id, s.event_ts,
+                   CAST(s.entity_id AS VARCHAR) AS entity_id,
+                   CAST(s.episode_id AS VARCHAR) AS episode_id,
+                   {', '.join(score_select + feature_select)}
+            FROM read_parquet({_sql_literal(str(Path(score_path)))}) AS s
+            JOIN trace_windows AS w
+              ON CAST(s.entity_id AS VARCHAR) = w.entity_id
+             AND CAST(s.episode_id AS VARCHAR) = w.episode_id
+             AND s.event_ts BETWEEN w.trace_start AND w.trace_end
+            JOIN read_parquet({_sql_literal(str(Path(feature_path)))}) AS f
+              ON s.event_ts = f.event_ts
+             AND CAST(s.entity_id AS VARCHAR) = CAST(f.entity_id AS VARCHAR)
+             AND CAST(s.episode_id AS VARCHAR) = CAST(f.episode_id AS VARCHAR)
+            ORDER BY w.case_id, s.entity_id, s.event_ts
+        """).df()
+
+    global_centre = bundle["global_centre"]
+    global_scale = bundle["global_scale"]
+    entity_centre = bundle["entity_centre"]
+    entity_scale = bundle["entity_scale"]
+
+    def frozen_reference(entity_id, feature):
+        centre = scale = np.nan
+        if entity_centre is not None and entity_id in entity_centre.index:
+            centre = entity_centre.at[entity_id, feature]
+            scale = entity_scale.at[entity_id, feature]
+        if pd.isna(centre):
+            centre = global_centre[feature]
+        if pd.isna(scale):
+            scale = global_scale[feature]
+        return float(centre), float(scale)
+
+    rows = []
+    for channel in channels:
+        leading_column = f"{channel}__leading_feature"
+        for _, record in data.iterrows():
+            feature = record.get(leading_column)
+            score = record.get(channel)
+            if pd.isna(score) or pd.isna(feature) or feature not in feature_columns:
+                continue
+            observed = record.get(feature)
+            centre, scale = frozen_reference(str(record["entity_id"]), feature)
+            residual = (
+                (float(observed) - centre) / scale
+                if pd.notna(observed) and np.isfinite(scale) and scale > 0
+                else np.nan
+            )
+            rows.append({
+                "case_id": record["case_id"],
+                "event_ts": record["event_ts"],
+                "entity_id": str(record["entity_id"]),
+                "episode_id": str(record["episode_id"]),
+                "channel": channel,
+                "anomaly_score": float(score),
+                "threshold": float(thresholds[channel]),
+                "leading_feature": feature,
+                "observed_transformed": observed,
+                "expected_transformed": centre,
+                "standardized_residual": residual,
+            })
+    return pd.DataFrame(rows, columns=columns)
