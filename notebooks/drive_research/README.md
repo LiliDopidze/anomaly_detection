@@ -40,10 +40,11 @@ headless runs. Completed output directories are immutable; change the run ID
 only when an input or method changes.
 
 Large canonical builds use one DuckDB thread and a 1 GiB memory limit by
-default, spilling blocking sorts to the runtime's local temporary disk. These
-can be changed with `ANOMALY_DUCKDB_THREADS` and
-`ANOMALY_DUCKDB_MEMORY_LIMIT`, but increasing the limit in a small Colab
-runtime can cause an out-of-memory failure.
+default. Gap detection processes complete episode-metric series in batches of
+at most two million long-form observations. These controls can be changed with
+`ANOMALY_DUCKDB_THREADS`, `ANOMALY_DUCKDB_MEMORY_LIMIT` and
+`ANOMALY_GAP_BATCH_ROWS`; increasing them in a small Colab runtime can cause an
+out-of-memory failure.
 
 ## What is common and what changes by sector
 

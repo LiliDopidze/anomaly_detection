@@ -26,6 +26,7 @@ from milestone1_core import (
     core_fingerprint,
     save_pack,
 )
+from milestone1_core import _series_batches
 from simple_model_core import (
     alert_grid_from_score_file,
     calibration_thresholds,
@@ -51,6 +52,20 @@ def topology_fixture(entities):
 
 
 class ContractTests(unittest.TestCase):
+    def test_gap_batches_never_split_a_metric_series(self):
+        sizes = pd.DataFrame([
+            ("episode-a", "m1", 80),
+            ("episode-a", "m2", 60),
+            ("episode-b", "m1", 40),
+        ], columns=["episode_id", "metric_id", "observation_rows"])
+
+        batches = list(_series_batches(sizes, maximum_rows=100))
+
+        self.assertEqual(batches, [
+            [("episode-a", "m1")],
+            [("episode-a", "m2"), ("episode-b", "m1")],
+        ])
+
     def test_truth_removal_does_not_change_model_visible_core(self):
         entities = [f"entity-{number:02d}" for number in range(8)]
         episodes = [f"episode-{number:02d}" for number in range(8)]
