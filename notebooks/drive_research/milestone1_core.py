@@ -33,6 +33,7 @@ PACK_INTERFACE_VERSION = "0.8.0"
 
 GAP_TOLERANCE_FACTOR = 1.5
 CANONICAL_BATCH_ROWS = 100_000
+GAP_BATCH_ROWS = 2_000_000
 
 # --------------------------------------------------------------------------
 # Schemas.  Pack and canonical share table names; canonical adds derived
@@ -623,55 +624,108 @@ def read_pack(pack_root):
 # --------------------------------------------------------------------------
 
 
-def _collection_gaps(connection, tolerance_factor=GAP_TOLERANCE_FACTOR):
+def _series_batches(series_sizes, maximum_rows):
+    """Yield complete episode-metric series in bounded row batches."""
+
+    current, current_rows = [], 0
+    ordered = series_sizes.sort_values(["episode_id", "metric_id"])
+    for row in ordered.itertuples(index=False):
+        rows = int(row.observation_rows)
+        if current and current_rows + rows > maximum_rows:
+            yield current
+            current, current_rows = [], 0
+        current.append((str(row.episode_id), str(row.metric_id)))
+        current_rows += rows
+    if current:
+        yield current
+
+
+def _collection_gaps(
+    connection,
+    series_sizes,
+    tolerance_factor=GAP_TOLERANCE_FACTOR,
+):
     """Return internal gaps and the exact global duplicate-key count.
 
     Gaps are found inside one ``(entity, episode, metric)`` series, so a
     recording never implies an obligation to the next recording, while a hole
-    inside a single recording is still reported. Duplicate detection uses the
-    same ordered pass instead of a second, memory-heavy distinct aggregation.
+    inside a single recording is still reported. Complete metric series are
+    handled in bounded batches, avoiding one global sort over the full long
+    table without splitting the history needed by ``lag``.
     """
 
-    exceptions = connection.execute(
-        """
-        WITH ordered AS (
-            SELECT t.entity_id, t.episode_id, t.metric_id, t.event_ts,
-                   lag(t.event_ts) OVER (
-                       PARTITION BY t.entity_id, t.episode_id, t.metric_id
-                       ORDER BY t.event_ts
-                   ) AS previous_ts,
-                   CAST(c.expected_cadence_seconds AS DOUBLE) AS expected_cadence_seconds
-            FROM selected_observations AS t
-            LEFT JOIN metric_catalogue AS c USING (metric_id)
+    maximum_rows = int(os.getenv("ANOMALY_GAP_BATCH_ROWS", str(GAP_BATCH_ROWS)))
+    if maximum_rows < 1:
+        raise ValueError("ANOMALY_GAP_BATCH_ROWS must be positive")
+
+    duplicate_keys = 0
+    gap_frames = []
+    batches = list(_series_batches(series_sizes, maximum_rows))
+    print(
+        f"Calculating collection gaps in {len(batches)} bounded series batches "
+        f"(target {maximum_rows:,} rows each)"
+    )
+    for number, series in enumerate(batches, start=1):
+        selected_series = " OR ".join(
+            "(t.episode_id = '" + episode_id.replace("'", "''")
+            + "' AND t.metric_id = '" + metric_id.replace("'", "''") + "')"
+            for episode_id, metric_id in series
         )
-        SELECT CASE WHEN event_ts = previous_ts THEN 'duplicate' ELSE 'gap' END
-                   AS row_kind,
-               entity_id, episode_id, metric_id,
-               previous_ts
-                   + CAST(round(expected_cadence_seconds * 1000000) AS BIGINT)
-                     * INTERVAL '1 microsecond' AS gap_start,
-               event_ts AS gap_end,
-               expected_cadence_seconds,
-               'within_episode_declared_cadence' AS coverage_basis
-        FROM ordered
-        WHERE previous_ts IS NOT NULL
-          AND (
-              event_ts = previous_ts
-              OR (
-                  expected_cadence_seconds IS NOT NULL
-                  AND epoch(event_ts - previous_ts) > expected_cadence_seconds * ?
+        exceptions = connection.execute(
+            f"""
+            WITH ordered AS (
+                SELECT t.entity_id, t.episode_id, t.metric_id, t.event_ts,
+                       lag(t.event_ts) OVER (
+                           PARTITION BY t.entity_id, t.episode_id, t.metric_id
+                           ORDER BY t.event_ts
+                       ) AS previous_ts,
+                       CAST(c.expected_cadence_seconds AS DOUBLE)
+                           AS expected_cadence_seconds
+                FROM selected_observations AS t
+                LEFT JOIN metric_catalogue AS c USING (metric_id)
+                WHERE {selected_series}
+            )
+            SELECT CASE WHEN event_ts = previous_ts THEN 'duplicate' ELSE 'gap' END
+                       AS row_kind,
+                   entity_id, episode_id, metric_id,
+                   previous_ts
+                       + CAST(round(expected_cadence_seconds * 1000000) AS BIGINT)
+                         * INTERVAL '1 microsecond' AS gap_start,
+                   event_ts AS gap_end,
+                   expected_cadence_seconds,
+                   'within_episode_declared_cadence' AS coverage_basis
+            FROM ordered
+            WHERE previous_ts IS NOT NULL
+              AND (
+                  event_ts = previous_ts
+                  OR (
+                      expected_cadence_seconds IS NOT NULL
+                      AND epoch(event_ts - previous_ts)
+                          > expected_cadence_seconds * ?
+                  )
               )
-          )
-        ORDER BY entity_id, episode_id, metric_id, gap_start
-        """,
-        [float(tolerance_factor)],
-    ).df()
-    duplicate_keys = int(exceptions["row_kind"].eq("duplicate").sum())
-    gaps = exceptions.loc[exceptions["row_kind"].eq("gap")].drop(
-        columns="row_kind"
+            """,
+            [float(tolerance_factor)],
+        ).df()
+        duplicate_keys += int(exceptions["row_kind"].eq("duplicate").sum())
+        found = exceptions.loc[exceptions["row_kind"].eq("gap")].drop(
+            columns="row_kind"
+        )
+        if not found.empty:
+            gap_frames.append(found)
+        if number == 1 or number % 10 == 0 or number == len(batches):
+            print(f"  gap batch {number}/{len(batches)} complete")
+
+    gaps = (
+        pd.concat(gap_frames, ignore_index=True)
+        if gap_frames
+        else pd.DataFrame(columns=CORE_SCHEMAS["collection_gaps"])
     )
     for column in ("gap_start", "gap_end"):
         gaps[column] = pd.to_datetime(gaps[column], utc=True)
+    gaps = gaps.sort_values(
+        ["entity_id", "episode_id", "metric_id", "gap_start"], kind="stable"
+    ).reset_index(drop=True)
     return gaps[CORE_SCHEMAS["collection_gaps"]], duplicate_keys
 
 
@@ -726,11 +780,20 @@ def build_canonical(pack_root, run_root, *, include_evaluation=True, as_of_ts=No
         if int(audit["rows"]) == 0:
             raise ValueError("No observations are available at the requested as_of_ts")
 
-        episode_bounds = connection.execute("""
-            SELECT episode_id, entity_id,
-                   min(event_ts) AS observed_from, max(event_ts) AS observed_to
-            FROM selected_observations GROUP BY episode_id, entity_id
+        series_bounds = connection.execute("""
+            SELECT episode_id, entity_id, metric_id,
+                   min(event_ts) AS observed_from, max(event_ts) AS observed_to,
+                   count(*) AS observation_rows
+            FROM selected_observations
+            GROUP BY episode_id, entity_id, metric_id
         """).df()
+        episode_bounds = (
+            series_bounds.groupby(["episode_id", "entity_id"], as_index=False)
+            .agg(
+                observed_from=("observed_from", "min"),
+                observed_to=("observed_to", "max"),
+            )
+        )
         for column in ("observed_from", "observed_to"):
             episode_bounds[column] = pd.to_datetime(episode_bounds[column], utc=True)
 
@@ -782,7 +845,10 @@ def build_canonical(pack_root, run_root, *, include_evaluation=True, as_of_ts=No
         del batches, cursor, batch, frame
         gc.collect()
 
-        collection_gaps, duplicate_keys = _collection_gaps(connection)
+        collection_gaps, duplicate_keys = _collection_gaps(
+            connection,
+            series_bounds[["episode_id", "metric_id", "observation_rows"]],
+        )
         if duplicate_keys:
             raise ValueError("Duplicate telemetry keys exist across Pack parts")
 
