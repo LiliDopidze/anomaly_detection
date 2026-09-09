@@ -26,9 +26,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-CORE_VERSION = "0.10.1"
-EVAL_VERSION = "0.8.0"
-PACK_INTERFACE_VERSION = "0.7.1"
+CORE_VERSION = "0.11.0"
+EVAL_VERSION = "0.9.0"
+PACK_INTERFACE_VERSION = "0.8.0"
 
 GAP_TOLERANCE_FACTOR = 1.5
 CANONICAL_BATCH_ROWS = 250_000
@@ -59,6 +59,15 @@ CORE_SCHEMAS = {
     ],
 }
 
+# Topology is optional model input.  It belongs in SPEC-CORE when supplied,
+# but a sector without topology must still satisfy the canonical contract.
+OPTIONAL_CORE_SCHEMAS = {
+    "topology_memberships": [
+        "entity_id", "group_type", "group_id",
+        "hierarchy_level", "group_family",
+    ],
+}
+
 DERIVED_COLUMNS = {
     "entity_registry": ("observed_from", "observed_to", "validity_basis"),
     "observation_episodes": ("observed_from", "observed_to"),
@@ -73,7 +82,7 @@ TELEMETRY_KEYS = ["event_ts", "entity_id", "episode_id", "metric_id"]
 
 EVAL_SCHEMAS = {
     "fault_events": [
-        "fault_id", "fault_type", "domain_id",
+        "fault_id", "fault_type", "domain_type", "domain_id",
         "onset_ts", "observable_ts", "impact_ts", "end_ts",
         "group_id", "label_source", "source_instance_id",
     ],
@@ -90,7 +99,6 @@ EVAL_SCHEMAS = {
 SPLIT_SCHEMAS = {
     "entity_partitions": ["entity_id", "partition", "split_version"],
     "time_partitions": ["partition", "start_ts", "end_ts", "split_version"],
-    "entity_groups": ["entity_id", "group_type", "group_id", "split_version"],
 }
 
 MEASUREMENT_KINDS = {
@@ -335,6 +343,29 @@ def _validate_references(catalogue, entities, episodes, observed):
         raise ValueError(f"Episodes attached to the wrong entity: {sorted(wrong)[:5]}")
 
 
+def validate_topology(topology, entity_ids):
+    """Validate optional entity-to-group memberships without sector logic."""
+
+    schema = OPTIONAL_CORE_SCHEMAS["topology_memberships"]
+    if list(topology.columns) != schema:
+        raise ValueError(f"Topology memberships must use {schema}")
+    if topology.empty:
+        raise ValueError("An advertised topology table cannot be empty")
+    required = ["entity_id", "group_type", "group_id", "group_family"]
+    if topology[required].isna().any().any():
+        raise ValueError("Topology identifiers and group families cannot be null")
+    if topology.duplicated(["entity_id", "group_type"]).any():
+        raise ValueError("An entity may belong to only one group of each type")
+    unknown = set(topology["entity_id"].astype(str)) - set(map(str, entity_ids))
+    if unknown:
+        raise ValueError(f"Topology references unknown entities: {sorted(unknown)[:5]}")
+
+    physical = topology["group_family"].eq("physical_topology")
+    levels = pd.to_numeric(topology.loc[physical, "hierarchy_level"], errors="coerce")
+    if levels.isna().any() or levels.lt(0).any():
+        raise ValueError("Physical topology memberships need non-negative hierarchy levels")
+
+
 # --------------------------------------------------------------------------
 # Writing a pack
 # --------------------------------------------------------------------------
@@ -350,6 +381,7 @@ def save_pack(
     catalogue,
     entities,
     episodes,
+    topology=None,
     splits=None,
     evaluation=None,
     notes=(),
@@ -369,6 +401,11 @@ def save_pack(
     entities = entities[PACK_SCHEMAS["entity_registry"]].reset_index(drop=True)
     episodes = episodes[PACK_SCHEMAS["observation_episodes"]].reset_index(drop=True)
     validate_catalogue(catalogue)
+
+    topology = None if topology is None else topology.copy()
+    if topology is not None:
+        topology = topology[OPTIONAL_CORE_SCHEMAS["topology_memberships"]].reset_index(drop=True)
+        validate_topology(topology, entities["entity_id"])
 
     splits = dict(splits or {})
     evaluation = dict(evaluation or {})
@@ -427,9 +464,26 @@ def save_pack(
             ("entity_registry", entities),
             ("observation_episodes", episodes),
         ):
-            frame.to_parquet(core / f"{name}.parquet", index=False)
-            table_hashes[name] = table_digest(frame, PACK_SCHEMAS[name])
+            path = core / f"{name}.parquet"
+            frame.to_parquet(path, index=False)
+            # Hash the persisted representation.  Arrow may normalise object,
+            # nullable-integer and string dtypes during serialization; hashing
+            # the pre-write frame would make a fresh pack fail its own audit.
+            table_hashes[name] = table_digest(
+                pd.read_parquet(path), PACK_SCHEMAS[name]
+            )
             row_counts[name] = len(frame)
+
+        optional_core_tables = []
+        if topology is not None:
+            name = "topology_memberships"
+            path = core / f"{name}.parquet"
+            topology.to_parquet(path, index=False)
+            table_hashes[name] = table_digest(
+                pd.read_parquet(path), OPTIONAL_CORE_SCHEMAS[name]
+            )
+            row_counts[name] = len(topology)
+            optional_core_tables.append(name)
 
         for folder, tables, schemas in (
             ("SPLITS", splits, SPLIT_SCHEMAS),
@@ -451,6 +505,10 @@ def save_pack(
             "availability_rule": "episode_metric_pair_present_only_when_attempted",
             "split_tables": sorted(splits),
             "evaluation_tables": sorted(evaluation),
+            "optional_core_tables": optional_core_tables,
+            "capabilities": {
+                "topology": bool(topology is not None),
+            },
             "metric_ids": catalogue["metric_id"].astype(str).tolist(),
             "core_row_counts": row_counts,
             "episode_metric_pairs": len(observed["pairs"]),
@@ -475,6 +533,13 @@ def pack_fingerprint(pack_root):
         if list(frame.columns) != PACK_SCHEMAS[name]:
             raise ValueError(f"Unexpected schema in pack {name}")
         table_hashes[name] = table_digest(frame, PACK_SCHEMAS[name])
+    manifest = read_json(Path(pack_root) / "pack_manifest.json")
+    for name in manifest.get("optional_core_tables", []):
+        frame = pd.read_parquet(core / f"{name}.parquet")
+        schema = OPTIONAL_CORE_SCHEMAS[name]
+        if list(frame.columns) != schema:
+            raise ValueError(f"Unexpected schema in pack {name}")
+        table_hashes[name] = table_digest(frame, schema)
     return _combine(table_hashes)
 
 
@@ -509,6 +574,12 @@ def _validated_pack(pack_root):
         observed["episode_owner"].update(zip(identities["episode_id"], identities["entity_id"]))
     _validate_references(catalogue, entities, episodes, observed)
 
+    for name in manifest.get("optional_core_tables", []):
+        if name not in OPTIONAL_CORE_SCHEMAS:
+            raise ValueError(f"Unknown optional PACK-CORE table: {name}")
+        frame = pd.read_parquet(core / f"{name}.parquet")
+        validate_topology(frame, entities["entity_id"])
+
     for folder, names, schemas in (
         ("SPLITS", manifest["split_tables"], SPLIT_SCHEMAS),
         ("PACK-EVAL", manifest["evaluation_tables"], EVAL_SCHEMAS),
@@ -525,6 +596,9 @@ def _validated_pack(pack_root):
         ("observation_episodes", episodes),
     ):
         table_hashes[name] = table_digest(frame, PACK_SCHEMAS[name])
+    for name in manifest.get("optional_core_tables", []):
+        frame = pd.read_parquet(core / f"{name}.parquet")
+        table_hashes[name] = table_digest(frame, OPTIONAL_CORE_SCHEMAS[name])
 
     if telemetry_rows != manifest["core_row_counts"]["telemetry"]:
         raise ValueError("PACK-CORE telemetry row count no longer matches its manifest")
@@ -677,9 +751,14 @@ def build_canonical(pack_root, run_root, *, include_evaluation=True, as_of_ts=No
         telemetry_digest = hashlib.sha256()
         telemetry_rows = 0
         quality_counts = {}
-        batches = connection.execute(f"""
+        cursor = connection.execute(f"""
             SELECT {', '.join(CORE_SCHEMAS['telemetry'])} FROM selected_observations
-        """).fetch_record_batch(CANONICAL_BATCH_ROWS)
+        """)
+        batches = (
+            cursor.to_arrow_reader(batch_size=CANONICAL_BATCH_ROWS)
+            if hasattr(cursor, "to_arrow_reader")
+            else cursor.fetch_record_batch(CANONICAL_BATCH_ROWS)
+        )
         for number, batch in enumerate(batches):
             frame = batch.to_pandas()[CORE_SCHEMAS["telemetry"]]
             frame["event_ts"] = pd.to_datetime(frame["event_ts"], utc=True)
@@ -705,9 +784,14 @@ def build_canonical(pack_root, run_root, *, include_evaluation=True, as_of_ts=No
             "observation_episodes": episodes,
             "collection_gaps": collection_gaps,
         }
+        for name in pack_manifest.get("optional_core_tables", []):
+            sidecars[name] = pd.read_parquet(core_source / f"{name}.parquet")[
+                OPTIONAL_CORE_SCHEMAS[name]
+            ]
         for name, frame in sidecars.items():
             frame.to_parquet(core / f"{name}.parquet", index=False)
-            table_hashes[name] = table_digest(frame, CORE_SCHEMAS[name])
+            schema = CORE_SCHEMAS.get(name, OPTIONAL_CORE_SCHEMAS.get(name))
+            table_hashes[name] = table_digest(frame, schema)
             row_counts[name] = len(frame)
 
         core_manifest = {
@@ -715,7 +799,14 @@ def build_canonical(pack_root, run_root, *, include_evaluation=True, as_of_ts=No
             "sector": pack_manifest["sector"],
             "source_pack_version": pack_manifest["pack_version"],
             "as_of_ts": as_of,
-            "tables": CORE_SCHEMAS,
+            "tables": {
+                **CORE_SCHEMAS,
+                **{
+                    name: OPTIONAL_CORE_SCHEMAS[name]
+                    for name in pack_manifest.get("optional_core_tables", [])
+                },
+            },
+            "capabilities": pack_manifest.get("capabilities", {"topology": False}),
             "row_counts": row_counts,
             "fingerprint": _combine(table_hashes),
             "quality_counts": quality_counts,
@@ -771,11 +862,21 @@ def check_core(core_root):
 
     table_hashes = {"telemetry": telemetry_digest.hexdigest()}
     row_counts = {"telemetry": telemetry_rows}
-    for name in ("metric_catalogue", "entity_registry", "observation_episodes", "collection_gaps"):
+    optional_names = (
+        ["topology_memberships"]
+        if manifest.get("capabilities", {}).get("topology", False)
+        else []
+    )
+    sidecar_names = [
+        "metric_catalogue", "entity_registry", "observation_episodes",
+        "collection_gaps", *optional_names,
+    ]
+    for name in sidecar_names:
         frame = pd.read_parquet(core_root / f"{name}.parquet")
-        if list(frame.columns) != CORE_SCHEMAS[name]:
+        schema = CORE_SCHEMAS.get(name, OPTIONAL_CORE_SCHEMAS.get(name))
+        if list(frame.columns) != schema:
             raise ValueError(f"Unexpected {name} schema")
-        table_hashes[name] = table_digest(frame, CORE_SCHEMAS[name])
+        table_hashes[name] = table_digest(frame, schema)
         row_counts[name] = len(frame)
 
     if row_counts != manifest["row_counts"]:
@@ -822,7 +923,7 @@ def check_core(core_root):
         "duplicate_keys": 0,
         "foreign_key_failures": 0,
         "fingerprint_verified": True,
-        **{name: row_counts[name] for name in list(CORE_SCHEMAS)[1:]},
+        **{name: row_counts[name] for name in sidecar_names},
     }
 
 
