@@ -39,6 +39,12 @@ Notebook 01B uses `ADAPTER_SECTOR`. Environment variables remain available for
 headless runs. Completed output directories are immutable; change the run ID
 only when an input or method changes.
 
+Large canonical builds use one DuckDB thread and a 1 GiB memory limit by
+default, spilling blocking sorts to the runtime's local temporary disk. These
+can be changed with `ANOMALY_DUCKDB_THREADS` and
+`ANOMALY_DUCKDB_MEMORY_LIMIT`, but increasing the limit in a small Colab
+runtime can cause an out-of-memory failure.
+
 ## What is common and what changes by sector
 
 Each 01A notebook owns native field names, units, measurement kinds, cadence,

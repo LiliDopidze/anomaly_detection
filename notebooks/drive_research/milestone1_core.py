@@ -14,6 +14,7 @@ A detector reads SPEC-CORE only and must run with SPEC-EVAL absent.
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import os
@@ -31,7 +32,7 @@ EVAL_VERSION = "0.9.0"
 PACK_INTERFACE_VERSION = "0.8.0"
 
 GAP_TOLERANCE_FACTOR = 1.5
-CANONICAL_BATCH_ROWS = 250_000
+CANONICAL_BATCH_ROWS = 100_000
 
 # --------------------------------------------------------------------------
 # Schemas.  Pack and canonical share table names; canonical adds derived
@@ -148,13 +149,17 @@ def _duckdb():
 def _duckdb_connection():
     """Use bounded memory and local spill space for large canonical scans."""
 
-    memory_limit = os.getenv("ANOMALY_DUCKDB_MEMORY_LIMIT", "3GB")
-    threads = int(os.getenv("ANOMALY_DUCKDB_THREADS", "2"))
+    # Free Colab sessions may expose less than 3 GiB to DuckDB even when the
+    # machine has more total RAM. A conservative limit makes blocking window
+    # operations spill to local disk instead of exhausting the runtime.
+    memory_limit = os.getenv("ANOMALY_DUCKDB_MEMORY_LIMIT", "1GB")
+    threads = int(os.getenv("ANOMALY_DUCKDB_THREADS", "1"))
     with tempfile.TemporaryDirectory(prefix="anomaly-duckdb-") as spill_directory:
         with _duckdb().connect() as connection:
             connection.execute("SET memory_limit = ?", [memory_limit])
             connection.execute("SET threads = ?", [threads])
             connection.execute("SET temp_directory = ?", [spill_directory])
+            connection.execute("SET preserve_insertion_order = false")
             yield connection
 
 
@@ -771,6 +776,11 @@ def build_canonical(pack_root, run_root, *, include_evaluation=True, as_of_ts=No
             telemetry_rows += len(frame)
             for code, count in frame["quality_code"].value_counts().items():
                 quality_counts[str(code)] = quality_counts.get(str(code), 0) + int(count)
+
+        # Release the final Arrow/Pandas batch before DuckDB starts the
+        # blocking per-series gap calculation.
+        del batches, cursor, batch, frame
+        gc.collect()
 
         collection_gaps, duplicate_keys = _collection_gaps(connection)
         if duplicate_keys:
