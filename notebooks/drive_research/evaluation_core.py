@@ -13,7 +13,7 @@ import pandas as pd
 from scipy.stats import chi2
 
 
-EVALUATION_CORE_VERSION = "2.3.0"
+EVALUATION_CORE_VERSION = "3.0.0"
 PARTITIONS = ("calibration", "development", "holdout")
 SCORE_COLUMNS = [
     "event_ts", "entity_id", "episode_id", "anomaly_score", "model_id",
@@ -22,11 +22,16 @@ SCORE_COLUMNS = [
 CASE_COLUMNS = [
     "case_id", "case_start", "case_end", "peak_ts",
     "scope_type", "scope_id", "affected_entity_count",
+    "scope_type_2", "scope_id_2", "identifiability_status",
+    "footprint_size", "affected_fraction_estimate",
     "anomaly_evidence_score", "channels", "leading_features",
+    "location_explanation",
 ]
 ALERT_COLUMNS = [
     "alert_id", "model_id", "entity_id", "episode_id", "alert_start",
     "alert_end", "peak_ts", "peak_score", "n_scores", "leading_feature",
+    "evidence_scope_type", "evidence_scope_id",
+    "evidence_affected_fraction",
 ]
 AUDIT_COLUMNS = [
     "fault_id", "fault_type", "assigned_partition", "status",
@@ -310,6 +315,12 @@ def validate_scores(scores):
     columns = [*SCORE_COLUMNS]
     if "leading_feature" in scores.columns:
         columns.append("leading_feature")
+    for column in (
+        "evidence_scope_type", "evidence_scope_id",
+        "evidence_affected_fraction",
+    ):
+        if column in scores.columns:
+            columns.append(column)
     clean = scores[columns].copy()
     clean["event_ts"] = pd.to_datetime(clean["event_ts"], utc=True, errors="raise")
     clean["entity_id"] = clean["entity_id"].astype(str)
@@ -325,6 +336,12 @@ def validate_scores(scores):
     clean["episode_id"] = clean["episode_id"].astype(str)
     if "leading_feature" not in clean:
         clean["leading_feature"] = pd.NA
+    for column in (
+        "evidence_scope_type", "evidence_scope_id",
+        "evidence_affected_fraction",
+    ):
+        if column not in clean:
+            clean[column] = pd.NA
     keys = ["event_ts", "entity_id", "episode_id", "model_id"]
     if clean.duplicated(keys).any():
         raise ValueError("A model may emit only one score per episode and timestamp")
@@ -357,6 +374,12 @@ def merge_nearby_alerts(alerts, merge_gap_seconds):
                 if alert["peak_score"] > current["peak_score"]:
                     current["peak_ts"] = alert["peak_ts"]
                     current["peak_score"] = alert["peak_score"]
+                    current["leading_feature"] = alert["leading_feature"]
+                    current["evidence_scope_type"] = alert["evidence_scope_type"]
+                    current["evidence_scope_id"] = alert["evidence_scope_id"]
+                    current["evidence_affected_fraction"] = alert[
+                        "evidence_affected_fraction"
+                    ]
             else:
                 merged.append(current)
                 current = alert
@@ -460,6 +483,9 @@ def scores_to_alerts(
         timestamps = group["event_ts"]
         values = group["anomaly_score"].to_numpy()
         features = group["leading_feature"].to_numpy()
+        scope_types = group["evidence_scope_type"].to_numpy()
+        scope_ids = group["evidence_scope_id"].to_numpy()
+        affected_fractions = group["evidence_affected_fraction"].to_numpy()
 
         differences = timestamps.diff()
         positive = differences.loc[differences.gt(pd.Timedelta(0))]
@@ -493,6 +519,9 @@ def scores_to_alerts(
                     "peak_score": values[peak],
                     "n_scores": end - start + 1,
                     "leading_feature": features[peak],
+                    "evidence_scope_type": scope_types[peak],
+                    "evidence_scope_id": scope_ids[peak],
+                    "evidence_affected_fraction": affected_fractions[peak],
                 })
 
     output = pd.DataFrame(alerts)
@@ -574,7 +603,8 @@ def _fault_windows(events, intervals, decision_horizon_seconds):
         "fault_id", "entity_id", "start_ts", "end_ts"
     ]].rename(columns={"end_ts": "interval_end"}).merge(
         events[[
-            "fault_id", "fault_type", "observable_ts", "onset_ts",
+            "fault_id", "fault_type", "domain_type", "domain_id",
+            "observable_ts", "onset_ts",
             "impact_ts", "end_ts", "group_id",
         ]].rename(columns={"end_ts": "event_end"}),
         on="fault_id", how="inner", validate="many_to_one",
@@ -1045,7 +1075,53 @@ def evaluate_alerts(
     }
 
 
-def form_cases(alerts, entity_groups=None, *, gap_seconds, thresholds):
+def _topology_context(topology):
+    """Return memberships, group sizes and observable equivalence classes."""
+
+    if topology is None or topology.empty:
+        return {}, {}, {}, {}
+    required = {
+        "entity_id", "group_type", "group_id", "hierarchy_level", "group_family",
+    }
+    missing = required - set(topology.columns)
+    if missing:
+        raise ValueError(f"Topology is missing columns: {sorted(missing)}")
+    physical = topology.loc[
+        topology["group_family"].eq("physical_topology")
+    ].copy()
+    physical[["entity_id", "group_type", "group_id"]] = physical[
+        ["entity_id", "group_type", "group_id"]
+    ].astype(str)
+    memberships = {
+        entity: set(zip(rows["group_type"], rows["group_id"]))
+        for entity, rows in physical.groupby("entity_id")
+    }
+    descendants = {
+        key: frozenset(rows["entity_id"].astype(str))
+        for key, rows in physical.groupby(["group_type", "group_id"])
+    }
+    levels = {
+        key: int(pd.to_numeric(rows["hierarchy_level"], errors="raise").iloc[0])
+        for key, rows in physical.groupby(["group_type", "group_id"])
+    }
+    equivalent = {}
+    by_footprint = {}
+    for key, members in descendants.items():
+        by_footprint.setdefault(members, []).append(key)
+    for keys in by_footprint.values():
+        for key in keys:
+            equivalent[key] = sorted(keys)
+    return memberships, descendants, levels, equivalent
+
+
+def form_cases(
+    alerts,
+    entity_groups=None,
+    *,
+    gap_seconds,
+    thresholds,
+    shared_scope_models=("group_common_mode",),
+):
     """Consolidate channel alerts without uncontrolled topology chaining.
 
     A new alert may join an existing case only when it is close in time and
@@ -1064,19 +1140,9 @@ def form_cases(alerts, entity_groups=None, *, gap_seconds, thresholds):
     if missing:
         raise ValueError(f"Missing channel thresholds: {sorted(missing)}")
 
-    groups = pd.DataFrame(columns=["entity_id", "group_type", "group_id"])
-    if entity_groups is not None and not entity_groups.empty:
-        required = {"entity_id", "group_type", "group_id"}
-        absent = required - set(entity_groups.columns)
-        if absent:
-            raise ValueError(f"Entity groups are missing columns: {sorted(absent)}")
-        groups = entity_groups[list(required)].dropna().astype(str).drop_duplicates()
-    memberships = {
-        entity: set(zip(rows["group_type"], rows["group_id"]))
-        for entity, rows in groups.groupby("entity_id")
-    }
-    group_sizes = groups.groupby(["group_type", "group_id"])["entity_id"].nunique().to_dict()
+    memberships, descendants, levels, equivalent = _topology_context(entity_groups)
     maximum_gap = pd.Timedelta(seconds=float(gap_seconds))
+    shared_scope_models = set(map(str, shared_scope_models))
 
     open_cases = []
     active_cases = []
@@ -1084,6 +1150,19 @@ def form_cases(alerts, entity_groups=None, *, gap_seconds, thresholds):
     for alert in ordered.itertuples(index=False):
         entity = str(alert.entity_id)
         alert_groups = memberships.get(entity, set())
+        if (
+            str(alert.model_id) in shared_scope_models
+            and pd.notna(alert.evidence_scope_type)
+            and pd.notna(alert.evidence_scope_id)
+        ):
+            declared_scope = (
+                str(alert.evidence_scope_type), str(alert.evidence_scope_id)
+            )
+            if declared_scope not in alert_groups:
+                raise ValueError(
+                    "Common-mode alert scope does not contain its entity"
+                )
+            alert_groups = {declared_scope}
         active_cases = [
             number for number in active_cases
             if alert.alert_start <= open_cases[number]["end"] + maximum_gap
@@ -1092,16 +1171,54 @@ def form_cases(alerts, entity_groups=None, *, gap_seconds, thresholds):
         for number in active_cases:
             case = open_cases[number]
             shared = case["common_groups"] & alert_groups
-            if entity in case["entities"] or shared:
+            same_entity = entity in case["entities"]
+            common_mode_evidence = (
+                str(alert.model_id) in shared_scope_models
+                or case["has_shared_scope_evidence"]
+            )
+            if same_entity or (shared and common_mode_evidence):
                 compatible.append((case["end"], number, shared))
         if compatible:
-            _, number, shared = max(compatible)
+            selected = [max(compatible)]
+            if str(alert.model_id) in shared_scope_models:
+                candidates_by_group = [
+                    [item for item in compatible if group in item[2]]
+                    for group in alert_groups
+                ]
+                candidates_by_group = [items for items in candidates_by_group if items]
+                if candidates_by_group:
+                    selected = max(
+                        candidates_by_group,
+                        key=lambda items: (len(items), max(item[0] for item in items)),
+                    )
+            combined_shared = set(alert_groups)
+            for _, selected_number, _ in selected:
+                combined_shared &= open_cases[selected_number]["common_groups"]
+            _, number, _ = max(selected)
             case = open_cases[number]
+            for _, other_number, _ in selected:
+                if other_number == number:
+                    continue
+                other = open_cases[other_number]
+                case["alerts"].extend(other["alerts"])
+                case["entities"].update(other["entities"])
+                case["start"] = min(case["start"], other["start"])
+                case["end"] = max(case["end"], other["end"])
+                case["common_groups"] &= other["common_groups"]
+                case["has_shared_scope_evidence"] |= other[
+                    "has_shared_scope_evidence"
+                ]
+                other["merged_into"] = number
+                if other_number in active_cases:
+                    active_cases.remove(other_number)
             case["alerts"].append(alert)
             case["entities"].add(entity)
             case["end"] = max(case["end"], alert.alert_end)
+            case["has_shared_scope_evidence"] |= (
+                str(alert.model_id) in shared_scope_models
+            )
             if len(case["entities"]) > 1:
-                case["common_groups"] = shared
+                case["common_groups"] = combined_shared
         else:
             open_cases.append({
                 "alerts": [alert],
@@ -1109,6 +1226,10 @@ def form_cases(alerts, entity_groups=None, *, gap_seconds, thresholds):
                 "start": alert.alert_start,
                 "end": alert.alert_end,
                 "common_groups": set(alert_groups),
+                "has_shared_scope_evidence": (
+                    str(alert.model_id) in shared_scope_models
+                ),
+                "merged_into": None,
             })
             active_cases.append(len(open_cases) - 1)
 
@@ -1117,7 +1238,12 @@ def form_cases(alerts, entity_groups=None, *, gap_seconds, thresholds):
         return 1.0 + (float(row.peak_score) - threshold) / max(abs(threshold), 1e-12)
 
     case_rows, member_rows = [], []
-    for number, case in enumerate(open_cases, start=1):
+    output_number = 0
+    for case in open_cases:
+        if case["merged_into"] is not None:
+            continue
+        output_number += 1
+        number = output_number
         case_id = f"C-{number:06d}"
         members = case["alerts"]
         peak = max(
@@ -1125,15 +1251,87 @@ def form_cases(alerts, entity_groups=None, *, gap_seconds, thresholds):
             key=exceedance,
         )
         evidence = max(exceedance(row) for row in members)
-        if len(case["entities"]) == 1:
+        second_type = second_id = pd.NA
+        scope_evidence = [
+            row for row in members
+            if str(row.model_id) in shared_scope_models
+            and pd.notna(row.evidence_scope_type)
+            and pd.notna(row.evidence_scope_id)
+        ]
+        selected_scope_evidence = (
+            max(scope_evidence, key=exceedance) if scope_evidence else None
+        )
+        if selected_scope_evidence is not None:
+            scope_type = str(selected_scope_evidence.evidence_scope_type)
+            scope_id = str(selected_scope_evidence.evidence_scope_id)
+            footprint = set(descendants.get((scope_type, scope_id), ()))
+            if not footprint:
+                raise ValueError("Common-mode evidence has an unknown topology scope")
+            aliases = [
+                candidate
+                for candidate in equivalent.get((scope_type, scope_id), [])
+                if candidate != (scope_type, scope_id)
+            ]
+            if aliases:
+                second_type, second_id = aliases[0]
+                status = "topology_equivalent"
+                explanation = (
+                    "Common-mode evidence identifies an observable footprint "
+                    "shared by two topology scopes."
+                )
+            else:
+                status = "common_mode_scope"
+                explanation = "Common-mode residual evidence identifies this physical scope."
+        elif len(case["entities"]) == 1:
             scope_type, scope_id = "entity", next(iter(case["entities"]))
+            footprint = {scope_id}
+            status = "entity_exact"
+            explanation = "One entity carries the incident evidence."
         elif case["common_groups"]:
-            scope_type, scope_id = min(
+            candidates = sorted(
                 case["common_groups"],
-                key=lambda group: (group_sizes.get(group, np.inf), group[0], group[1]),
+                key=lambda group: (
+                    len(descendants.get(group, ())),
+                    -levels.get(group, -1), group[0], group[1],
+                ),
             )
+            scope_type, scope_id = candidates[0]
+            footprint = set(descendants[(scope_type, scope_id)])
+            aliases = [
+                candidate for candidate in equivalent.get((scope_type, scope_id), [])
+                if candidate != (scope_type, scope_id)
+            ]
+            if aliases:
+                second_type, second_id = aliases[0]
+                status = "topology_equivalent"
+                explanation = "Two topology scopes have the same observable descendants."
+            else:
+                alternatives = [candidate for candidate in candidates[1:]
+                                if candidate not in aliases]
+                if alternatives:
+                    second_type, second_id = alternatives[0]
+                status = "hierarchical_candidate"
+                explanation = "Most specific common physical scope of the affected entities."
         else:  # guarded by the merge rule; kept as an explicit invariant
             raise AssertionError("A multi-entity case has no common topology scope")
+        affected_fraction = np.nan
+        if selected_scope_evidence is not None:
+            affected_fraction = pd.to_numeric(
+                selected_scope_evidence.evidence_affected_fraction,
+                errors="coerce",
+            )
+        if pd.isna(affected_fraction):
+            affected_fraction = (
+                len(case["entities"]) / len(footprint) if footprint else np.nan
+            )
+        affected_count = (
+            max(
+                len(case["entities"]),
+                round(float(affected_fraction) * len(footprint)),
+            )
+            if footprint and pd.notna(affected_fraction)
+            else len(case["entities"])
+        )
         case_rows.append({
             "case_id": case_id,
             "case_start": case["start"],
@@ -1141,13 +1339,19 @@ def form_cases(alerts, entity_groups=None, *, gap_seconds, thresholds):
             "peak_ts": peak.peak_ts,
             "scope_type": scope_type,
             "scope_id": scope_id,
-            "affected_entity_count": len(case["entities"]),
+            "affected_entity_count": affected_count,
+            "scope_type_2": second_type,
+            "scope_id_2": second_id,
+            "identifiability_status": status,
+            "footprint_size": len(footprint),
+            "affected_fraction_estimate": affected_fraction,
             "anomaly_evidence_score": float(evidence),
             "channels": ", ".join(sorted({str(row.model_id) for row in members})),
             "leading_features": ", ".join(sorted({
                 str(row.leading_feature) for row in members
                 if pd.notna(row.leading_feature)
             })),
+            "location_explanation": explanation,
         })
         member_rows.extend({
             "case_id": case_id,
@@ -1170,6 +1374,7 @@ def evaluate_cases(
     exposure_value,
     exposure_unit,
     decision_horizon_seconds,
+    topology_memberships=None,
     min_reliable_faults=5,
 ):
     """One-to-one case-to-fault evaluation at operational workload level."""
@@ -1183,8 +1388,23 @@ def evaluate_cases(
     for column in ("case_start", "case_end", "peak_ts"):
         cases[column] = pd.to_datetime(cases[column], utc=True, errors="raise")
 
+    _, descendants, levels, equivalent = _topology_context(topology_memberships)
     windows = _fault_windows(events, intervals, decision_horizon_seconds)
-    candidates = case_members[["case_id", "entity_id"]].drop_duplicates().merge(
+    case_entities = case_members[["case_id", "entity_id"]].drop_duplicates().copy()
+    footprint_rows = []
+    for case in cases.itertuples(index=False):
+        if str(case.scope_type) == "entity":
+            continue
+        for entity_id in descendants.get(
+            (str(case.scope_type), str(case.scope_id)), ()
+        ):
+            footprint_rows.append((str(case.case_id), str(entity_id)))
+    if footprint_rows:
+        case_entities = pd.concat([
+            case_entities,
+            pd.DataFrame(footprint_rows, columns=["case_id", "entity_id"]),
+        ], ignore_index=True).drop_duplicates()
+    candidates = case_entities.merge(
         windows, on="entity_id", how="inner"
     ).merge(cases[["case_id", "case_start"]], on="case_id", how="inner")
     candidates = candidates.loc[
@@ -1225,6 +1445,122 @@ def evaluate_cases(
     )
     fault_results["detected"] = fault_results["case_id"].notna()
     fault_results["preimpact"] = fault_results["preimpact"].eq(True)
+
+    interval_entities = (
+        intervals.assign(
+            fault_id=intervals["fault_id"].astype(str),
+            entity_id=intervals["entity_id"].astype(str),
+        )
+        .groupby("fault_id")["entity_id"].agg(lambda values: frozenset(values))
+        .to_dict()
+    )
+    case_index = cases.set_index("case_id") if not cases.empty else pd.DataFrame()
+    location_rows = []
+    entity_level = max(levels.values(), default=-1) + 1
+    for fault in fault_results.itertuples(index=False):
+        true_type = str(fault.domain_type)
+        true_id = str(fault.domain_id)
+        true_key = (true_type, true_id)
+        true_entities = set(interval_entities.get(str(fault.fault_id), ()))
+        record = {
+            "fault_id": str(fault.fault_id),
+            "case_id": fault.case_id,
+            "detected": bool(fault.detected),
+            "true_domain_type": true_type,
+            "true_domain_id": true_id,
+            "predicted_domain_type": pd.NA,
+            "predicted_domain_id": pd.NA,
+            "exact_scope": False,
+            "top2_scope": False,
+            "equivalent_scope": False,
+            "truth_identifiable": True,
+            "hierarchy_distance": np.nan,
+            "hierarchy_comparable": False,
+            "different_branch": False,
+            "footprint_precision": np.nan,
+            "footprint_recall": np.nan,
+            "footprint_jaccard": np.nan,
+        }
+        if true_type != "entity":
+            aliases = equivalent.get(true_key, [true_key])
+            record["truth_identifiable"] = len(aliases) == 1
+        if not fault.detected:
+            location_rows.append(record)
+            continue
+
+        case = case_index.loc[fault.case_id]
+        predicted_key = (str(case.scope_type), str(case.scope_id))
+        second_key = (
+            (str(case.scope_type_2), str(case.scope_id_2))
+            if pd.notna(case.scope_type_2) and pd.notna(case.scope_id_2)
+            else None
+        )
+        exact = predicted_key == true_key
+        same_footprint = (
+            predicted_key in descendants
+            and true_key in descendants
+            and descendants[predicted_key] == descendants[true_key]
+        )
+        record.update({
+            "predicted_domain_type": predicted_key[0],
+            "predicted_domain_id": predicted_key[1],
+            "exact_scope": exact,
+            "top2_scope": exact or second_key == true_key,
+            "equivalent_scope": exact or same_footprint,
+        })
+
+        if exact or same_footprint:
+            record["hierarchy_distance"] = 0.0
+            record["hierarchy_comparable"] = True
+        else:
+            predicted_level = (
+                entity_level if predicted_key[0] == "entity"
+                else levels.get(predicted_key)
+            )
+            true_level = entity_level if true_type == "entity" else levels.get(true_key)
+            predicted_footprint = (
+                {predicted_key[1]} if predicted_key[0] == "entity"
+                else set(descendants.get(predicted_key, ()))
+            )
+            true_footprint = (
+                {true_key[1]} if true_type == "entity"
+                else set(descendants.get(true_key, ()))
+            )
+            nested = (
+                bool(predicted_footprint)
+                and bool(true_footprint)
+                and (
+                    predicted_footprint <= true_footprint
+                    or true_footprint <= predicted_footprint
+                )
+            )
+            if nested and predicted_level is not None and true_level is not None:
+                record["hierarchy_distance"] = abs(predicted_level - true_level)
+                record["hierarchy_comparable"] = True
+            else:
+                record["different_branch"] = True
+
+        predicted_entities = (
+            {predicted_key[1]}
+            if predicted_key[0] == "entity"
+            else set(descendants.get(predicted_key, ()))
+        )
+        overlap = len(predicted_entities & true_entities)
+        union = len(predicted_entities | true_entities)
+        record["footprint_precision"] = (
+            overlap / len(predicted_entities) if predicted_entities else np.nan
+        )
+        record["footprint_recall"] = (
+            overlap / len(true_entities) if true_entities else np.nan
+        )
+        record["footprint_jaccard"] = overlap / union if union else np.nan
+        location_rows.append(record)
+
+    localisation = pd.DataFrame(location_rows)
+    fault_results = fault_results.merge(
+        localisation.drop(columns=["case_id", "detected"]),
+        on="fault_id", how="left", validate="one_to_one",
+    )
     detected = int(fault_results["detected"].sum())
     credited_cases = len(detections)
     nuisance_cases = len(cases) - credited_cases
@@ -1239,6 +1575,33 @@ def evaluate_cases(
     ratio("case_precision", credited_cases, len(cases))
     impact_known = fault_results["impact_ts"].notna()
     ratio("preimpact_event_recall", int((fault_results["detected"] & fault_results["preimpact"] & impact_known).sum()), int(impact_known.sum()))
+    detected_locations = localisation.loc[localisation["detected"]]
+    identifiable = detected_locations["truth_identifiable"]
+    ratio(
+        "exact_localisation_accuracy",
+        int((detected_locations["exact_scope"] & identifiable).sum()),
+        int(identifiable.sum()),
+    )
+    ratio(
+        "top2_localisation_accuracy",
+        int(detected_locations["top2_scope"].sum()),
+        len(detected_locations),
+    )
+    ratio(
+        "equivalence_aware_localisation_accuracy",
+        int(detected_locations["equivalent_scope"].sum()),
+        len(detected_locations),
+    )
+    ratio(
+        "joint_detection_and_localisation_recall",
+        int((localisation["detected"] & localisation["equivalent_scope"]).sum()),
+        len(localisation),
+    )
+    ratio(
+        "different_branch_rate_among_detected",
+        int(detected_locations["different_branch"].sum()),
+        len(detected_locations),
+    )
     for name, count, unit_name in (
         (f"false_cases_per_{exposure_unit}", nuisance_cases, "cases"),
         (f"total_cases_per_{exposure_unit}", len(cases), "cases"),
@@ -1253,16 +1616,83 @@ def evaluate_cases(
                  "value": delays.median() if len(delays) else np.nan,
                  "numerator": len(delays), "denominator": len(fault_results),
                  "ci_low": np.nan, "ci_high": np.nan, "unit": "seconds"})
+    raw_alerts = int(case_members["alert_id"].nunique()) if not case_members.empty else 0
+    duplicate_cases = int(matches["match_status"].eq("duplicate").sum())
+    rows.extend([
+        {"metric": "raw_alert_count", "value": raw_alerts,
+         "numerator": raw_alerts, "denominator": raw_alerts,
+         "ci_low": np.nan, "ci_high": np.nan, "unit": "alerts"},
+        {"metric": "consolidated_case_count", "value": len(cases),
+         "numerator": len(cases), "denominator": raw_alerts,
+         "ci_low": np.nan, "ci_high": np.nan, "unit": "cases"},
+        {"metric": "alert_volume_reduction", "value": (
+             1 - len(cases) / raw_alerts if raw_alerts else np.nan
+         ), "numerator": raw_alerts - len(cases), "denominator": raw_alerts,
+         "ci_low": np.nan, "ci_high": np.nan, "unit": "ratio"},
+        {"metric": "mean_alerts_per_case", "value": (
+             raw_alerts / len(cases) if len(cases) else np.nan
+         ), "numerator": raw_alerts, "denominator": len(cases),
+         "ci_low": np.nan, "ci_high": np.nan, "unit": "alerts/case"},
+        {"metric": "duplicate_case_count", "value": duplicate_cases,
+         "numerator": duplicate_cases, "denominator": len(cases),
+         "ci_low": np.nan, "ci_high": np.nan, "unit": "cases"},
+    ])
+    for name in (
+        "footprint_precision", "footprint_recall", "footprint_jaccard",
+        "hierarchy_distance",
+    ):
+        values = detected_locations[name].dropna()
+        summary = values.median() if name == "hierarchy_distance" else values.mean()
+        rows.append({
+            "metric": ("median_hierarchy_distance" if name == "hierarchy_distance"
+                       else f"mean_{name}"),
+            "value": summary if len(values) else np.nan,
+            "numerator": len(values),
+            "denominator": len(detected_locations),
+            "ci_low": np.nan,
+            "ci_high": np.nan,
+            "unit": "levels" if name == "hierarchy_distance" else "ratio",
+        })
 
     by_type = fault_results.groupby("fault_type", as_index=False).agg(
-        scoreable_faults=("fault_id", "nunique"), detected_faults=("detected", "sum")
+        scoreable_faults=("fault_id", "nunique"),
+        detected_faults=("detected", "sum"),
+        detected_and_localised=("equivalent_scope", "sum"),
     )
     by_type["recall"] = by_type["detected_faults"] / by_type["scoreable_faults"]
+    by_type["joint_detection_localisation_recall"] = (
+        by_type["detected_and_localised"] / by_type["scoreable_faults"]
+    )
     by_type["reporting_status"] = np.where(
         by_type["scoreable_faults"].ge(min_reliable_faults), "estimable", "descriptive_only"
     )
-    return {"case_matches": matches, "fault_results": fault_results,
-            "metrics": pd.DataFrame(rows), "fault_type_results": by_type}
+    recall_intervals = [
+        _wilson_interval(detected, total)
+        for detected, total in zip(by_type["detected_faults"], by_type["scoreable_faults"])
+    ]
+    by_type[["recall_ci_low", "recall_ci_high"]] = recall_intervals
+
+    by_domain = fault_results.groupby("domain_type", as_index=False).agg(
+        scoreable_faults=("fault_id", "nunique"),
+        detected_faults=("detected", "sum"),
+        detected_and_localised=("equivalent_scope", "sum"),
+    )
+    by_domain["recall"] = by_domain["detected_faults"] / by_domain["scoreable_faults"]
+    by_domain["joint_detection_localisation_recall"] = (
+        by_domain["detected_and_localised"] / by_domain["scoreable_faults"]
+    )
+    by_domain["reporting_status"] = np.where(
+        by_domain["scoreable_faults"].ge(min_reliable_faults),
+        "estimable", "descriptive_only",
+    )
+    return {
+        "case_matches": matches,
+        "fault_results": fault_results,
+        "localisation_results": localisation,
+        "metrics": pd.DataFrame(rows),
+        "fault_type_results": by_type,
+        "domain_type_results": by_domain,
+    }
 
 
 def evaluate_vus_pr(

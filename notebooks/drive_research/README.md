@@ -1,192 +1,107 @@
-# Sector-agnostic anomaly detection research workflow
+# Notebook run guide
 
-The maintained workflow is deliberately small. Sector-specific logic ends in
-Notebook 01A; every later notebook uses the same canonical contract.
-
-The current deliverable is a **defensible analytical product core and client
-demonstration**, not a production monitoring service. Production ingestion,
-security, workflow integration and service operations remain separate work.
-
-```text
-native data
-  -> 01A sector pack
-  -> 01B common canonical adapter
-  -> 02 calibration-only EDA
-  -> 03 evaluation harness
-  -> 04 frozen-residual models
-  -> 05 ranked cases and optional one-time holdout
-  -> 06 product demonstration
-```
-
-`SPEC-CORE` contains model-visible telemetry. `SPEC-EVAL` contains labels and
-is physically separate. Detector code never reads `SPEC-EVAL`; only the
-evaluation functions do.
+The workflow is common after the sector Pack. Run Telecom as the primary
+product path and Petrobras 3W as a real-data qualification path.
 
 ## Run order
 
-| Order | Notebook | Result |
+| Order | Notebook | Purpose |
 |---:|---|---|
-| 1 | `01A_TELECOM_PACK.ipynb` or `01A_PETROBRAS_3W_PACK.ipynb` | Sector-specific Pack |
-| 2 | `01B_COMMON_CANONICAL_ADAPTER.ipynb` | Canonical `SPEC-CORE`, `SPEC-EVAL`, splits |
-| 3 | `02_CANONICAL_EDA.ipynb` | Calibration EDA, readiness and modelling hand-off |
-| 4 | `03_EVALUATION_HARNESS.ipynb` | Frozen matching, case and holdout policy |
-| 5 | `04_SIMPLE_ANOMALY_MODELS.ipynb` | Development comparison and gated reference portfolio |
-| 6 | `05_INCIDENT_RANKING_AND_HOLDOUT.ipynb` | Ranked development cases, or one sealed holdout run |
-| 7 | `06_PRODUCT_DEMO.ipynb` | Read-only interactive client view |
+| 0 | `00_TELECOM_LOCALISATION_AUDIT.ipynb` | Audits group sizes, live peer availability, topology equivalence and localisation denominators. Telecom only. |
+| 1 | `01A_TELECOM_PACK.ipynb` | Maps Telecom telemetry, topology and isolated generator truth into the Pack interface. |
+| 1 | `01A_PETROBRAS_3W_PACK.ipynb` | Maps real 3W well recordings and isolated labels. No topology is invented. |
+| 2 | `01B_COMMON_CANONICAL_ADAPTER.ipynb` | Builds and validates canonical `SPEC-CORE`, `SPEC-EVAL` and `SPLITS` without sector-specific branches. |
+| 3 | `02_CANONICAL_EDA.ipynb` | Calibration-only structural, quality, distribution, time-series and reference-stability assessment. |
+| 4 | `03_EVALUATION_HARNESS.ipynb` | Freezes event matching, workload, uncertainty, localisation and holdout rules before modelling. |
+| 5 | `04_SIMPLE_ANOMALY_MODELS.ipynb` | Fits calibration-frozen channels and selects a small predeclared portfolio on development data. |
+| 6 | `05_INCIDENT_RANKING_AND_HOLDOUT.ipynb` | Produces ranked development incidents or performs one explicitly enabled sealed-holdout run. |
+| 7 | `06_PRODUCT_DEMO.ipynb` | Read-only interactive summary for review and client discussion. |
 
-`03A_OUTPUT_REVIEW.ipynb` is an optional read-only inspection notebook. It is
-not a pipeline stage and does not create or change analytical results.
+`03A_OUTPUT_REVIEW.ipynb` is an optional inspection notebook. It does not alter
+analytical results.
 
-## What remains common and what changes by sector
+## Paths and sector switch
 
-Notebook 01A changes for a new sector. It maps native fields to:
+The notebooks use the first configured data root:
 
-- metric ID, measurement kind, unit, sampling mode and cadence;
-- entity and episode identity;
-- source quality rules backed by evidence;
-- sector labels routed only to Pack evaluation;
-- available topology and the correct split unit.
+1. `ANOMALY_DATA_ROOT`;
+2. `ANOMALY_DRIVE_ROOT`;
+3. `/content/drive/MyDrive/anomaly_detection` in Colab;
+4. `~/anomaly_detection_data` locally.
 
-The canonical adapter, EDA, modelling mechanics, case formation and demo stay
-common. A new sector also needs a short, explicit policy entry for analysis
-cadence, decision horizons and case workload; those are operational choices,
-not properties the common code should guess. It must pass the same Pack
-validation and truth-isolation tests before those notebooks run.
-
-Petrobras 3W defaults to up to five deterministic real recordings per
-well/event pair. A fixed 35/40/25 whole-well split gives development more real
-wells while preserving the previously sealed ten-well holdout. It is not
-searched using labels, so raising the sample is nested. The Pack writes
-the actual well, episode and class denominators; repeated recordings from one
-well are never presented as independent wells.
-
-## Modelling approach
-
-Notebook 04 no longer uses a rolling centre as the normal reference. A rolling
-reference can absorb the slow degradation the detector is meant to find. The
-new V1 sequence is:
-
-1. transform each metric from its declared `measurement_kind`;
-2. freeze median and robust scale on calibration data only;
-3. calculate residuals against that frozen reference;
-4. score rapid deviations, residual CUSUM drift and residual dispersion change;
-5. calibrate each channel threshold from calibration blocks;
-6. consolidate channel alerts into cases;
-7. select using the upper confidence bound on case workload.
-
-Alert persistence, recovery and case consolidation are declared in elapsed
-seconds. Notebook 04 converts those durations to observations from each
-sector's canonical cadence. This keeps a one-minute rule equal to one minute
-whether measurements arrive every second or every fifteen minutes.
-
-The three nested portfolios are rapid only, rapid plus drift, and rapid plus
-drift plus dispersion. A common calibration quantile keeps the development
-search to 18 predeclared configurations; the available independent faults do
-not support a large hyperparameter search. PCA SPE, Isolation Forest and deep
-sequence classifiers remain challengers until they show incremental event
-recall or delay improvement at the same case workload and whole-well split.
-
-Raw 3W telemetry remains canonical at one second. Modelling aggregates it to a
-10-second cadence using measurement-kind rules, leaving about 90 observations
-inside the shortest 15-minute decision window. This is a compute/variance
-choice, not a modification of the source data.
-
-The 2024 GRU study on 3W is treated as a supervised classification benchmark,
-not as the evaluation design for this product. It uses label-dependent training
-and observation-level splitting; this workflow keeps labels out of the detector,
-splits by well, and reports event recall plus case workload. A supervised GRU
-may be added later only as a separately named challenger under the same sealed
-whole-well holdout.
-
-Clipped values are not treated as ordinary measurements. They are withheld
-from asset-health features and retained as data-quality indicators. Petrobras
-3W additionally invalidates only three empirically verified repeated historian
-sentinels; other finite extremes remain visible for review.
-
-Case grouping uses a finite time gap and requires all entities in a multi-entity
-case to share one resolvable topology group. This prevents uncontrolled A-B-C
-transitive chains. Cases are ranked by anomaly evidence. Operational priority
-is intentionally blank until validated criticality and impact data exist.
-
-## Runtime and data paths
-
-The same notebooks run in Colab or locally.
-
-- Colab default: `/content/drive/MyDrive/anomaly_detection`
-- Linux/WSL default: `~/anomaly_detection_data`
-- Override: `ANOMALY_DATA_ROOT`
-
-In Colab, keep the notebooks and the three helper files in
-`MyDrive/anomaly_detection/research/milestone1/`. Locally, select the repository
-virtual environment as the notebook kernel.
-
-For Notebooks 02–06 set:
+In Notebooks 02–06, change only:
 
 ```python
 SECTOR = "telecom"          # or "petrobras_3w"
 ```
 
-Headless execution can set `ANOMALY_SECTOR`. Notebook 01B uses
-`ADAPTER_SECTOR`. Output directories are immutable; use a new run ID when an
-input or method changes.
+Notebook 01B uses `ADAPTER_SECTOR`. Environment variables remain available for
+headless runs. Completed output directories are immutable; change the run ID
+only when an input or method changes.
 
-## Durable outputs
+## What is common and what changes by sector
 
-The pipeline intentionally writes a small number of understandable artefacts:
+Each 01A notebook owns native field names, units, measurement kinds, cadence,
+entity/episode identity, source-backed quality rules, genuine topology, split
+construction and label translation. It creates no model features.
+
+The common adapter and later notebooks own the versioned contract, canonical
+materialisation, EDA, modelling mechanics, incident formation and evaluation.
+They read capabilities rather than Telecom field names. Operational policies
+such as decision horizon and workload budget are explicit by sector because
+the common code must not guess them.
+
+## Model and evaluation rules
+
+- Calibration fits transformations, robust references and score thresholds;
+  it does not use truth.
+- Telecom thresholds use maxima within entity-days; group common-mode scores
+  use group-days. Petrobras uses whole-recording maxima.
+- Development selects among a small declared set of channel portfolios.
+- Results are compared by event recall and the upper confidence bound on false
+  incidents at the same operational exposure.
+- Cross-entity incident consolidation requires common-mode evidence. Merely
+  sharing an OLT is not enough.
+- Localisation reports exact, top-two, topology-equivalence, footprint and
+  different-branch evidence. It is probable observable scope, not proven root
+  cause.
+- Telecom is synthetic, so it validates injected mechanisms rather than
+  real-fleet effectiveness. Petrobras is real but does not validate Telecom
+  topology.
+
+## Main output directories
 
 ```text
-outputs/packs/petrobras_3w/<run>/
-  population_report.csv
-  class_coverage_report.csv
-  sentinel_audit.csv
-
-outputs/eda/v2.3.0/<sector>/<run>/
-  metric_summary.csv
-  temporal_summary.csv
-  baseline_review.parquet
-  readiness.parquet
-  eda_decisions.json
-
-outputs/evaluation/v2.3.0/<sector>/<run>/
-  evaluation_policy.json
-  statistical_resolution.csv
-  truth_partition_audit.csv
-  development/*.parquet
-  holdout_sealed/*.parquet
-
-outputs/models/v2.3.0/<sector>/<run>/
-  residual_bundle.joblib
-  selected_configuration.json
-  calibration_thresholds.csv
-  development_comparison.csv
-  development_readiness.parquet
-  selected_alerts.parquet
-  selected_cases.parquet
-  selected_case_members.parquet
-  development_case_trace.parquet
-  development_metrics.csv
-  fault_type_results.csv
-  clustered_recall_interval.csv
-  legacy_workload_comparison.csv      # when frozen v2.0 outputs are available
-  legacy_fault_type_comparison.csv    # when frozen v2.0 outputs are available
-
-outputs/cases/v2.3.0/<sector>/<run>/
-  ranked_cases.csv
-  alerts.parquet
-  case_members.parquet
-  evaluation_metrics.csv
-  fault_type_results.csv
-  case_score_trace.parquet
-  case_run.json
+outputs/audits/v1.0.0/telecom/<run>/
+outputs/packs/<sector>/<run>/
+outputs/canonical/v0.11.0/<sector>/<run>/
+outputs/eda/v3.0.0/<sector>/<run>/
+outputs/evaluation/v3.0.0/<sector>/<run>/
+outputs/models/v3.0.0/<sector>/<run>/
+outputs/cases/v3.0.0/<sector>/<run>/
 ```
 
-Development results are selection evidence, not final performance claims.
-If no configuration meets the predeclared case-workload budget, Notebook 04
-records `no_configuration_within_budget`. Notebook 05 may still rank those
-development cases for diagnosis, but it will refuse to open holdout.
-Run Notebook 05 with `RUN_HOLDOUT=1` only after the feature, detector, case and
-evaluation policy is frozen. The holdout receipt then blocks reuse.
+The durable artefacts are intentionally compact: manifests, audit summaries,
+calibration thresholds, development comparisons, selected alerts/incidents,
+event/localisation metrics and evidence traces. Large intermediate wide
+matrices and residual files are temporary.
 
-Petrobras 3W is the primary real-data validation sector. Telecom is a
-synthetic methodological testbed: it is useful for controlled mechanism and
-leakage tests, but it does not establish real-world fibre-fault realism.
+## Holdout rule
+
+Run Notebook 05 normally with `RUN_HOLDOUT=0`. Set `RUN_HOLDOUT=1` only after
+the contract, features, channels, thresholds, consolidation and evaluation
+policy are frozen and the development workload gate passes. The notebook
+writes `HOLDOUT_USED.json` to prevent silent reuse.
+
+## Validation before release
+
+From the repository root:
+
+```bash
+python -m unittest tests/test_pipeline_v3.py -v
+```
+
+These small fixtures check truth isolation, persisted-content hashes,
+entity-day block maxima, peer exclusion, topology score calibration,
+cross-entity consolidation and equivalence-aware localisation. Full-data runs
+remain necessary to validate runtime and empirical results.
