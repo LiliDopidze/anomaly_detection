@@ -161,10 +161,15 @@ non-seasonal references.
 
 ## 10. Thresholds and incidents
 
-Calibration works on block maxima and complete consolidated incidents rather
-than millions of point scores. Candidate channel thresholds are searched
-jointly against a declared false-incident budget. Persistence is expressed in
-elapsed time. Consolidation requires temporal overlap plus shared entity or a
+The early calibration slice fits the reference model. A disjoint late
+calibration slice supplies empirical daily-block maxima for candidate channel
+thresholds, so in-sample residuals cannot make the tails look artificially
+light. For each portfolio, a label-free operating point is the most sensitive
+candidate whose complete consolidated incident rate on late calibration stays
+inside the declared workload budget. Development labels may choose among
+these pre-calibrated portfolio operating points, but never choose the
+threshold quantile. Persistence is expressed in elapsed time. Consolidation
+requires temporal overlap plus shared entity or a
 justified topology relation; unrestricted transitive chaining is forbidden.
 
 The pipeline fails closed when no development candidate meets the workload

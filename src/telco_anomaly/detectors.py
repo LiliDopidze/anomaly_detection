@@ -9,6 +9,8 @@ application.
 from __future__ import annotations
 
 import math
+import shutil
+import time
 from pathlib import Path
 
 import duckdb
@@ -134,9 +136,13 @@ def materialize_wide_partition(
     metric_columns = ",\n".join(metric_columns)
     telemetry_glob = str(core_root / "telemetry" / "*.parquet")
     split_type, rows = partition_definition(split_root, partition)
+    spill_directory = destination.parent / f".{destination.stem}-duckdb"
+    spill_directory.mkdir(parents=True, exist_ok=True)
     connection = duckdb.connect()
     connection.execute("SET memory_limit = ?", [memory_limit])
     connection.execute("SET threads = ?", [int(threads)])
+    connection.execute("SET temp_directory = ?", [str(spill_directory)])
+    connection.execute("SET preserve_insertion_order = false")
 
     if split_type == "time":
         start = rows.iloc[0]["start_ts"]
@@ -169,12 +175,77 @@ def materialize_wide_partition(
         ) TO {_sql_literal(destination)}
           (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000)
     """
-    connection.execute(query)
-    connection.close()
+    started = time.perf_counter()
+    print(
+        f"  {partition}: pivoting canonical telemetry to a local wide panel",
+        flush=True,
+    )
+    try:
+        connection.execute(query)
+    finally:
+        connection.close()
+        shutil.rmtree(spill_directory, ignore_errors=True)
+    rows = pq.ParquetFile(destination).metadata.num_rows
+    print(
+        f"  {partition}: wide panel complete — {rows:,} rows "
+        f"in {(time.perf_counter() - started) / 60:.1f} minutes",
+        flush=True,
+    )
     return {
         "split_type": split_type,
         "score_start": score_start,
         "score_end": score_end,
+    }
+
+
+def split_feature_file_by_time(
+    source,
+    fit_destination,
+    threshold_destination,
+    *,
+    fit_fraction=0.70,
+):
+    """Split calibration features chronologically into fit and threshold slices."""
+
+    if not 0 < float(fit_fraction) < 1:
+        raise ValueError("fit_fraction must be between zero and one")
+    source = Path(source)
+    fit_destination = Path(fit_destination)
+    threshold_destination = Path(threshold_destination)
+    fit_destination.parent.mkdir(parents=True, exist_ok=True)
+    threshold_destination.parent.mkdir(parents=True, exist_ok=True)
+    source_sql = _sql_literal(str(source))
+
+    with duckdb.connect() as connection:
+        bounds = connection.execute(f"""
+            SELECT min(event_ts), max(event_ts)
+            FROM read_parquet({source_sql})
+        """).fetchone()
+        start, end = map(lambda value: pd.to_datetime(value, utc=True), bounds)
+        if pd.isna(start) or pd.isna(end) or start >= end:
+            raise ValueError("Calibration features need a non-empty time span")
+        cutoff = start + (end - start) * float(fit_fraction)
+        for destination, operator in (
+            (fit_destination, "<"),
+            (threshold_destination, ">="),
+        ):
+            connection.execute(f"""
+                COPY (
+                    SELECT * FROM read_parquet({source_sql})
+                    WHERE event_ts {operator} TIMESTAMPTZ {_sql_literal(cutoff.isoformat())}
+                ) TO {_sql_literal(str(destination))}
+                (FORMAT PARQUET, COMPRESSION ZSTD)
+            """)
+
+    fit_rows = pq.ParquetFile(fit_destination).metadata.num_rows
+    threshold_rows = pq.ParquetFile(threshold_destination).metadata.num_rows
+    if fit_rows == 0 or threshold_rows == 0:
+        raise ValueError("Calibration split produced an empty slice")
+    return {
+        "cutoff": cutoff,
+        "fit_rows": fit_rows,
+        "threshold_rows": threshold_rows,
+        "fit_fraction": float(fit_fraction),
     }
 
 
@@ -763,9 +834,14 @@ def calibration_thresholds(
                 f"|| ':' || coalesce(CAST({_sql_identifier(model_id + '__scope_id')} AS VARCHAR), '')"
             )
             block_label = f"{model_id}_scope"
+            # A physical-scope score is repeated on descendant entity rows so
+            # every incident member can consume it. Completeness is therefore
+            # the number of distinct observation times, not descendant rows.
+            block_rows = "count(DISTINCT event_ts)"
         else:
             base_key = f"CAST({block} AS VARCHAR)"
             block_label = block_column
+            block_rows = f"count({model_column})"
         if duration is not None:
             block_key = (
                 f"({base_key}) || ':' || "
@@ -781,7 +857,7 @@ def calibration_thresholds(
                        AS used_blocks
             FROM (
                 SELECT {block_key} AS calibration_block,
-                       count({model_column}) AS rows
+                       {block_rows} AS rows
                 FROM read_parquet({source})
                 WHERE {model_column} IS NOT NULL
                 GROUP BY calibration_block
@@ -804,7 +880,7 @@ def calibration_thresholds(
                     FROM read_parquet({source})
                     WHERE {model_column} IS NOT NULL
                     GROUP BY calibration_block
-                    HAVING count(*) >= {int(minimum_block_rows)}
+                    HAVING {block_rows} >= {int(minimum_block_rows)}
                 )
                 """,
                 [float(quantile)],
@@ -1273,6 +1349,7 @@ def materialize_measurement_features(
     seasonal_periods=None,
     score_start=None,
     score_end=None,
+    progress_every=25,
 ):
     """Write transformed features one complete episode at a time."""
 
@@ -1280,7 +1357,10 @@ def materialize_measurement_features(
     destination.parent.mkdir(parents=True, exist_ok=True)
     writer = None
     try:
-        for panel in iter_episode_frames(wide_path):
+        started = time.perf_counter()
+        episodes = 0
+        written_rows = 0
+        for episodes, panel in enumerate(iter_episode_frames(wide_path), start=1):
             feature_catalogue = catalogue
             if target_cadence_seconds is not None:
                 panel = resample_wide_panel(
@@ -1306,15 +1386,30 @@ def materialize_measurement_features(
                 features = features.loc[times.lt(score_end)]
             if features.empty:
                 continue
+            written_rows += len(features)
             table = pa.Table.from_pandas(features, preserve_index=False)
             if writer is None:
                 writer = pq.ParquetWriter(destination, table.schema, compression="zstd")
             writer.write_table(table)
+            if progress_every and (
+                episodes == 1 or episodes % int(progress_every) == 0
+            ):
+                print(
+                    f"    features: {episodes} episodes, "
+                    f"{written_rows:,} rows, "
+                    f"{(time.perf_counter() - started) / 60:.1f} minutes",
+                    flush=True,
+                )
     finally:
         if writer is not None:
             writer.close()
     if writer is None:
         raise ValueError("Partition produced no transformed feature rows")
+    print(
+        f"    features complete — {episodes} episodes, {written_rows:,} rows "
+        f"in {(time.perf_counter() - started) / 60:.1f} minutes",
+        flush=True,
+    )
     return destination
 
 
@@ -1347,6 +1442,56 @@ def _reference_sample(path, maximum_rows, random_seed):
             USING SAMPLE reservoir({int(maximum_rows)} ROWS)
             REPEATABLE ({int(random_seed)})
         """).df()
+
+
+def _full_entity_reference(path, features, scale_floors, minimum_rows=30):
+    """Robust entity references from the full calibration-fit slice.
+
+    The training-row cap is for pooled PCA and Isolation Forest only. Entity
+    baselines are small group summaries, so DuckDB can calculate them over the
+    complete early-calibration file without materialising all rows in Python.
+    """
+
+    expressions = []
+    for feature in features:
+        column = _sql_identifier(feature)
+        expressions.extend([
+            f"count({column}) AS {_sql_identifier(feature + '__count')}",
+            f"approx_quantile({column}, 0.50) AS {_sql_identifier(feature + '__centre')}",
+            f"approx_quantile({column}, 0.25) AS {_sql_identifier(feature + '__q25')}",
+            f"approx_quantile({column}, 0.75) AS {_sql_identifier(feature + '__q75')}",
+        ])
+    source = _sql_literal(str(Path(path)))
+    with duckdb.connect() as connection:
+        summary = connection.execute(f"""
+            SELECT CAST(entity_id AS VARCHAR) AS entity_id,
+                   {', '.join(expressions)}
+            FROM read_parquet({source})
+            GROUP BY entity_id
+            ORDER BY entity_id
+        """).df().set_index("entity_id")
+
+    counts = pd.DataFrame(
+        {name: summary[f"{name}__count"] for name in features}
+    ).astype(float)
+    centre = pd.DataFrame(
+        {name: summary[f"{name}__centre"] for name in features}
+    ).astype(float)
+    q25 = pd.DataFrame(
+        {name: summary[f"{name}__q25"] for name in features}
+    ).astype(float)
+    q75 = pd.DataFrame(
+        {name: summary[f"{name}__q75"] for name in features}
+    ).astype(float)
+
+    valid = counts.ge(int(minimum_rows))
+    centre = centre.where(valid)
+    scale = (q75 - q25) / 1.349
+    floors = centre.abs() * 1e-6
+    for name in features:
+        floors[name] = floors[name].clip(lower=float(scale_floors[name]))
+    scale = scale.where(valid).where(scale.gt(floors), floors.where(valid))
+    return centre, scale, counts
 
 
 def _reference_components(bundle, frame):
@@ -1459,20 +1604,15 @@ def fit_residual_bundle(
     global_centre = global_centre.combine_first(fallback_centre)
     global_scale = global_scale.combine_first(fallback_scale)
     entity_centre = entity_scale = None
+    entity_reference_counts = None
     if use_entity_reference:
-        counts = sample.groupby("entity_id")[usable].count()
-        centre = sample.groupby("entity_id")[usable].median()
-        q25 = sample.groupby("entity_id")[usable].quantile(0.25)
-        q75 = sample.groupby("entity_id")[usable].quantile(0.75)
-        scales = (q75 - q25) / 1.349
-        valid = counts.ge(30)
-        entity_centre = centre.where(valid)
-        floors = entity_centre.abs() * 1e-6
-        for name in usable:
-            floors[name] = floors[name].clip(lower=scale_floors[name])
-        entity_scale = scales.where(valid)
-        entity_scale = entity_scale.where(
-            entity_scale.gt(floors), floors.where(valid)
+        entity_centre, entity_scale, entity_reference_counts = (
+            _full_entity_reference(
+                calibration_features,
+                usable,
+                scale_floors,
+                minimum_rows=30,
+            )
         )
 
         # EDA may flag an entity-metric calibration baseline as atypical or
@@ -1494,6 +1634,7 @@ def fit_residual_bundle(
         "global_scale": global_scale,
         "entity_centre": entity_centre,
         "entity_scale": entity_scale,
+        "entity_reference_counts": entity_reference_counts,
         "use_entity_reference": bool(use_entity_reference),
         "reference_exclusions": exclusions.to_dict("records"),
         "training_rows": len(sample),
@@ -2017,6 +2158,71 @@ def merge_score_files(self_scores, topology_scores, destination):
             ) TO {_sql_literal(str(destination))}
             (FORMAT PARQUET, COMPRESSION ZSTD)
         """)
+    return destination
+
+
+def score_partition_file(
+    bundle,
+    feature_path,
+    destination,
+    workspace,
+    *,
+    cadence_seconds,
+    dispersion_window_seconds,
+    resolved_policy,
+    topology=None,
+    topology_reference=None,
+):
+    """Apply one frozen scoring procedure to any feature partition.
+
+    Development and holdout must pass through this function with the same
+    fitted bundle and resolved policy. Intermediate residual and topology
+    files stay in ``workspace``; only the combined score file is published.
+    """
+
+    destination = Path(destination)
+    workspace = Path(workspace)
+    workspace.mkdir(parents=True, exist_ok=True)
+    stem = destination.stem
+    self_scores = workspace / f"{stem}__self.parquet"
+    residuals = workspace / f"{stem}__residuals.parquet"
+
+    started = time.perf_counter()
+    score_residual_file(
+        bundle,
+        feature_path,
+        self_scores,
+        cadence_seconds=cadence_seconds,
+        dispersion_window_seconds=dispersion_window_seconds,
+        cusum_allowance=resolved_policy["cusum_allowance"],
+        residual_destination=residuals,
+    )
+
+    if resolved_policy.get("topology_enabled", False):
+        if topology is None or topology_reference is None:
+            raise ValueError("Frozen topology scoring requires topology and its reference")
+        topology_scores = workspace / f"{stem}__topology.parquet"
+        score_topology_file(
+            residuals,
+            topology,
+            topology_reference,
+            topology_scores,
+            peer_group_type=resolved_policy["peer_group_type"],
+            group_types=resolved_policy["group_types"],
+            min_peers=resolved_policy["min_peers"],
+            min_group_entities=resolved_policy["min_group_entities"],
+            min_group_fraction=resolved_policy["min_group_fraction"],
+        )
+        merge_score_files(self_scores, topology_scores, destination)
+    else:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(self_scores, destination)
+
+    print(
+        f"  scored {Path(feature_path).name} in "
+        f"{(time.perf_counter() - started) / 60:.1f} minutes",
+        flush=True,
+    )
     return destination
 
 

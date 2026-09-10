@@ -56,7 +56,6 @@ Notebooks explain choices and inspect outputs. Reusable calculations live in
 ```bash
 git clone https://github.com/LiliDopidze/anomaly_detection.git
 cd anomaly_detection
-git switch codex/solo-drive-notebooks
 python -m venv .venv
 source .venv/bin/activate       # Windows PowerShell: .venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
@@ -125,8 +124,9 @@ For exact run instructions and the purpose of every notebook, see
   `SPEC-EVAL` and are mounted only by the evaluator.
 - Calibration, development, and holdout are chronological. Development labels
   may compare declared candidates; locked holdout cannot change the model.
-- Thresholds are calibrated on post-consolidation incident workload, not a
-  guessed contamination fraction.
+- Score thresholds use a late calibration slice that was not used to fit the
+  detector. Consolidated incident workload and recall are then compared on
+  development truth; holdout remains sealed until one configuration freezes.
 - The selected model fails closed if no candidate satisfies the workload and
   evidence gates.
 - Localisation reports the smallest supported observable scope and preserves
