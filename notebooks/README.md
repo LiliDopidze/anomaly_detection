@@ -61,7 +61,20 @@ normally, retain both runs so their manifests can be compared.
 
 ## Public Telecom qualification
 
-Notebook 11 creates a mapping draft and stops. A human must verify native
+Notebook 11 can acquire one selected public source directly from its publisher
+and cache the extracted files outside Git:
+
+```python
+%env PUBLIC_DATASET=ran_pm
+%env DOWNLOAD_PUBLIC_DATA=1
+```
+
+Do not combine `PUBLIC_DATASET=all` with downloading: select one source so the
+size and terms are explicit. Microsoft Optical additionally requires
+`ACKNOWLEDGE_MICROSOFT_DATA_TERMS=1`; the optical-failure testbed requires
+`ACKNOWLEDGE_OPTICAL_FAILURE_TERMS=1`.
+
+Notebook 11 then creates a mapping draft and stops. A human must verify native
 timestamp, entity, topology, metric meaning, units, cadence, and source terms,
 then set `mapping_review_status: approved`. After a RAN or Microsoft optical
 pack is ready, run Notebooks 04–06 with `TELCO_DATASET=ran_pm` or

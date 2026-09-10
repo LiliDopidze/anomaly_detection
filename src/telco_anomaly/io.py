@@ -7,12 +7,16 @@ allowed to materialise.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
+import urllib.request
+import zipfile
 from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -239,9 +243,11 @@ def write_json(
 ) -> None:
     """Atomically write deterministic, human-readable JSON.
 
-    With the default ``overwrite=False``, publishing uses a hard link so a
-    concurrent writer cannot replace an existing file between the existence
-    check and publication.
+    With the default ``overwrite=False``, publishing first uses a hard link so
+    a concurrent writer cannot replace an existing file between the existence
+    check and publication.  Google Drive does not support hard links, so the
+    fallback uses exclusive file creation and removes any partial destination
+    if copying fails.
     """
 
     destination = Path(path)
@@ -270,10 +276,160 @@ def write_json(
                 raise FileExistsError(
                     f"Refusing to overwrite {destination}"
                 ) from error
-            temporary.unlink()
+            except OSError as error:
+                unsupported = {
+                    errno.EPERM,
+                    errno.EXDEV,
+                    getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+                    errno.EOPNOTSUPP,
+                }
+                if not isinstance(error, PermissionError) and error.errno not in unsupported:
+                    raise
+                descriptor = os.open(
+                    destination,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o666,
+                )
+                try:
+                    with os.fdopen(descriptor, "wb") as target:
+                        with temporary.open("rb") as source:
+                            shutil.copyfileobj(source, target)
+                        target.flush()
+                        os.fsync(target.fileno())
+                except BaseException:
+                    destination.unlink(missing_ok=True)
+                    raise
+            finally:
+                temporary.unlink(missing_ok=True)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def _download(url: str, destination: Path) -> dict[str, Any]:
+    """Stream one public resource and return its observed checksums."""
+
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "telco-anomaly-detection/4.0"},
+    )
+    sha256 = hashlib.sha256()
+    md5 = hashlib.md5(usedforsecurity=False)
+    size = 0
+    with urllib.request.urlopen(request) as response, destination.open("wb") as target:
+        while chunk := response.read(1 << 20):
+            target.write(chunk)
+            sha256.update(chunk)
+            md5.update(chunk)
+            size += len(chunk)
+    return {
+        "bytes": size,
+        "sha256": sha256.hexdigest(),
+        "md5": md5.hexdigest(),
+    }
+
+
+def _extract_zip(archive_path: Path, destination: Path) -> None:
+    """Extract a ZIP archive while rejecting links and path traversal."""
+
+    root = destination.resolve()
+    with zipfile.ZipFile(archive_path) as archive:
+        for member in archive.infolist():
+            target = (destination / member.filename).resolve()
+            if not target.is_relative_to(root):
+                raise ValueError(f"Unsafe archive path: {member.filename}")
+            mode = member.external_attr >> 16
+            if stat.S_ISLNK(mode):
+                raise ValueError(f"Archive links are not allowed: {member.filename}")
+        archive.extractall(destination)
+
+
+def acquire_public_dataset(
+    dataset_name: str,
+    *,
+    data_root: str | os.PathLike[str] | None = None,
+    project_root: str | os.PathLike[str] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> Path:
+    """Download and extract one configured public dataset exactly once.
+
+    This removes the manual download/upload step, but it does not stream large
+    archives on every notebook run.  The extracted source is cached outside
+    Git under ``TELCO_DATA_ROOT`` and accompanied by a checksum manifest.
+    """
+
+    root = resolve_data_root() if data_root is None else _expanded(data_root)
+    project = find_project_root() if project_root is None else _expanded(project_root)
+    environment = os.environ if environ is None else environ
+    datasets = load_config("dataset", project_root=project).get("datasets", {})
+    if dataset_name not in datasets:
+        raise KeyError(f"Unknown dataset {dataset_name!r}")
+
+    definition = datasets[dataset_name]
+    download = definition.get("download")
+    if not isinstance(download, dict):
+        raise ValueError(f"Dataset {dataset_name!r} has no download configuration")
+    acknowledgement = download.get("acknowledgement_env")
+    if acknowledgement and environment.get(str(acknowledgement)) != "1":
+        raise PermissionError(
+            f"Review the source terms, then set {acknowledgement}=1"
+        )
+
+    relative_destination = Path(str(download.get("destination", "")))
+    if (
+        str(relative_destination) in {"", "."}
+        or relative_destination.is_absolute()
+        or ".." in relative_destination.parts
+    ):
+        raise ValueError("Public download destination must stay beneath TELCO_DATA_ROOT")
+    destination = (root / relative_destination).resolve()
+    if destination.exists():
+        return resolve_dataset_source(
+            dataset_name, data_root=root, project_root=project
+        )
+
+    resources = download.get("resources")
+    if not isinstance(resources, list) or not resources:
+        raise ValueError(f"Dataset {dataset_name!r} has no download resources")
+
+    records = []
+    with immutable_output_directory(destination) as staging:
+        with tempfile.TemporaryDirectory(prefix=f"{dataset_name}-download-") as temporary:
+            temporary = Path(temporary)
+            for item in resources:
+                filename = Path(str(item.get("filename", ""))).name
+                url = item.get("url")
+                if not filename or not isinstance(url, str) or not url.startswith("https://"):
+                    raise ValueError(f"Invalid download resource for {dataset_name!r}")
+                local_file = temporary / filename
+                observed = _download(url, local_file)
+                expected_md5 = item.get("md5")
+                expected_sha256 = item.get("sha256")
+                expected_bytes = item.get("bytes")
+                if expected_bytes is not None and observed["bytes"] != int(expected_bytes):
+                    raise ValueError(f"Size mismatch for {filename}")
+                if expected_md5 and observed["md5"] != str(expected_md5).lower():
+                    raise ValueError(f"MD5 mismatch for {filename}")
+                if expected_sha256 and observed["sha256"] != str(expected_sha256).lower():
+                    raise ValueError(f"SHA-256 mismatch for {filename}")
+
+                if item.get("archive") == "zip":
+                    _extract_zip(local_file, staging)
+                elif item.get("archive") in {None, "none"}:
+                    shutil.copy2(local_file, staging / filename)
+                else:
+                    raise ValueError(f"Unsupported archive type for {filename}")
+                records.append({"filename": filename, "url": url, **observed})
+
+        write_json(staging / "source_manifest.json", {
+            "dataset": dataset_name,
+            "source_page": definition.get("source_url"),
+            "resources": records,
+        })
+
+    return resolve_dataset_source(
+        dataset_name, data_root=root, project_root=project
+    )
 
 
 def read_json(path: str | os.PathLike[str]) -> Any:

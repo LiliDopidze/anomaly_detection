@@ -41,7 +41,9 @@ derived data is redistributed by this repository.
 The public optical-failure testbed is an optional labelled response test. Its
 short controlled failures are not representative of production prevalence.
 The repository currently has no explicit reuse licence, so users must obtain
-legal clearance and supply the data themselves.
+legal clearance and explicitly acknowledge the source terms before the pinned
+upstream files are acquired. The acquisition mechanism is not a grant of reuse
+or redistribution rights.
 
 ## 3. Data contract and truth boundary
 

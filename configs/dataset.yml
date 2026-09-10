@@ -16,6 +16,7 @@ datasets:
     role: real_optical_behaviour_and_alert_stability
     source_candidates:
       - sources/microsoft_optical/raw/plots_dataset_release
+      - sources/microsoft_optical/raw
     cadence_seconds: 900
     labelled: false
     topology: segment_membership
@@ -26,6 +27,14 @@ datasets:
     redistribute_source: false
     redistribute_derived_data: false
     output_run_id: microsoft_optical_v1
+    download:
+      destination: sources/microsoft_optical/raw
+      acknowledgement_env: ACKNOWLEDGE_MICROSOFT_DATA_TERMS
+      resources:
+        - filename: optical_data.zip
+          url: https://download.microsoft.com/download/1/4/2/1428b98d-0726-4442-8aef-8d03080731ae/optical_data.zip
+          archive: zip
+          bytes: 959580707
   ran_pm:
     role: real_operator_telemetry_portability_and_workload
     source_candidates:
@@ -39,6 +48,25 @@ datasets:
     licence_review_required: false
     redistribute_source: false
     output_run_id: ran_pm_v1
+    download:
+      destination: sources/ran_pm/17815388/raw
+      resources:
+        - filename: Dataset_01.zip
+          url: https://zenodo.org/records/17815388/files/Dataset_01.zip?download=1
+          archive: zip
+          md5: cba4e8c2887c0d9382c6a63736fe5ad5
+        - filename: Dataset_02.zip
+          url: https://zenodo.org/records/17815388/files/Dataset_02.zip?download=1
+          archive: zip
+          md5: 7d9c1c019e5d18bf318b4e4ad9393d91
+        - filename: Dataset_03.zip
+          url: https://zenodo.org/records/17815388/files/Dataset_03.zip?download=1
+          archive: zip
+          md5: f9e3517853f6a21f3b49ad089f1b8da0
+        - filename: README.md
+          url: https://zenodo.org/records/17815388/files/README.md?download=1
+          archive: none
+          md5: 092277c2bb7bd59a6635185456f3f406
   optical_failure:
     role: controlled_physical_failure_evaluation
     source_candidates:
@@ -53,6 +81,20 @@ datasets:
     redistribute_source: false
     redistribute_derived_data: false
     output_run_id: optical_failure_v1
+    download:
+      destination: sources/optical_failure/raw
+      acknowledgement_env: ACKNOWLEDGE_OPTICAL_FAILURE_TERMS
+      resources:
+        - filename: HardFailure_dataset.csv
+          url: https://raw.githubusercontent.com/Network-And-Services/optical-failure-dataset/7f0e9c0617fdde7f087de7214f38312ff7aaefd4/HardFailure_dataset.csv
+          archive: none
+          bytes: 3025870
+          sha256: ae0aac6f0c69d70f0cfd3b843e8ab219e10aa482dbeb45b91be49ea5148e36cd
+        - filename: SoftFailure_dataset.csv
+          url: https://raw.githubusercontent.com/Network-And-Services/optical-failure-dataset/7f0e9c0617fdde7f087de7214f38312ff7aaefd4/SoftFailure_dataset.csv
+          archive: none
+          bytes: 2490427
+          sha256: e0390baaedcbfda2e842300234a59c5f165ce2402150194bfbac7d33797c2ccc
 rules:
   pool_raw_datasets: false
   fit_one_model_across_metric_packs: false

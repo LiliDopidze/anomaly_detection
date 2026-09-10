@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ sys.path.insert(0, str(SRC))
 
 import telco_anomaly.io as io_helpers
 from telco_anomaly.io import (
+    acquire_public_dataset,
     file_sha256,
     find_project_root,
     immutable_output_directory,
@@ -149,6 +151,77 @@ def test_atomic_json_round_trip_refuses_accidental_overwrite(tmp_path):
     write_json(path, {"replacement": True}, overwrite=True)
     assert read_json(path) == {"replacement": True}
     assert not list(path.parent.glob(".manifest.json.tmp-*"))
+
+
+def test_json_write_falls_back_when_drive_rejects_hard_links(tmp_path, monkeypatch):
+    path = tmp_path / "drive" / "manifest.json"
+
+    def no_hard_links(*_args, **_kwargs):
+        raise PermissionError("Drive does not implement hard links")
+
+    monkeypatch.setattr(io_helpers.os, "link", no_hard_links)
+    write_json(path, {"status": "complete"})
+
+    assert read_json(path) == {"status": "complete"}
+    with pytest.raises(FileExistsError):
+        write_json(path, {"status": "replacement"})
+
+
+def test_public_dataset_acquisition_downloads_once_and_records_checksums(
+    tmp_path, monkeypatch
+):
+    project = project_fixture(tmp_path)
+    data_root = tmp_path / "data"
+    (project / "configs" / "dataset.yml").write_text(
+        """\
+version: 1
+primary_dataset: fixture
+datasets:
+  fixture:
+    source_candidates:
+      - sources/fixture/raw
+    source_url: https://example.test/fixture
+    download:
+      destination: sources/fixture/raw
+      resources:
+        - filename: observations.zip
+          url: https://example.test/observations.zip
+          archive: zip
+        - filename: README.md
+          url: https://example.test/README.md
+          archive: none
+""",
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_download(url, destination):
+        calls.append(url)
+        if destination.suffix == ".zip":
+            with zipfile.ZipFile(destination, "w") as archive:
+                archive.writestr("data/part.csv", "timestamp,value\n1,2\n")
+        else:
+            destination.write_text("fixture documentation\n", encoding="utf-8")
+        payload = destination.read_bytes()
+        return {
+            "bytes": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "md5": hashlib.md5(payload).hexdigest(),
+        }
+
+    monkeypatch.setattr(io_helpers, "_download", fake_download)
+    source = acquire_public_dataset(
+        "fixture", data_root=data_root, project_root=project
+    )
+
+    assert (source / "data" / "part.csv").is_file()
+    assert (source / "README.md").is_file()
+    manifest = read_json(source / "source_manifest.json")
+    assert manifest["dataset"] == "fixture"
+    assert len(manifest["resources"]) == 2
+
+    acquire_public_dataset("fixture", data_root=data_root, project_root=project)
+    assert len(calls) == 2
 
 
 def test_file_sha256_streams_exact_bytes(tmp_path):
