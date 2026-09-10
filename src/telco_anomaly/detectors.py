@@ -21,8 +21,18 @@ from sklearn.ensemble import IsolationForest
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import RobustScaler
 
+from .features import (
+    add_causal_history,
+    add_causal_seasonal_differences,
+    directional_cusum,
+    empirical_tail_evidence,
+    feature_policy,
+    fit_empirical_tail_reference,
+    transform_episode,
+)
 
-MODEL_CORE_VERSION = "3.0.0"
+
+MODEL_CORE_VERSION = "4.0.0"
 MODEL_IDS = (
     "rapid_residual",
     "drift_cusum",
@@ -868,7 +878,7 @@ def alerts_from_score_file(
 ):
     """Create alerts episode by episode without materialising all scores."""
 
-    from evaluation_core import SCORE_COLUMNS, scores_to_alerts
+    from .evaluation import SCORE_COLUMNS, scores_to_alerts
 
     explanation_column = f"{model_id}__leading_feature"
     score_columns = set(pq.ParquetFile(score_path).schema_arrow.names)
@@ -914,7 +924,7 @@ def alerts_from_score_file(
         if not produced.empty:
             alerts.append(produced)
     if not alerts:
-        from evaluation_core import ALERT_COLUMNS
+        from .evaluation import ALERT_COLUMNS
         return pd.DataFrame(columns=ALERT_COLUMNS)
     output = _deduplicate_scope_alerts(
         pd.concat(alerts, ignore_index=True)
@@ -935,7 +945,7 @@ def alert_grid_from_score_file(
 ):
     """Create all channel/threshold alert sets with one scan per channel."""
 
-    from evaluation_core import ALERT_COLUMNS, SCORE_COLUMNS, scores_to_alerts
+    from .evaluation import ALERT_COLUMNS, SCORE_COLUMNS, scores_to_alerts
 
     result = {}
     score_columns = set(pq.ParquetFile(score_path).schema_arrow.names)
@@ -1026,7 +1036,7 @@ def materialize_candidate_alert_grid(
     they are produced, so a large development grid is never retained in RAM.
     """
 
-    from evaluation_core import ALERT_COLUMNS, SCORE_COLUMNS, scores_to_alerts
+    from .evaluation import ALERT_COLUMNS, SCORE_COLUMNS, scores_to_alerts
 
     required = {"model_id", "threshold_quantile", "threshold"}
     missing = required - set(thresholds.columns)
@@ -1173,58 +1183,36 @@ def score_percentiles(bundle, model_id, values):
 # Frozen-residual modelling API
 # ---------------------------------------------------------------------------
 
-def measurement_features(panel, catalogue):
-    """Apply the declared measurement-kind transformations to one episode.
+def measurement_features(
+    panel,
+    catalogue,
+    *,
+    history_window_seconds=None,
+    minimum_history_seconds=None,
+    gap_tolerance=1.5,
+    seasonal_periods=None,
+):
+    """Apply catalogue transforms and optional causal self-history features."""
 
-    The function is causal.  Clipped values are withheld from asset-health
-    features and retained as explicit data-quality indicators.
-    """
-
-    panel = panel.sort_values("event_ts").reset_index(drop=True)
-    output = panel[IDENTITY_COLUMNS].copy()
-    metadata = catalogue.set_index("metric_id")
-    timestamps = pd.to_datetime(panel["event_ts"], utc=True)
-
-    for metric_id in catalogue["metric_id"].astype(str):
-        values = pd.to_numeric(panel.get(metric_id), errors="coerce")
-        clipped_name = f"{metric_id}__clipped"
-        clipped = pd.to_numeric(
-            panel.get(clipped_name, pd.Series(0, index=panel.index)),
-            errors="coerce",
-        ).fillna(0).astype(bool)
-        values = values.mask(clipped)
-        kind = str(metadata.loc[metric_id, "measurement_kind"])
-        cadence = pd.to_numeric(
-            metadata.loc[metric_id, "expected_cadence_seconds"],
-            errors="coerce",
+    output = transform_episode(
+        panel, catalogue, gap_tolerance=float(gap_tolerance)
+    )
+    output = add_causal_seasonal_differences(
+        output, catalogue, seasonal_periods or {}
+    )
+    if history_window_seconds is None:
+        return output
+    if minimum_history_seconds is None:
+        raise ValueError(
+            "minimum_history_seconds is required with a history window"
         )
-
-        if kind == "bounded_fraction":
-            level = np.log10(values.clip(lower=1e-12))
-            output[f"{metric_id}__zero"] = values.eq(0).astype(float)
-        elif kind == "interval_count":
-            level = np.log1p(values.clip(lower=0))
-        else:
-            level = values.astype(float)
-
-        previous = level.shift()
-        difference = level - previous
-        if pd.notna(cadence) and cadence > 0:
-            elapsed = timestamps.diff().dt.total_seconds()
-            difference = difference.mask(elapsed.gt(float(cadence) * 1.5))
-
-        if kind == "cumulative_counter":
-            output[f"{metric_id}__increment"] = difference.mask(difference.lt(0))
-            output[f"{metric_id}__reset"] = difference.lt(0).where(difference.notna()).astype(float)
-        elif kind == "discrete_state":
-            output[f"{metric_id}__state"] = level
-            output[f"{metric_id}__transition"] = difference.ne(0).where(difference.notna()).astype(float)
-        else:
-            output[f"{metric_id}__level"] = level
-            output[f"{metric_id}__difference"] = difference
-
-        output[clipped_name] = clipped.astype(float)
-    return output
+    return add_causal_history(
+        output,
+        catalogue,
+        history_seconds=float(history_window_seconds),
+        minimum_history_seconds=float(minimum_history_seconds),
+        gap_tolerance=float(gap_tolerance),
+    )
 
 
 def resample_wide_panel(panel, catalogue, cadence_seconds):
@@ -1279,6 +1267,10 @@ def materialize_measurement_features(
     destination,
     *,
     target_cadence_seconds=None,
+    history_window_seconds=None,
+    minimum_history_seconds=None,
+    gap_tolerance=1.5,
+    seasonal_periods=None,
     score_start=None,
     score_end=None,
 ):
@@ -1298,7 +1290,14 @@ def materialize_measurement_features(
                 feature_catalogue["expected_cadence_seconds"] = (
                     target_cadence_seconds
                 )
-            features = measurement_features(panel, feature_catalogue)
+            features = measurement_features(
+                panel,
+                feature_catalogue,
+                history_window_seconds=history_window_seconds,
+                minimum_history_seconds=minimum_history_seconds,
+                gap_tolerance=gap_tolerance,
+                seasonal_periods=seasonal_periods,
+            )
             times = pd.to_datetime(features["event_ts"], utc=True)
             if score_start is not None:
                 features = features.loc[times.ge(score_start)]
@@ -1319,7 +1318,7 @@ def materialize_measurement_features(
     return destination
 
 
-def _robust_reference(frame):
+def _robust_reference(frame, minimum_scales=None):
     centre = frame.median()
     scale = (frame.quantile(0.75) - frame.quantile(0.25)) / 1.349
 
@@ -1329,9 +1328,14 @@ def _robust_reference(frame):
     # denominator, which would manufacture enormous residual scores.
     deviation = frame.sub(centre).abs()
     fallback = deviation.mask(deviation.eq(0)).median()
-    floor = np.maximum(centre.abs() * 1e-6, 1e-6)
+    declared = pd.Series(minimum_scales or {}, dtype=float).reindex(
+        frame.columns
+    ).fillna(1e-6)
+    floor = pd.Series(
+        np.maximum(centre.abs() * 1e-6, declared), index=frame.columns
+    )
     scale = scale.where(scale.gt(floor), fallback)
-    scale = scale.where(scale.gt(floor), 1.0)
+    scale = scale.where(scale.gt(floor), floor)
     return centre, scale
 
 
@@ -1380,6 +1384,9 @@ def fit_residual_bundle(
     calibration_features,
     *,
     use_entity_reference,
+    catalogue=None,
+    feature_directions=None,
+    minimum_scales=None,
     reference_exclusions=None,
     maximum_training_rows=150_000,
     random_seed=42,
@@ -1423,8 +1430,32 @@ def fit_residual_bundle(
         applied, columns=["entity_id", "metric_id"]
     )
 
-    fallback_centre, fallback_scale = _robust_reference(sample[usable])
-    global_centre, global_scale = _robust_reference(reference_sample)
+    if catalogue is not None:
+        policy = feature_policy(catalogue, usable).set_index("feature")
+        catalogue_directions = policy["direction"].to_dict()
+        catalogue_scales = policy["minimum_scale"].astype(float).to_dict()
+    else:
+        catalogue_directions = {}
+        catalogue_scales = {}
+    directions = {
+        name: (feature_directions or {}).get(
+            name, catalogue_directions.get(name, "two_sided")
+        )
+        for name in usable
+    }
+    scale_floors = {
+        name: float((minimum_scales or {}).get(
+            name, catalogue_scales.get(name, 1e-6)
+        ))
+        for name in usable
+    }
+
+    fallback_centre, fallback_scale = _robust_reference(
+        sample[usable], scale_floors
+    )
+    global_centre, global_scale = _robust_reference(
+        reference_sample, scale_floors
+    )
     global_centre = global_centre.combine_first(fallback_centre)
     global_scale = global_scale.combine_first(fallback_scale)
     entity_centre = entity_scale = None
@@ -1436,8 +1467,13 @@ def fit_residual_bundle(
         scales = (q75 - q25) / 1.349
         valid = counts.ge(30)
         entity_centre = centre.where(valid)
-        floors = np.maximum(entity_centre.abs() * 1e-6, 1e-6)
-        entity_scale = scales.where(valid & scales.gt(floors))
+        floors = entity_centre.abs() * 1e-6
+        for name in usable:
+            floors[name] = floors[name].clip(lower=scale_floors[name])
+        entity_scale = scales.where(valid)
+        entity_scale = entity_scale.where(
+            entity_scale.gt(floors), floors.where(valid)
+        )
 
         # EDA may flag an entity-metric calibration baseline as atypical or
         # unstable. Keep the entity monitored, but use the pooled reference
@@ -1464,10 +1500,17 @@ def fit_residual_bundle(
         "random_seed": int(random_seed),
         "isolation_trees": int(isolation_trees),
         "fit_multivariate": bool(fit_multivariate),
+        "feature_directions": directions,
+        "minimum_scales": scale_floors,
     }
     residuals = _residual_frame(bundle, sample[[*IDENTITY_COLUMNS, *usable]])
     clean = residuals.fillna(0).clip(-50, 50)
     bundle["residual_scale"] = clean.std().replace(0, 1).fillna(1)
+    tail_minimum = min(30, max(3, len(sample) // 2))
+    bundle["tail_reference"] = fit_empirical_tail_reference(
+        residuals, directions, minimum_observations=tail_minimum
+    )
+    bundle["tail_reference_minimum_observations"] = tail_minimum
 
     if fit_multivariate and len(usable) >= 2:
         component_limit = min(len(usable) - 1, 12)
@@ -1500,24 +1543,23 @@ def _row_max(values, names):
     return maximum, leading
 
 
-def _cusum_scores(residuals, names, allowance=0.5):
-    values = residuals[names].to_numpy(dtype=float)
-    positive = np.zeros(values.shape[1])
-    negative = np.zeros(values.shape[1])
-    scores = np.full(len(values), np.nan)
-    leading = np.full(len(values), None, dtype=object)
-    for row_number, row in enumerate(values):
-        valid = np.isfinite(row)
-        positive[~valid] = 0
-        negative[~valid] = 0
-        positive[valid] = np.maximum(0, positive[valid] + row[valid] - allowance)
-        negative[valid] = np.maximum(0, negative[valid] - row[valid] - allowance)
-        combined = np.maximum(positive, negative)
-        if valid.any():
-            position = int(np.argmax(combined))
-            scores[row_number] = combined[position]
-            leading[row_number] = names[position]
-    return scores, leading
+def _cusum_scores(
+    residuals,
+    names,
+    allowance=0.5,
+    *,
+    directions=None,
+    reset_before=None,
+):
+    """Compatibility wrapper around the directional, gap-safe CUSUM."""
+
+    directions = directions or {name: "two_sided" for name in names}
+    return directional_cusum(
+        residuals[names],
+        directions,
+        allowance=float(allowance),
+        reset_before=reset_before,
+    )
 
 
 def score_residual_episode(
@@ -1530,18 +1572,48 @@ def score_residual_episode(
 ):
     """Score one episode with rapid, drift, dispersion and residual ML channels."""
 
+    if float(cadence_seconds) <= 0:
+        raise ValueError("cadence_seconds must be positive")
+
     residuals = _residual_frame(bundle, features)
     available = residuals.notna().sum(axis=1)
     minimum = max(1, int(np.ceil(len(bundle["feature_columns"]) * 0.20)))
     ready = available.ge(minimum)
 
-    rapid_values, rapid_leading = _row_max(residuals.abs(), bundle["feature_columns"])
+    directions = bundle.get("feature_directions", {
+        name: "two_sided" for name in bundle["feature_columns"]
+    })
+    if bundle.get("tail_reference"):
+        rapid_evidence = empirical_tail_evidence(
+            residuals, bundle["tail_reference"], directions
+        )
+    else:
+        # Compatibility with bundles created before empirical calibration.
+        rapid_evidence = residuals.abs()
+    rapid_values, rapid_leading = _row_max(
+        rapid_evidence, bundle["feature_columns"]
+    )
     level_features = [
         name for name in bundle["feature_columns"]
-        if name.endswith(("__level", "__increment"))
+        if name.endswith((
+            "__level", "__increment", "__nonzero",
+            "__positive_log10", "__positive_log1p", "__state",
+            "__history_z",
+        ))
     ] or bundle["feature_columns"]
+    timestamps = pd.to_datetime(features["event_ts"], utc=True)
+    elapsed = timestamps.diff().dt.total_seconds()
+    reset_before = (
+        elapsed.isna()
+        | elapsed.le(0)
+        | elapsed.gt(float(cadence_seconds) * 1.5)
+    ).to_numpy()
     drift_values, drift_leading = _cusum_scores(
-        residuals, level_features, allowance=float(cusum_allowance)
+        residuals,
+        level_features,
+        allowance=float(cusum_allowance),
+        directions={name: directions.get(name, "two_sided") for name in level_features},
+        reset_before=reset_before,
     )
 
     window = max(4, round(float(dispersion_window_seconds) / float(cadence_seconds)))

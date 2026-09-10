@@ -1,0 +1,50 @@
+version: 1
+selection_partition: development
+holdout_default_open: false
+workload:
+  unit: entity_day
+  display_unit: 1000_entity_days
+  target_false_incidents_per_1000_entity_days: 10
+  false_incidents_per_entity_day: 0.01
+  confidence_level: 0.95
+  safety_factor: 0.90
+thresholds:
+  method: empirical_calibration_block_maxima
+  block_seconds: 86400
+  candidate_quantiles: [0.95, 0.975, 0.99, 0.995]
+channels:
+  rapid_self:
+    persistence_seconds: 1800
+    extreme_tail_score: 5.0
+  persistent_drift:
+    persistence_seconds: 900
+    cusum_allowance: 0.5
+  peer_deviation:
+    persistence_seconds: 1800
+  group_common_mode:
+    persistence_seconds: 1800
+portfolios:
+  rapid_only: [rapid_self]
+  self_history: [rapid_self, persistent_drift]
+  self_plus_peer: [rapid_self, persistent_drift, peer_deviation]
+  full_topology: [rapid_self, persistent_drift, peer_deviation, group_common_mode]
+incidents:
+  quiet_period_seconds: 3600
+  unrestricted_transitive_chaining: false
+evaluation:
+  default_decision_horizon_seconds: 172800
+  one_to_one_matching: true
+  uncertainty_intervals: true
+  primary_metrics:
+    - event_recall
+    - false_incidents_per_entity_day
+    - incident_precision
+    - median_detection_delay_seconds
+    - joint_detection_and_localisation_recall
+selection:
+  fail_closed_when_no_candidate_meets_budget: true
+  holdout_must_remain_sealed: true
+  minimum_development_faults: 30
+  minimum_development_event_recall: 0.20
+  minimum_multi_entity_faults_for_localisation_claim: 20
+  maximum_missing_score_fraction: 0.20

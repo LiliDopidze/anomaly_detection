@@ -1,43 +1,117 @@
-# Telecom-first anomaly detection and localisation
+# Company-agnostic Telecom anomaly detection
 
-This repository is a notebook-first analytical pipeline for time-series
-anomaly detection, incident consolidation and topology-aware localisation.
-Telecom is the primary product sector. Petrobras 3W is retained as an
-independent real-data qualification test for the topology-free path.
+This repository builds an explainable Telecom telemetry detector for anomaly
+detection, incident consolidation, and topology-aware localisation. The
+primary product path is PON/ONT. Company independence means that operators map
+their native fields into shared semantic metrics and calibrate locally; it
+does **not** mean fitting one model across incompatible PON, RAN, and backbone
+optical measurements.
+
+## Evidence strategy
+
+| Dataset | Role | Claim it can support |
+|---|---|---|
+| Synthetic PON/ONT fixture | Primary engineering and labelled development data | Software, leakage controls, injected-fault detection, and localisation mechanics |
+| Commercial RAN PM counters | Open real-operator qualification | Portability, seasonality, heterogeneity, gaps, peer behaviour, and alert workload |
+| Microsoft optical telemetry | Optional restricted research qualification | Real optical drift and alert stability; not recall |
+| Optical failure testbed | Optional labelled testbed evaluation | Response to controlled physical failures; not production prevalence |
+
+Raw datasets are never pooled into one fitted model. Each dataset has its own
+adapter and label-free calibration; the detector, evidence calibration,
+incident policy, and evaluation definitions remain shared.
+
+## Project layout
 
 ```text
-Telecom source -> 00 feasibility audit -> 01A Telecom Pack --┐
-Petrobras source ---------------------> 01A 3W Pack ---------┤
-                                                             v
-                                         01B canonical adapter
-                                                             |
-                     02 EDA -> 03 evaluation policy -> 04 modelling
-                                                             |
-                                      05 ranked incidents -> 06 demo
+configs/                  Scientific and operational policy
+notebooks/                Numbered, restart-and-run orchestration
+src/telco_anomaly/        Tested reusable calculations
+tests/                    Contract, leakage, causality, and adapter tests
+data/                     Git-ignored raw and generated data (optional local root)
 ```
 
-The model-visible contract contains telemetry plus optional topology.
-Evaluation truth is physically separate and is loaded only after scores are
-produced. Experimental partition labels remain in `SPLITS`; they are not model
-features.
+The notebooks run in order:
 
-The reference model is deliberately interpretable:
+```text
+00 contract
+01 source audit
+02 canonical data
+03 splits + truth lock
+04 calibration-only EDA
+05 leakage-safe features
+06 primary four-channel detector
+07 challengers + ablations
+08 alerts, incidents + observable events
+09 topology localisation
+10 locked evaluation
+11 public-data qualification
+12 inference demo + model card
+```
 
-- calibration-frozen robust self-history residuals;
-- rapid-deviation and sustained-drift channels;
-- peer-relative deviation when enough contemporaneous peers exist;
-- topology common-mode evidence for shared faults;
-- elapsed-time persistence and quiet-period incident consolidation;
-- empirical block-maximum thresholds and event-level evaluation;
-- typed, equivalence-aware hierarchical localisation.
+Notebooks explain choices and inspect outputs. Reusable calculations live in
+`src/telco_anomaly` so a silent fix cannot diverge between notebooks.
 
-Petrobras does not invent topology or peers. It exercises the same canonical
-contract, quality handling, self-history model and whole-well evaluation path
-on real industrial recordings.
+## Set up
 
-Start with the [run guide](notebooks/drive_research/README.md). The full design
-and claim boundaries are in the
-[Telecom-first methodology](docs/TELECOM_FIRST_ANOMALY_LOCALISATION_APPROACH.md).
+```bash
+git clone https://github.com/LiliDopidze/anomaly_detection.git
+cd anomaly_detection
+git switch codex/solo-drive-notebooks
+python -m venv .venv
+source .venv/bin/activate       # Windows PowerShell: .venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+python -m ipykernel install --user --name telco-anomaly --display-name "Python (telco-anomaly)"
+pytest
+```
 
-Datasets and generated outputs stay outside Git. Code is licensed under
-[Apache License 2.0](LICENSE); source datasets retain their own licences.
+Put data outside Git and select it with one environment variable:
+
+```bash
+export TELCO_DATA_ROOT="$HOME/telco_anomaly_data"
+```
+
+The same notebooks also work in Colab. They resolve
+`/content/drive/MyDrive/telco_anomaly_data` first and support the existing
+`/content/drive/MyDrive/anomaly_detection` folder as a legacy fallback.
+
+Expected primary source layout:
+
+```text
+$TELCO_DATA_ROOT/
+├── telco_syntetic_data/       # existing spelling is supported
+│   ├── reference_dataset.parquet
+│   ├── topology.csv
+│   ├── entity_service_windows.csv
+│   ├── gt_fault_registry.csv          # evaluation only
+│   └── fault_entity_intervals.csv     # evaluation only
+└── sources/
+    ├── ran_pm/17815388/raw/
+    ├── microsoft_optical/raw/
+    └── optical_failure/raw/
+```
+
+Generated outputs are immutable, stage-named directories beneath
+`$TELCO_DATA_ROOT` (`audits/`, `prepared/`, `core/`, `eda/`, `features/`,
+`models/`, `selection/`, `incidents/`, `localisation/`, and `results/`). Change
+a run ID to create another run; completed runs are never overwritten.
+
+For exact run instructions and the purpose of every notebook, see
+[notebooks/README.md](notebooks/README.md).
+
+## Scientific guardrails
+
+- Models read `SPEC-CORE` only. Faults, tickets, and labels live in
+  `SPEC-EVAL` and are mounted only by the evaluator.
+- Calibration, development, and holdout are chronological. Development labels
+  may compare declared candidates; locked holdout cannot change the model.
+- Thresholds are calibrated on post-consolidation incident workload, not a
+  guessed contamination fraction.
+- The selected model fails closed if no candidate satisfies the workload and
+  evidence gates.
+- Localisation reports the smallest supported observable scope and preserves
+  topology ambiguity. It is probable location, not causal root cause.
+- Synthetic results do not establish real-fleet effectiveness. Operator data
+  is required before production claims.
+
+See [the methodology](docs/COMPANY_AGNOSTIC_TELCO_METHODOLOGY.md) for the
+statistical design and the evidence each dataset is allowed to support.

@@ -1,0 +1,134 @@
+version: 1
+entity_type: ont
+eda_focus_metrics:
+  - optical.rx_power
+  - optical.ber
+  - optical.fec_count
+  - ethernet.crc_errors
+  - equipment.temperature
+  - service.throughput
+  - equipment.uptime
+metrics:
+  - native_field: rx_power_dbm
+    metric_id: optical.rx_power
+    measurement_kind: gauge
+    unit: dBm
+    direction: low_bad
+    transform: identity
+    aggregation_semantics: instantaneous
+    expected_cadence_seconds: 900
+    seasonality_candidate: false
+    minimum_scale: 0.10
+  - native_field: tx_power_dbm
+    metric_id: optical.tx_power
+    measurement_kind: gauge
+    unit: dBm
+    direction: two_sided
+    transform: identity
+    aggregation_semantics: instantaneous
+    expected_cadence_seconds: 900
+    seasonality_candidate: false
+    minimum_scale: 0.05
+  - native_field: temperature_c
+    metric_id: equipment.temperature
+    measurement_kind: gauge
+    unit: degC
+    direction: high_bad
+    transform: identity
+    aggregation_semantics: instantaneous
+    expected_cadence_seconds: 900
+    seasonality_candidate: true
+    minimum_scale: 0.25
+  - native_field: bias_current_ma
+    metric_id: optical.bias_current
+    measurement_kind: gauge
+    unit: mA
+    direction: high_bad
+    transform: identity
+    aggregation_semantics: instantaneous
+    expected_cadence_seconds: 900
+    seasonality_candidate: true
+    minimum_scale: 0.10
+  - native_field: voltage_v
+    metric_id: equipment.voltage
+    measurement_kind: gauge
+    unit: V
+    direction: two_sided
+    transform: identity
+    aggregation_semantics: instantaneous
+    expected_cadence_seconds: 900
+    seasonality_candidate: false
+    minimum_scale: 0.005
+  - native_field: ber
+    metric_id: optical.ber
+    measurement_kind: bounded_fraction
+    unit: ratio
+    direction: high_bad
+    transform: hurdle_log10
+    aggregation_semantics: interval_ratio
+    valid_min: 0
+    valid_max: 1
+    expected_cadence_seconds: 900
+    seasonality_candidate: false
+    minimum_scale: 0.10
+  - native_field: fec_count
+    metric_id: optical.fec_count
+    measurement_kind: interval_count
+    unit: count
+    direction: high_bad
+    transform: log1p
+    aggregation_semantics: sum_over_interval
+    valid_min: 0
+    censoring_type: right
+    expected_cadence_seconds: 900
+    seasonality_candidate: false
+    minimum_scale: 0.10
+    source_quality:
+      clipped_at: 5000000
+      applies_to: telemetry_synth_4_1_0_run_1
+  - native_field: crc_errors
+    metric_id: ethernet.crc_errors
+    measurement_kind: interval_count
+    unit: count
+    direction: high_bad
+    transform: hurdle_log1p
+    aggregation_semantics: sum_over_interval
+    valid_min: 0
+    expected_cadence_seconds: 900
+    seasonality_candidate: false
+    minimum_scale: 0.10
+  - native_field: uptime_s
+    metric_id: equipment.uptime
+    measurement_kind: cumulative_counter
+    unit: s
+    direction: contextual
+    transform: reset_safe_increment
+    aggregation_semantics: last_observation
+    valid_min: 0
+    reset_policy: restart_at_zero
+    expected_cadence_seconds: 900
+    seasonality_candidate: false
+    minimum_scale: 1.0
+  - native_field: reboot_count
+    metric_id: equipment.reboot_count
+    measurement_kind: cumulative_counter
+    unit: count
+    direction: high_bad
+    transform: reset_safe_increment
+    aggregation_semantics: last_observation
+    valid_min: 0
+    reset_policy: restart_at_zero
+    expected_cadence_seconds: 900
+    seasonality_candidate: false
+    minimum_scale: 1.0
+  - native_field: throughput_mbps
+    metric_id: service.throughput
+    measurement_kind: gauge
+    unit: Mbps
+    direction: low_bad
+    transform: log1p
+    aggregation_semantics: interval_average
+    valid_min: 0
+    expected_cadence_seconds: 900
+    seasonality_candidate: true
+    minimum_scale: 0.10
