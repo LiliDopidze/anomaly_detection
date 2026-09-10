@@ -438,6 +438,84 @@ def read_json(path: str | os.PathLike[str]) -> Any:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+def require_same(manifest: Mapping[str, Any], **expected: Any) -> None:
+    """Refuse to reuse an artifact built from different recorded inputs."""
+
+    stale = {
+        key: {"recorded": manifest.get(key), "expected": value}
+        for key, value in expected.items()
+        if manifest.get(key) != value
+    }
+    if stale:
+        raise ValueError(f"Existing output was built from different inputs: {stale}")
+
+
+def authorise_holdout(
+    ledger_path: str | os.PathLike[str],
+    receipt: Mapping[str, Any],
+) -> int:
+    """Record a holdout opening and reject a different selected model.
+
+    Re-running the same frozen configuration is allowed so an interrupted
+    evaluation can be completed. Once a different configuration hash has
+    opened the holdout, however, the ledger refuses another choice.
+    """
+
+    selected_hash = receipt.get("selected_configuration_sha256")
+    if not selected_hash:
+        raise ValueError("A holdout receipt needs selected_configuration_sha256")
+
+    try:
+        import fcntl
+    except ImportError as error:  # pragma: no cover - production target is Linux
+        raise RuntimeError("Holdout ledger requires POSIX file locking") from error
+
+    ledger = Path(ledger_path)
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with ledger.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            handle.seek(0)
+            earlier = []
+            for line_number, line in enumerate(handle.read().splitlines(), start=1):
+                if not line.strip():
+                    continue
+                try:
+                    earlier.append(json.loads(line))
+                except json.JSONDecodeError as error:
+                    raise ValueError(
+                        f"Invalid holdout ledger entry on line {line_number}"
+                    ) from error
+
+            incomplete = [
+                index + 1
+                for index, item in enumerate(earlier)
+                if not item.get("selected_configuration_sha256")
+            ]
+            if incomplete:
+                raise PermissionError(
+                    "Holdout ledger contains an opening without a frozen "
+                    f"configuration hash on entries {incomplete}"
+                )
+
+            previous_hashes = {
+                item["selected_configuration_sha256"] for item in earlier
+            } - {selected_hash}
+            if previous_hashes:
+                raise PermissionError(
+                    "Holdout was already opened for another configuration: "
+                    f"{sorted(previous_hashes)}"
+                )
+
+            handle.seek(0, os.SEEK_END)
+            handle.write(json.dumps(dict(receipt), sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            return len(earlier) + 1
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def file_sha256(
     path: str | os.PathLike[str],
     chunk_size: int = 1 << 20,

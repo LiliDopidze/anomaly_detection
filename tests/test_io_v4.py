@@ -15,12 +15,14 @@ sys.path.insert(0, str(SRC))
 
 import telco_anomaly.io as io_helpers
 from telco_anomaly.io import (
+    authorise_holdout,
     acquire_public_dataset,
     file_sha256,
     find_project_root,
     immutable_output_directory,
     load_config,
     read_json,
+    require_same,
     resolve_data_root,
     resolve_dataset_source,
     write_json,
@@ -232,3 +234,49 @@ def test_file_sha256_streams_exact_bytes(tmp_path):
     assert file_sha256(path, chunk_size=7) == hashlib.sha256(payload).hexdigest()
     with pytest.raises(ValueError, match="positive"):
         file_sha256(path, chunk_size=0)
+
+
+def test_require_same_rejects_stale_lineage():
+    manifest = {"core_fingerprint": "core-a", "policy_sha256": "policy-a"}
+    require_same(
+        manifest,
+        core_fingerprint="core-a",
+        policy_sha256="policy-a",
+    )
+    with pytest.raises(ValueError, match="different inputs"):
+        require_same(manifest, core_fingerprint="core-b")
+
+
+def test_holdout_ledger_allows_replay_but_not_a_different_model(tmp_path):
+    ledger = tmp_path / "holdout_openings.jsonl"
+    receipt = {
+        "selected_configuration_sha256": "configuration-a",
+        "partition": "holdout",
+    }
+
+    assert authorise_holdout(ledger, receipt) == 1
+    assert authorise_holdout(ledger, receipt) == 2
+    assert len(ledger.read_text(encoding="utf-8").splitlines()) == 2
+
+    with pytest.raises(PermissionError, match="another configuration"):
+        authorise_holdout(
+            ledger,
+            {
+                "selected_configuration_sha256": "configuration-b",
+                "partition": "holdout",
+            },
+        )
+
+
+def test_holdout_ledger_fails_closed_on_an_incomplete_old_entry(tmp_path):
+    ledger = tmp_path / "holdout_openings.jsonl"
+    ledger.write_text('{"partition": "holdout"}\n', encoding="utf-8")
+
+    with pytest.raises(PermissionError, match="without a frozen configuration"):
+        authorise_holdout(
+            ledger,
+            {
+                "selected_configuration_sha256": "configuration-a",
+                "partition": "holdout",
+            },
+        )

@@ -256,3 +256,52 @@ def test_existing_output_is_not_overwritten(tmp_path):
             topology_config=topology,
             include_evaluation=False,
         )
+
+
+def test_check_core_does_not_need_a_global_duckdb_sort(tmp_path, monkeypatch):
+    metrics, topology = _configs()
+    source = _pon_source(tmp_path / "source")
+    pack = tmp_path / "pack"
+    run = tmp_path / "run"
+    build_synthetic_pon_pack(
+        source,
+        pack,
+        metric_registry=metrics,
+        topology_config=topology,
+        include_evaluation=False,
+        batch_rows=5,
+    )
+    build_canonical(pack, run, include_evaluation=False)
+
+    def fail_if_called():
+        raise AssertionError("check_core attempted an unbounded DuckDB audit")
+
+    monkeypatch.setattr("telco_anomaly.contract._duckdb_connection", fail_if_called)
+    audit = check_core(run / "SPEC-CORE")
+    assert audit["duplicate_keys"] == 0
+    assert audit["foreign_key_failures"] == 0
+    assert audit["fingerprint_verified"] is True
+
+
+def test_check_core_detects_an_unknown_metric_before_accepting_content(tmp_path):
+    metrics, topology = _configs()
+    source = _pon_source(tmp_path / "source")
+    pack = tmp_path / "pack"
+    run = tmp_path / "run"
+    build_synthetic_pon_pack(
+        source,
+        pack,
+        metric_registry=metrics,
+        topology_config=topology,
+        include_evaluation=False,
+        batch_rows=5,
+    )
+    build_canonical(pack, run, include_evaluation=False)
+
+    part = sorted((run / "SPEC-CORE" / "telemetry").glob("part-*.parquet"))[0]
+    frame = pd.read_parquet(part)
+    frame.loc[0, "metric_id"] = "unknown.metric"
+    frame.to_parquet(part, index=False)
+
+    with pytest.raises(ValueError, match="foreign-key audit failed"):
+        check_core(run / "SPEC-CORE")

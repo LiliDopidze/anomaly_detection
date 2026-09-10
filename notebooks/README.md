@@ -15,9 +15,9 @@ into several notebooks.
 | `02_CANONICAL_DATA_MODEL` | Native telemetry, topology, service windows and separately staged truth | A vendor-neutral pack and truth-unmounted `SPEC-CORE` | Stages them, but the canonical detector run does not mount them |
 | `03_SPLITS_AND_TRUTH_LOCK` | Pack plus split definitions | Physical calibration, development and locked-holdout truth directories | Yes, evaluator setup only |
 | `04_CALIBRATION_EDA` | Calibration `SPEC-CORE` | Time-series plots, robust profiles and frozen EDA decisions | No |
-| `05_FEATURE_ENGINEERING` | Calibration/development `SPEC-CORE` plus EDA decisions | Causal measurement features | No |
-| `06_PRIMARY_UNSUPERVISED_MODEL` | Calibration/development features and topology | Calibration-frozen self, drift, peer and common-mode scores; challengers | No |
-| `07_CHALLENGER_MODELS` | Development scores and development truth | Model/threshold comparison and, only if gates pass, a frozen selection | Development only |
+| `05_FEATURE_ENGINEERING` | Calibration/development `SPEC-CORE` plus EDA decisions | Causal features, with calibration split into separate fit and threshold slices | No |
+| `06_PRIMARY_UNSUPERVISED_MODEL` | Calibration/development features and topology | Early-calibration model, late-calibration thresholds, and frozen scoring policy | No |
+| `07_CHALLENGER_MODELS` | Late-calibration workload plus development truth | Label-free operating points, labelled comparisons and, only if gates pass, a frozen selection | Development only |
 | `08_ALERTS_INCIDENTS_AND_DYING_GASP` | Frozen selection, scores and observable operational events | Persistent alerts and consolidated incidents | No |
 | `09_TOPOLOGY_LOCALISATION` | Incidents and observable topology | Ranked location candidates with ambiguity | No |
 | `10_LOCKED_EVALUATION` | Frozen model plus requested truth partition | Detection, workload and localisation metrics with uncertainty | Yes, after freeze |
@@ -51,13 +51,19 @@ silently overwritten. After changing data, configuration, or code, set a new
 stage run ID—for example:
 
 ```bash
-export PON_FEATURE_RUN_ID=synthetic_pon_features_v2
-export PON_MODEL_RUN_ID=synthetic_pon_models_v2
+export PON_FEATURE_RUN_ID=synthetic_pon_features_v3
+export PON_MODEL_RUN_ID=synthetic_pon_models_v3
 ```
 
 Keep downstream run IDs aligned with the inputs printed at the top of each
 notebook. Delete an old output only when you intentionally want to discard it;
 normally, retain both runs so their manifests can be compared.
+
+Notebook 05 deliberately processes the full calibration and development
+partitions. In Colab it uses `/content` for large temporary wide tables and
+copies only final feature files to Drive. It prints progress after each major
+step and every 25 entity episodes. Set `TELCO_WORK_ROOT` only when a different
+local scratch disk is required; do not point it at Google Drive.
 
 ## Public Telecom qualification
 
