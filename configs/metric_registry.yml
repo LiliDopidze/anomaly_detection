@@ -2,6 +2,7 @@ version: 1
 entity_type: ont
 eda_focus_metrics:
   - optical.rx_power
+  - optical.olt_rx_power
   - optical.ber
   - optical.fec_count
   - ethernet.crc_errors
@@ -11,6 +12,16 @@ eda_focus_metrics:
 metrics:
   - native_field: rx_power_dbm
     metric_id: optical.rx_power
+    measurement_kind: gauge
+    unit: dBm
+    direction: low_bad
+    transform: identity
+    aggregation_semantics: instantaneous
+    expected_cadence_seconds: 900
+    seasonality_candidate: false
+    minimum_scale: 0.10
+  - native_field: olt_rx_power_dbm
+    metric_id: optical.olt_rx_power
     measurement_kind: gauge
     unit: dBm
     direction: low_bad

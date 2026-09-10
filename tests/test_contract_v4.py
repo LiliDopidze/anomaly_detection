@@ -37,6 +37,7 @@ def _pon_source(root):
                 "timestamp_utc": timestamp,
                 "ont_id": entity,
                 "rx_power_dbm": -18.0 - offset,
+                "olt_rx_power_dbm": -20.0 - offset,
                 "tx_power_dbm": 2.0,
                 "temperature_c": 40.0 + number,
                 "bias_current_ma": 8.0,
@@ -122,7 +123,7 @@ def test_synthetic_pon_pack_and_canonical_are_valid(tmp_path):
 
     assert manifest["capabilities"]["topology"] is True
     assert audit["fingerprint_verified"] is True
-    assert audit["telemetry_rows"] == 2 * 4 * 11
+    assert audit["telemetry_rows"] == 2 * 4 * 12
     assert CORE_VERSION == "1.0.0"
 
     telemetry = pd.concat(
@@ -206,8 +207,8 @@ def test_streaming_gap_detection_keeps_metric_level_gap_semantics(tmp_path):
 
     gaps = pd.read_parquet(run / "SPEC-CORE" / "collection_gaps.parquet")
     ont_gaps = gaps.loc[gaps["entity_id"].eq("ONT-1")]
-    assert len(ont_gaps) == 11
-    assert ont_gaps["metric_id"].nunique() == 11
+    assert len(ont_gaps) == 12
+    assert ont_gaps["metric_id"].nunique() == 12
     assert ont_gaps["gap_start"].eq(missing_ts).all()
     assert ont_gaps["gap_end"].eq(pd.Timestamp("2025-01-01 00:30:00", tz="UTC")).all()
 
