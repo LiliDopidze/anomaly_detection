@@ -11,7 +11,7 @@ datasets:
     topology: true
     evidence_level: synthetic
     redistribute_source: false
-    output_run_id: synthetic_pon_v1
+    output_run_id: synthetic_pon_v2
   microsoft_optical:
     role: real_optical_behaviour_and_alert_stability
     source_candidates:
