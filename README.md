@@ -90,10 +90,31 @@ $TELCO_DATA_ROOT/
     └── optical_failure/raw/
 ```
 
+Public sources do not need to be downloaded and uploaded by hand. In Notebook
+11, choose exactly one source and enable its one-time acquisition:
+
+```python
+%env PUBLIC_DATASET=ran_pm
+%env DOWNLOAD_PUBLIC_DATA=1
+```
+
+The notebook downloads from the publisher link, verifies publisher checksums
+when available, extracts the files under `TELCO_DATA_ROOT`, and writes a source
+manifest. Microsoft Optical additionally requires
+`ACKNOWLEDGE_MICROSOFT_DATA_TERMS=1`; the optical-failure testbed requires
+`ACKNOWLEDGE_OPTICAL_FAILURE_TERMS=1`. These acknowledgements confirm that the
+user reviewed the applicable terms; they do not grant additional rights.
+
 Generated outputs are immutable, stage-named directories beneath
 `$TELCO_DATA_ROOT` (`audits/`, `prepared/`, `core/`, `eda/`, `features/`,
 `models/`, `selection/`, `incidents/`, `localisation/`, and `results/`). Change
 a run ID to create another run; completed runs are never overwritten.
+
+GitHub stores code, configuration, tests, documentation, and optionally a few
+curated small reports. Raw data, canonical telemetry, feature tables, fitted
+artefacts, and full run outputs remain outside Git because they are large and
+may be restricted. Their manifests and hashes provide reproducibility without
+committing the data itself.
 
 For exact run instructions and the purpose of every notebook, see
 [notebooks/README.md](notebooks/README.md).

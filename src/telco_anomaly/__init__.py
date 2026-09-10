@@ -1,6 +1,7 @@
 """Company-neutral Telecom telemetry anomaly detection utilities."""
 
 from .io import (
+    acquire_public_dataset,
     file_sha256,
     find_project_root,
     immutable_output_directory,
@@ -13,6 +14,7 @@ from .io import (
 )
 
 __all__ = [
+    "acquire_public_dataset",
     "file_sha256",
     "find_project_root",
     "immutable_output_directory",
