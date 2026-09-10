@@ -1,8 +1,8 @@
-"""Shared mechanics for the Milestone 1 research notebooks.
+"""Canonical, label-safe data contract for Telecom telemetry.
 
-Sector notebooks own native field names and label meanings.  This module owns
-the versioned interfaces, validation, canonical materialisation, one content
-fingerprint, and the isolation helpers.  It contains no sector logic.
+Source adapters own native field names and label meanings.  This module owns
+the versioned interfaces, validation, canonical materialisation, content
+fingerprints, and truth-isolation helpers.  It contains no vendor logic.
 
 Layering
 --------
@@ -26,14 +26,18 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
-CORE_VERSION = "0.11.0"
-EVAL_VERSION = "0.9.0"
-PACK_INTERFACE_VERSION = "0.8.0"
+CORE_VERSION = "1.0.0"
+EVAL_VERSION = "1.0.0"
+PACK_INTERFACE_VERSION = "1.0.0"
 
 GAP_TOLERANCE_FACTOR = 1.5
 CANONICAL_BATCH_ROWS = 100_000
-GAP_BATCH_ROWS = 2_000_000
+# Gap detection streams the Parquet parts in bounded batches.  This avoids a
+# global 69-million-row window sort for the PON fixture and keeps memory use
+# predictable on a free Colab runtime.
+GAP_BATCH_ROWS = 250_000
 
 # --------------------------------------------------------------------------
 # Schemas.  Pack and canonical share table names; canonical adds derived
@@ -43,14 +47,20 @@ GAP_BATCH_ROWS = 2_000_000
 
 CORE_SCHEMAS = {
     "telemetry": [
-        "event_ts", "entity_id", "episode_id", "metric_id", "value", "quality_code",
+        "event_ts", "entity_id", "episode_id", "metric_id", "value",
+        "quality_code", "source_system", "ingestion_ts",
     ],
     "metric_catalogue": [
         "metric_id", "entity_type", "measurement_kind", "unit",
-        "sampling_mode", "expected_cadence_seconds",
+        "sampling_mode", "aggregation_semantics", "expected_cadence_seconds",
+        "direction", "transform", "valid_min", "valid_max",
+        "censoring_type", "reporting_lod", "reset_policy", "counter_modulus",
+        "minimum_scale", "seasonality_candidate", "peer_eligible",
     ],
     "entity_registry": [
-        "entity_id", "entity_type", "observed_from", "observed_to", "validity_basis",
+        "entity_id", "entity_type", "vendor", "model", "source_system",
+        "valid_from", "valid_to", "observed_from", "observed_to",
+        "validity_basis",
     ],
     "observation_episodes": [
         "episode_id", "entity_id", "observed_from", "observed_to", "episode_basis",
@@ -66,7 +76,11 @@ CORE_SCHEMAS = {
 OPTIONAL_CORE_SCHEMAS = {
     "topology_memberships": [
         "entity_id", "group_type", "group_id",
-        "hierarchy_level", "group_family",
+        "hierarchy_level", "group_family", "valid_from", "valid_to",
+    ],
+    "operational_events": [
+        "event_ts", "entity_id", "event_code", "event_family",
+        "event_state", "vendor_event_code", "quality_code", "source_system",
     ],
 }
 
@@ -96,6 +110,11 @@ EVAL_SCHEMAS = {
         "entity_id", "start_ts", "end_ts", "condition_code",
         "label_source", "source_instance_id",
     ],
+    "tickets": [
+        "ticket_id", "entity_id", "reported_ts", "resolved_ts",
+        "reported_symptom", "fault_id", "is_no_fault_found",
+        "is_misattributed", "label_source", "source_instance_id",
+    ],
 }
 
 SPLIT_SCHEMAS = {
@@ -104,14 +123,25 @@ SPLIT_SCHEMAS = {
 }
 
 MEASUREMENT_KINDS = {
-    "gauge", "bounded_fraction", "interval_count", "cumulative_counter", "discrete_state",
+    "gauge", "bounded_fraction", "interval_count", "cumulative_counter",
+    "discrete_state", "event",
 }
 SAMPLING_MODES = {"periodic", "recording", "irregular", "event_driven", "unknown"}
 QUALITY_CODES = {"measured", "invalid", "clipped"}
+DIRECTIONS = {"high_bad", "low_bad", "two_sided", "contextual"}
+TRANSFORMS = {
+    "identity", "log1p", "hurdle_log1p", "hurdle_log10",
+    "reset_safe_increment", "state_transition", "event",
+}
+CENSORING_TYPES = {"none", "left", "right", "interval", "unknown"}
 
 # Anchored truth detection.  Free substring matching rejected legitimate
 # measurements such as ``ground_fault_current`` and ``fault_passage_indicator``.
-TRUTH_NAMES = {"class", "state", "label", "target", "condition_code", "anomaly", "fault"}
+# These names are unambiguous labels.  Generic names such as ``state`` and
+# ``target`` are deliberately excluded because they are valid Telecom
+# measurements in some vendor schemas.  Each adapter must additionally name
+# its source-specific evaluation fields explicitly.
+TRUTH_NAMES = {"class", "label", "condition_code", "anomaly", "fault"}
 TRUTH_PREFIXES = ("gt_", "truth_", "anomaly_")
 TRUTH_SUFFIXES = ("_label", "_labels", "_anomaly", "_ground_truth")
 
@@ -153,7 +183,7 @@ def _duckdb_connection():
     # Free Colab sessions may expose less than 3 GiB to DuckDB even when the
     # machine has more total RAM. A conservative limit makes blocking window
     # operations spill to local disk instead of exhausting the runtime.
-    memory_limit = os.getenv("ANOMALY_DUCKDB_MEMORY_LIMIT", "1GB")
+    memory_limit = os.getenv("ANOMALY_DUCKDB_MEMORY_LIMIT", "512MB")
     threads = int(os.getenv("ANOMALY_DUCKDB_THREADS", "1"))
     with tempfile.TemporaryDirectory(prefix="anomaly-duckdb-") as spill_directory:
         with _duckdb().connect() as connection:
@@ -281,6 +311,15 @@ def validate_catalogue(catalogue):
     unknown = set(catalogue["sampling_mode"]) - SAMPLING_MODES
     if unknown:
         raise ValueError(f"Unknown sampling modes: {sorted(unknown)}")
+    unknown = set(catalogue["direction"]) - DIRECTIONS
+    if unknown:
+        raise ValueError(f"Unknown anomaly directions: {sorted(unknown)}")
+    unknown = set(catalogue["transform"]) - TRANSFORMS
+    if unknown:
+        raise ValueError(f"Unknown transformations: {sorted(unknown)}")
+    unknown = set(catalogue["censoring_type"]) - CENSORING_TYPES
+    if unknown:
+        raise ValueError(f"Unknown censoring types: {sorted(unknown)}")
 
     cadence = pd.to_numeric(catalogue["expected_cadence_seconds"], errors="coerce")
     declared = cadence.notna()
@@ -288,6 +327,18 @@ def validate_catalogue(catalogue):
         raise ValueError("A declared cadence must be positive")
     if cadence.loc[catalogue["sampling_mode"].eq("periodic")].isna().any():
         raise ValueError("Periodic metrics require an expected cadence")
+
+    lower = pd.to_numeric(catalogue["valid_min"], errors="coerce")
+    upper = pd.to_numeric(catalogue["valid_max"], errors="coerce")
+    reversed_bounds = lower.notna() & upper.notna() & lower.ge(upper)
+    if reversed_bounds.any():
+        raise ValueError("valid_min must be smaller than valid_max")
+    scale = pd.to_numeric(catalogue["minimum_scale"], errors="coerce")
+    if scale.isna().any() or scale.le(0).any():
+        raise ValueError("Every metric needs a positive minimum_scale")
+    for name in ("seasonality_candidate", "peer_eligible"):
+        if catalogue[name].isna().any():
+            raise ValueError(f"{name} cannot be null")
 
 
 def _validate_telemetry(frame, where):
@@ -306,6 +357,11 @@ def _validate_telemetry(frame, where):
         raise ValueError(
             f"Missing, non-numeric or non-finite values must be invalid in {where}"
         )
+    if frame["source_system"].isna().any():
+        raise ValueError(f"source_system cannot be null in {where}")
+    frame["ingestion_ts"] = pd.to_datetime(
+        frame["ingestion_ts"], utc=True, errors="coerce"
+    )
 
 
 def _validate_references(catalogue, entities, episodes, observed):
@@ -360,8 +416,6 @@ def validate_topology(topology, entity_ids):
     required = ["entity_id", "group_type", "group_id", "group_family"]
     if topology[required].isna().any().any():
         raise ValueError("Topology identifiers and group families cannot be null")
-    if topology.duplicated(["entity_id", "group_type"]).any():
-        raise ValueError("An entity may belong to only one group of each type")
     unknown = set(topology["entity_id"].astype(str)) - set(map(str, entity_ids))
     if unknown:
         raise ValueError(f"Topology references unknown entities: {sorted(unknown)[:5]}")
@@ -370,6 +424,49 @@ def validate_topology(topology, entity_ids):
     levels = pd.to_numeric(topology.loc[physical, "hierarchy_level"], errors="coerce")
     if levels.isna().any() or levels.lt(0).any():
         raise ValueError("Physical topology memberships need non-negative hierarchy levels")
+
+    dated = topology.copy()
+    dated["valid_from"] = pd.to_datetime(dated["valid_from"], utc=True, errors="coerce")
+    dated["valid_to"] = pd.to_datetime(dated["valid_to"], utc=True, errors="coerce")
+    if dated["valid_from"].isna().any():
+        raise ValueError("Topology memberships require valid_from")
+    if (dated["valid_to"].notna() & dated["valid_to"].le(dated["valid_from"])).any():
+        raise ValueError("Topology valid_to must be later than valid_from")
+    for _, history in dated.groupby(["entity_id", "group_type"], sort=False):
+        previous_end = None
+        for row_number, row in enumerate(history.sort_values("valid_from").itertuples()):
+            if row_number:
+                if pd.isna(previous_end):
+                    raise ValueError("An open topology membership cannot have a successor")
+                if row.valid_from < previous_end:
+                    raise ValueError("Topology membership validity intervals overlap")
+            previous_end = row.valid_to
+
+
+def validate_operational_events(events, entity_ids):
+    """Validate optional observable alarms without interpreting event codes."""
+
+    schema = OPTIONAL_CORE_SCHEMAS["operational_events"]
+    if list(events.columns) != schema:
+        raise ValueError(f"Operational events must use {schema}")
+    if events.empty:
+        raise ValueError("An advertised operational-events table cannot be empty")
+    required = [
+        "event_ts", "entity_id", "event_code", "event_family",
+        "event_state", "quality_code", "source_system",
+    ]
+    if events[required].isna().any().any():
+        raise ValueError("Operational event identifiers cannot be null")
+    unknown_entities = set(events["entity_id"].astype(str)) - set(map(str, entity_ids))
+    if unknown_entities:
+        raise ValueError(
+            f"Operational events reference unknown entities: {sorted(unknown_entities)[:5]}"
+        )
+    unknown_quality = set(events["quality_code"].astype(str)) - QUALITY_CODES
+    if unknown_quality:
+        raise ValueError(f"Invalid operational-event quality codes: {sorted(unknown_quality)}")
+    if pd.to_datetime(events["event_ts"], utc=True, errors="coerce").isna().any():
+        raise ValueError("Operational event timestamps must be valid")
 
 
 # --------------------------------------------------------------------------
@@ -388,6 +485,7 @@ def save_pack(
     entities,
     episodes,
     topology=None,
+    operational_events=None,
     splits=None,
     evaluation=None,
     notes=(),
@@ -412,6 +510,14 @@ def save_pack(
     if topology is not None:
         topology = topology[OPTIONAL_CORE_SCHEMAS["topology_memberships"]].reset_index(drop=True)
         validate_topology(topology, entities["entity_id"])
+    operational_events = (
+        None if operational_events is None else operational_events.copy()
+    )
+    if operational_events is not None:
+        operational_events = operational_events[
+            OPTIONAL_CORE_SCHEMAS["operational_events"]
+        ].reset_index(drop=True)
+        validate_operational_events(operational_events, entities["entity_id"])
 
     splits = dict(splits or {})
     evaluation = dict(evaluation or {})
@@ -438,8 +544,14 @@ def save_pack(
                 continue
             batch = batch[CORE_SCHEMAS["telemetry"]].reset_index(drop=True)
             batch["event_ts"] = pd.to_datetime(batch["event_ts"], utc=True)
-            for column in ("entity_id", "episode_id", "metric_id", "quality_code"):
+            for column in (
+                "entity_id", "episode_id", "metric_id", "quality_code",
+                "source_system",
+            ):
                 batch[column] = batch[column].astype(str)
+            batch["ingestion_ts"] = pd.to_datetime(
+                batch["ingestion_ts"], utc=True, errors="coerce"
+            )
             _validate_telemetry(batch, f"telemetry part {number}")
             batch.to_parquet(
                 telemetry_directory / f"part-{number:05d}.parquet",
@@ -481,14 +593,19 @@ def save_pack(
             row_counts[name] = len(frame)
 
         optional_core_tables = []
-        if topology is not None:
-            name = "topology_memberships"
+        optional_frames = {
+            "topology_memberships": topology,
+            "operational_events": operational_events,
+        }
+        for name, frame in optional_frames.items():
+            if frame is None:
+                continue
             path = core / f"{name}.parquet"
-            topology.to_parquet(path, index=False)
+            frame.to_parquet(path, index=False)
             table_hashes[name] = table_digest(
                 pd.read_parquet(path), OPTIONAL_CORE_SCHEMAS[name]
             )
-            row_counts[name] = len(topology)
+            row_counts[name] = len(frame)
             optional_core_tables.append(name)
 
         for folder, tables, schemas in (
@@ -514,6 +631,7 @@ def save_pack(
             "optional_core_tables": optional_core_tables,
             "capabilities": {
                 "topology": bool(topology is not None),
+                "operational_events": bool(operational_events is not None),
             },
             "metric_ids": catalogue["metric_id"].astype(str).tolist(),
             "core_row_counts": row_counts,
@@ -568,11 +686,14 @@ def _validated_pack(pack_root):
     }
     telemetry_digest = hashlib.sha256()
     telemetry_rows = 0
+    quality_counts = {}
     for part in _parts(core / "telemetry"):
         frame = pd.read_parquet(part)
         _validate_telemetry(frame, part.name)
         telemetry_digest.update(table_digest(frame, TELEMETRY_KEYS).encode("ascii"))
         telemetry_rows += len(frame)
+        for code, count in frame["quality_code"].value_counts().items():
+            quality_counts[str(code)] = quality_counts.get(str(code), 0) + int(count)
         identities = frame[["entity_id", "episode_id", "metric_id"]].astype(str).drop_duplicates()
         observed["entities"].update(identities["entity_id"])
         observed["episodes"].update(identities["episode_id"])
@@ -584,7 +705,10 @@ def _validated_pack(pack_root):
         if name not in OPTIONAL_CORE_SCHEMAS:
             raise ValueError(f"Unknown optional PACK-CORE table: {name}")
         frame = pd.read_parquet(core / f"{name}.parquet")
-        validate_topology(frame, entities["entity_id"])
+        if name == "topology_memberships":
+            validate_topology(frame, entities["entity_id"])
+        elif name == "operational_events":
+            validate_operational_events(frame, entities["entity_id"])
 
     for folder, names, schemas in (
         ("SPLITS", manifest["split_tables"], SPLIT_SCHEMAS),
@@ -610,7 +734,7 @@ def _validated_pack(pack_root):
         raise ValueError("PACK-CORE telemetry row count no longer matches its manifest")
     if _combine(table_hashes) != manifest["fingerprint"]:
         raise ValueError("PACK-CORE content no longer matches its manifest")
-    return manifest, table_hashes
+    return manifest, table_hashes, quality_counts
 
 
 def read_pack(pack_root):
@@ -624,97 +748,191 @@ def read_pack(pack_root):
 # --------------------------------------------------------------------------
 
 
-def _series_batches(series_sizes, maximum_rows):
-    """Yield complete episode-metric series in bounded row batches."""
+def _partitioned_collection_gaps(
+    telemetry_directory,
+    catalogue,
+    tolerance_factor,
+):
+    """Find gaps after disk-partitioning unsorted input into small buckets."""
 
-    current, current_rows = [], 0
-    ordered = series_sizes.sort_values(["episode_id", "metric_id"])
-    for row in ordered.itertuples(index=False):
-        rows = int(row.observation_rows)
-        if current and current_rows + rows > maximum_rows:
-            yield current
-            current, current_rows = [], 0
-        current.append((str(row.episode_id), str(row.metric_id)))
-        current_rows += rows
-    if current:
-        yield current
+    bucket_count = int(os.getenv("ANOMALY_GAP_BUCKETS", "64"))
+    if bucket_count < 1:
+        raise ValueError("ANOMALY_GAP_BUCKETS must be positive")
+
+    source = str(Path(telemetry_directory) / "part-*.parquet").replace("'", "''")
+    cadence = catalogue[["metric_id", "expected_cadence_seconds"]].copy()
+    cadence["metric_id"] = cadence["metric_id"].astype(str)
+    cadence["expected_cadence_seconds"] = pd.to_numeric(
+        cadence["expected_cadence_seconds"], errors="coerce"
+    )
+
+    gap_frames = []
+    duplicate_keys = 0
+    print(
+        "Telemetry parts are not series-ordered; using bounded disk "
+        f"partitioning ({bucket_count} buckets)"
+    )
+    with tempfile.TemporaryDirectory(prefix="anomaly-gap-buckets-") as temporary:
+        partitioned = Path(temporary) / "telemetry"
+        destination = str(partitioned).replace("'", "''")
+        with _duckdb_connection() as connection:
+            connection.register("metric_cadence", cadence)
+            connection.execute(f"""
+                COPY (
+                    SELECT CAST(event_ts AS TIMESTAMPTZ) AS event_ts,
+                           CAST(entity_id AS VARCHAR) AS entity_id,
+                           CAST(episode_id AS VARCHAR) AS episode_id,
+                           CAST(metric_id AS VARCHAR) AS metric_id,
+                           hash(entity_id, episode_id, metric_id) % {bucket_count} AS bucket
+                    FROM read_parquet('{source}')
+                ) TO '{destination}' (
+                    FORMAT PARQUET, COMPRESSION ZSTD, PARTITION_BY (bucket)
+                )
+            """)
+
+            for number, directory in enumerate(sorted(partitioned.glob("bucket=*")), start=1):
+                bucket = str(directory / "*.parquet").replace("'", "''")
+                exceptions = connection.execute(f"""
+                    WITH ordered AS (
+                        SELECT event_ts, entity_id, episode_id, metric_id,
+                               lag(event_ts) OVER (
+                                   PARTITION BY entity_id, episode_id, metric_id
+                                   ORDER BY event_ts
+                               ) AS previous_ts
+                        FROM read_parquet('{bucket}')
+                    ), checked AS (
+                        SELECT o.*, c.expected_cadence_seconds,
+                               epoch(o.event_ts - o.previous_ts) AS elapsed_seconds
+                        FROM ordered AS o
+                        LEFT JOIN metric_cadence AS c USING (metric_id)
+                    )
+                    SELECT entity_id, episode_id, metric_id,
+                           previous_ts
+                               + expected_cadence_seconds * INTERVAL '1 second'
+                               AS gap_start,
+                           event_ts AS gap_end,
+                           expected_cadence_seconds,
+                           'within_episode_declared_cadence' AS coverage_basis,
+                           elapsed_seconds = 0 AS duplicate_key
+                    FROM checked
+                    WHERE elapsed_seconds = 0
+                       OR (
+                           expected_cadence_seconds IS NOT NULL
+                           AND elapsed_seconds > expected_cadence_seconds * {float(tolerance_factor)}
+                       )
+                """).df()
+                if exceptions.empty:
+                    continue
+                duplicate_keys += int(exceptions["duplicate_key"].sum())
+                gaps = exceptions.loc[~exceptions["duplicate_key"]].drop(
+                    columns="duplicate_key"
+                )
+                if len(gaps):
+                    gap_frames.append(gaps)
+                if number == 1 or number % 16 == 0:
+                    print(f"  gap bucket {number} complete")
+
+    gaps = (
+        pd.concat(gap_frames, ignore_index=True)
+        if gap_frames else pd.DataFrame(columns=CORE_SCHEMAS["collection_gaps"])
+    )
+    for column in ("gap_start", "gap_end"):
+        gaps[column] = pd.to_datetime(gaps[column], utc=True)
+    return gaps[CORE_SCHEMAS["collection_gaps"]], duplicate_keys
 
 
 def _collection_gaps(
-    connection,
-    series_sizes,
+    telemetry_directory,
+    catalogue,
     tolerance_factor=GAP_TOLERANCE_FACTOR,
 ):
-    """Return internal gaps and the exact global duplicate-key count.
+    """Return internal gaps and duplicate keys with bounded memory.
 
-    Gaps are found inside one ``(entity, episode, metric)`` series, so a
-    recording never implies an obligation to the next recording, while a hole
-    inside a single recording is still reported. Complete metric series are
-    handled in bounded batches, avoiding one global sort over the full long
-    table without splitting the history needed by ``lag``.
+    Series-ordered packs use a fast streaming pass. If input order is not
+    stable, the same keys are hash-partitioned on local disk and each bounded
+    bucket is sorted independently. This avoids a global 69-million-row sort.
     """
 
     maximum_rows = int(os.getenv("ANOMALY_GAP_BATCH_ROWS", str(GAP_BATCH_ROWS)))
     if maximum_rows < 1:
         raise ValueError("ANOMALY_GAP_BATCH_ROWS must be positive")
 
+    cadence = (
+        catalogue.set_index("metric_id")["expected_cadence_seconds"]
+        .apply(pd.to_numeric, errors="coerce")
+        .to_dict()
+    )
+    key_columns = ["entity_id", "episode_id", "metric_id"]
+    read_columns = ["event_ts", *key_columns]
+    last_seen = {}
     duplicate_keys = 0
     gap_frames = []
-    batches = list(_series_batches(series_sizes, maximum_rows))
+    batch_number = 0
+
+    parts = _parts(telemetry_directory)
     print(
-        f"Calculating collection gaps in {len(batches)} bounded series batches "
-        f"(target {maximum_rows:,} rows each)"
+        f"Calculating collection gaps in one streaming pass over "
+        f"{len(parts)} telemetry parts"
     )
-    for number, series in enumerate(batches, start=1):
-        selected_series = " OR ".join(
-            "(t.episode_id = '" + episode_id.replace("'", "''")
-            + "' AND t.metric_id = '" + metric_id.replace("'", "''") + "')"
-            for episode_id, metric_id in series
-        )
-        exceptions = connection.execute(
-            f"""
-            WITH ordered AS (
-                SELECT t.entity_id, t.episode_id, t.metric_id, t.event_ts,
-                       lag(t.event_ts) OVER (
-                           PARTITION BY t.entity_id, t.episode_id, t.metric_id
-                           ORDER BY t.event_ts
-                       ) AS previous_ts,
-                       CAST(c.expected_cadence_seconds AS DOUBLE)
-                           AS expected_cadence_seconds
-                FROM selected_observations AS t
-                LEFT JOIN metric_catalogue AS c USING (metric_id)
-                WHERE {selected_series}
+    for part in parts:
+        parquet = pq.ParquetFile(part)
+        for arrow_batch in parquet.iter_batches(
+            batch_size=maximum_rows, columns=read_columns
+        ):
+            batch_number += 1
+            frame = arrow_batch.to_pandas()
+            frame["event_ts"] = pd.to_datetime(frame["event_ts"], utc=True)
+            for column in key_columns:
+                frame[column] = frame[column].astype(str)
+            frame = frame.sort_values(
+                [*key_columns, "event_ts"], kind="stable"
+            ).reset_index(drop=True)
+
+            previous = frame.groupby(key_columns, sort=False)["event_ts"].shift()
+            first_in_batch = ~frame.duplicated(key_columns)
+            if first_in_batch.any():
+                first_keys = list(
+                    map(tuple, frame.loc[first_in_batch, key_columns].to_numpy())
+                )
+                prior = pd.to_datetime(
+                    pd.Series(
+                        [last_seen.get(key, pd.NaT) for key in first_keys],
+                        index=frame.index[first_in_batch],
+                    ),
+                    utc=True,
+                )
+                previous.loc[first_in_batch] = prior
+            previous = pd.to_datetime(previous, utc=True)
+
+            elapsed = (frame["event_ts"] - previous).dt.total_seconds()
+            backwards = elapsed.lt(0)
+            if backwards.any():
+                return _partitioned_collection_gaps(
+                    telemetry_directory, catalogue, tolerance_factor
+                )
+            duplicate_keys += int(elapsed.eq(0).sum())
+
+            expected = frame["metric_id"].map(cadence)
+            is_gap = previous.notna() & expected.notna() & elapsed.gt(
+                expected * float(tolerance_factor)
             )
-            SELECT CASE WHEN event_ts = previous_ts THEN 'duplicate' ELSE 'gap' END
-                       AS row_kind,
-                   entity_id, episode_id, metric_id,
-                   previous_ts
-                       + CAST(round(expected_cadence_seconds * 1000000) AS BIGINT)
-                         * INTERVAL '1 microsecond' AS gap_start,
-                   event_ts AS gap_end,
-                   expected_cadence_seconds,
-                   'within_episode_declared_cadence' AS coverage_basis
-            FROM ordered
-            WHERE previous_ts IS NOT NULL
-              AND (
-                  event_ts = previous_ts
-                  OR (
-                      expected_cadence_seconds IS NOT NULL
-                      AND epoch(event_ts - previous_ts)
-                          > expected_cadence_seconds * ?
-                  )
-              )
-            """,
-            [float(tolerance_factor)],
-        ).df()
-        duplicate_keys += int(exceptions["row_kind"].eq("duplicate").sum())
-        found = exceptions.loc[exceptions["row_kind"].eq("gap")].drop(
-            columns="row_kind"
-        )
-        if not found.empty:
-            gap_frames.append(found)
-        if number == 1 or number % 10 == 0 or number == len(batches):
-            print(f"  gap batch {number}/{len(batches)} complete")
+            if is_gap.any():
+                found = frame.loc[is_gap, key_columns + ["event_ts"]].copy()
+                found["expected_cadence_seconds"] = expected.loc[is_gap].to_numpy()
+                found["gap_start"] = (
+                    pd.DatetimeIndex(previous.loc[is_gap].to_numpy())
+                    + pd.to_timedelta(
+                        found["expected_cadence_seconds"], unit="s"
+                    ).to_numpy()
+                )
+                found = found.rename(columns={"event_ts": "gap_end"})
+                found["coverage_basis"] = "within_episode_declared_cadence"
+                gap_frames.append(found[CORE_SCHEMAS["collection_gaps"]])
+
+            latest = frame.groupby(key_columns, sort=False)["event_ts"].last()
+            last_seen.update(latest.to_dict())
+            if batch_number == 1 or batch_number % 25 == 0:
+                print(f"  gap batch {batch_number} complete")
 
     gaps = (
         pd.concat(gap_frames, ignore_index=True)
@@ -745,7 +963,7 @@ def build_canonical(pack_root, run_root, *, include_evaluation=True, as_of_ts=No
     """Convert any valid sector pack into immutable canonical directories."""
 
     pack_root, run_root = Path(pack_root), Path(run_root)
-    pack_manifest, _ = _validated_pack(pack_root)
+    pack_manifest, pack_hashes, pack_quality_counts = _validated_pack(pack_root)
     core_source = pack_root / "PACK-CORE"
     catalogue = pd.read_parquet(core_source / "metric_catalogue.parquet")
     pack_entities = pd.read_parquet(core_source / "entity_registry.parquet")
@@ -770,7 +988,9 @@ def build_canonical(pack_root, run_root, *, include_evaluation=True, as_of_ts=No
                    CAST(episode_id AS VARCHAR)   AS episode_id,
                    CAST(metric_id AS VARCHAR)    AS metric_id,
                    value,
-                   CAST(quality_code AS VARCHAR) AS quality_code
+                   CAST(quality_code AS VARCHAR) AS quality_code,
+                   CAST(source_system AS VARCHAR) AS source_system,
+                   CAST(ingestion_ts AS TIMESTAMPTZ) AS ingestion_ts
             FROM read_parquet('{telemetry_glob}') {where}
         """)
 
@@ -816,43 +1036,53 @@ def build_canonical(pack_root, run_root, *, include_evaluation=True, as_of_ts=No
             raise ValueError("Canonical entity type is missing")
         entities = entities[CORE_SCHEMAS["entity_registry"]]
 
-        telemetry_digest = hashlib.sha256()
-        telemetry_rows = 0
-        quality_counts = {}
-        cursor = connection.execute(f"""
-            SELECT {', '.join(CORE_SCHEMAS['telemetry'])} FROM selected_observations
-        """)
-        batches = (
-            cursor.to_arrow_reader(batch_size=CANONICAL_BATCH_ROWS)
-            if hasattr(cursor, "to_arrow_reader")
-            else cursor.fetch_record_batch(CANONICAL_BATCH_ROWS)
-        )
-        for number, batch in enumerate(batches):
-            frame = batch.to_pandas()[CORE_SCHEMAS["telemetry"]]
-            frame["event_ts"] = pd.to_datetime(frame["event_ts"], utc=True)
-            frame = frame.sort_values(TELEMETRY_KEYS, kind="stable").reset_index(drop=True)
-            frame.to_parquet(
-                telemetry_directory / f"part-{number:05d}.parquet",
-                index=False, compression="zstd",
+        if as_of is None:
+            # PACK telemetry already uses the canonical observable schema.
+            # Copying compressed parts avoids an unnecessary 69M-row
+            # decompression/recompression pass on the reference fixture.
+            for part in _parts(core_source / "telemetry"):
+                shutil.copy2(part, telemetry_directory / part.name)
+            telemetry_rows = int(pack_manifest["core_row_counts"]["telemetry"])
+            telemetry_hash = pack_hashes["telemetry"]
+            quality_counts = pack_quality_counts
+        else:
+            telemetry_digest = hashlib.sha256()
+            telemetry_rows = 0
+            quality_counts = {}
+            cursor = connection.execute(f"""
+                SELECT {', '.join(CORE_SCHEMAS['telemetry'])}
+                FROM selected_observations
+            """)
+            batches = (
+                cursor.to_arrow_reader(batch_size=CANONICAL_BATCH_ROWS)
+                if hasattr(cursor, "to_arrow_reader")
+                else cursor.fetch_record_batch(CANONICAL_BATCH_ROWS)
             )
-            telemetry_digest.update(table_digest(frame, TELEMETRY_KEYS).encode("ascii"))
-            telemetry_rows += len(frame)
-            for code, count in frame["quality_code"].value_counts().items():
-                quality_counts[str(code)] = quality_counts.get(str(code), 0) + int(count)
-
-        # Release the final Arrow/Pandas batch before DuckDB starts the
-        # blocking per-series gap calculation.
-        del batches, cursor, batch, frame
-        gc.collect()
+            for number, batch in enumerate(batches):
+                frame = batch.to_pandas()[CORE_SCHEMAS["telemetry"]]
+                frame["event_ts"] = pd.to_datetime(frame["event_ts"], utc=True)
+                frame = frame.sort_values(TELEMETRY_KEYS, kind="stable").reset_index(drop=True)
+                frame.to_parquet(
+                    telemetry_directory / f"part-{number:05d}.parquet",
+                    index=False, compression="zstd",
+                )
+                telemetry_digest.update(
+                    table_digest(frame, TELEMETRY_KEYS).encode("ascii")
+                )
+                telemetry_rows += len(frame)
+                for code, count in frame["quality_code"].value_counts().items():
+                    quality_counts[str(code)] = quality_counts.get(str(code), 0) + int(count)
+            telemetry_hash = telemetry_digest.hexdigest()
+            del batches, cursor, batch, frame
+            gc.collect()
 
         collection_gaps, duplicate_keys = _collection_gaps(
-            connection,
-            series_bounds[["episode_id", "metric_id", "observation_rows"]],
+            telemetry_directory, catalogue
         )
         if duplicate_keys:
             raise ValueError("Duplicate telemetry keys exist across Pack parts")
 
-        table_hashes = {"telemetry": telemetry_digest.hexdigest()}
+        table_hashes = {"telemetry": telemetry_hash}
         row_counts = {"telemetry": telemetry_rows}
         sidecars = {
             "metric_catalogue": catalogue[CORE_SCHEMAS["metric_catalogue"]],
@@ -882,7 +1112,9 @@ def build_canonical(pack_root, run_root, *, include_evaluation=True, as_of_ts=No
                     for name in pack_manifest.get("optional_core_tables", [])
                 },
             },
-            "capabilities": pack_manifest.get("capabilities", {"topology": False}),
+            "capabilities": pack_manifest.get(
+                "capabilities", {"topology": False, "operational_events": False}
+            ),
             "row_counts": row_counts,
             "fingerprint": _combine(table_hashes),
             "quality_counts": quality_counts,
@@ -938,11 +1170,11 @@ def check_core(core_root):
 
     table_hashes = {"telemetry": telemetry_digest.hexdigest()}
     row_counts = {"telemetry": telemetry_rows}
-    optional_names = (
-        ["topology_memberships"]
-        if manifest.get("capabilities", {}).get("topology", False)
-        else []
-    )
+    optional_names = [
+        name for name in OPTIONAL_CORE_SCHEMAS
+        if manifest.get("capabilities", {}).get(name.replace("_memberships", ""), False)
+        or manifest.get("capabilities", {}).get(name, False)
+    ]
     sidecar_names = [
         "metric_catalogue", "entity_registry", "observation_episodes",
         "collection_gaps", *optional_names,

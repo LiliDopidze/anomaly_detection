@@ -1,0 +1,31 @@
+version: 1
+project: telco_anomaly_detection
+primary_domain: fixed_access_pon
+objectives:
+  - anomaly_detection
+  - alert_consolidation
+  - topology_localisation
+out_of_scope:
+  - supervised_fault_classification
+  - failure_prediction
+  - causal_root_cause_analysis
+company_agnostic_means:
+  - vendor_neutral_metric_semantics
+  - operator_specific_source_adapters
+  - label_free_local_calibration
+  - shared_detection_and_incident_algorithms
+claim_levels:
+  synthetic: validates software and injected mechanisms
+  public_real: validates behaviour on real Telecom telemetry
+  testbed_fault: validates response to controlled physical failures
+  operator: required for production performance claims
+prohibited_model_fields:
+  - fault_id
+  - fault_type
+  - ticket_id
+  - label
+  - class
+  - root_cause
+  - expected_rx_power_dbm
+  - gt_*
+  - truth_*

@@ -1,4 +1,4 @@
-"""Tested mechanics for the evaluation-harness notebook.
+"""Label-isolated incident evaluation for Telecom anomaly detection.
 
 Notebook 03 owns policy choices and adversarial controls.  This flat module
 owns the repetitive mechanics whose silent failure would invalidate results:
@@ -13,7 +13,7 @@ import pandas as pd
 from scipy.stats import chi2
 
 
-EVALUATION_CORE_VERSION = "3.0.0"
+EVALUATION_CORE_VERSION = "4.0.0"
 PARTITIONS = ("calibration", "development", "holdout")
 SCORE_COLUMNS = [
     "event_ts", "entity_id", "episode_id", "anomaly_score", "model_id",
@@ -246,6 +246,44 @@ def _assign_conditions(conditions, primary_split, time_partitions, entity_partit
     return pd.concat(pieces, ignore_index=True)
 
 
+def _assign_tickets(tickets, audit, primary_split, time_partitions, entity_partitions):
+    """Assign evaluator-only tickets without exposing another split's dates."""
+
+    if tickets is None or tickets.empty:
+        return pd.DataFrame() if tickets is None else tickets.assign(
+            assigned_partition=pd.Series(dtype="string")
+        )
+
+    assigned = tickets.copy()
+    assigned["fault_id"] = assigned["fault_id"].astype("string")
+    fault_partition = audit.loc[
+        audit["status"].eq("scoreable"), ["fault_id", "assigned_partition"]
+    ].drop_duplicates("fault_id")
+    assigned = assigned.merge(
+        fault_partition, on="fault_id", how="left", validate="many_to_one"
+    )
+
+    unresolved = assigned["assigned_partition"].isna()
+    if primary_split == "entity":
+        membership = entity_partitions[["entity_id", "partition"]].copy()
+        membership["entity_id"] = membership["entity_id"].astype(str)
+        fallback = assigned.loc[unresolved, ["entity_id"]].astype(str).merge(
+            membership, on="entity_id", how="left"
+        )["partition"]
+        assigned.loc[unresolved, "assigned_partition"] = fallback.to_numpy()
+    else:
+        reported = pd.to_datetime(
+            assigned.loc[unresolved, "reported_ts"], utc=True, errors="coerce"
+        )
+        fallback = pd.Series(pd.NA, index=reported.index, dtype="string")
+        for part in time_partitions.itertuples(index=False):
+            inside = reported.ge(part.start_ts) & reported.lt(part.end_ts)
+            fallback.loc[inside] = part.partition
+        assigned.loc[unresolved, "assigned_partition"] = fallback
+
+    return assigned
+
+
 def partition_truth(
     events,
     intervals,
@@ -255,6 +293,7 @@ def partition_truth(
     primary_split,
     time_partitions,
     entity_partitions,
+    tickets=None,
 ):
     """Return physically writable truth partitions and their audit."""
 
@@ -271,6 +310,9 @@ def partition_truth(
 
     condition_assignments = _assign_conditions(
         conditions, primary_split, time_partitions, entity_partitions
+    )
+    ticket_assignments = _assign_tickets(
+        tickets, audit, primary_split, time_partitions, entity_partitions
     )
     output = {}
     for partition in PARTITIONS:
@@ -293,6 +335,11 @@ def partition_truth(
                 conditions.columns,
             ].reset_index(drop=True),
         }
+        if tickets is not None:
+            output[partition]["tickets"] = ticket_assignments.loc[
+                ticket_assignments["assigned_partition"].eq(partition),
+                tickets.columns,
+            ].reset_index(drop=True)
 
     summary = (
         audit.groupby(
@@ -1436,7 +1483,10 @@ def evaluate_cases(
                 "preimpact": pd.notna(row["impact_ts"]) and case.case_start < row["impact_ts"],
             })
         match_rows.append(record)
-    matches = pd.DataFrame(match_rows)
+    matches = pd.DataFrame(match_rows, columns=[
+        "case_id", "match_status", "fault_id", "fault_type",
+        "detection_delay_seconds", "preimpact",
+    ])
 
     detections = matches.loc[matches["match_status"].eq("matched")]
     fault_results = events.copy().merge(

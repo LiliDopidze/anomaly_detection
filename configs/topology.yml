@@ -1,0 +1,33 @@
+version: 1
+memberships:
+  olt_id:
+    scope_type: olt
+    hierarchy_level: 0
+    family: physical_topology
+  pon_port:
+    scope_type: pon_port
+    hierarchy_level: 1
+    family: physical_topology
+  splitter_l1:
+    scope_type: splitter_l1
+    hierarchy_level: 2
+    family: physical_topology
+  splitter_l2:
+    scope_type: splitter_l2
+    hierarchy_level: 3
+    family: physical_topology
+  geo_cluster:
+    scope_type: geo_cluster
+    hierarchy_level: null
+    family: geographic_context
+peer_policy:
+  preferred_levels: [splitter_l2, pon_port, splitter_l1, olt]
+  minimum_valid_peers: 7
+  minimum_entity_coverage: 0.80
+  stable_group_scale_from: 15
+group_policy:
+  minimum_entities: 3
+  minimum_available_fraction: 0.50
+  physical_levels: [splitter_l2, splitter_l1, pon_port, olt]
+identifiability:
+  equivalent_descendant_sets_are_ambiguous: true

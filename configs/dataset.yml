@@ -1,0 +1,60 @@
+version: 1
+primary_dataset: synthetic_pon
+datasets:
+  synthetic_pon:
+    role: primary_engineering_and_labelled_development_fixture
+    source_candidates:
+      - telco_syntetic_data
+      - telco_synthetic_data
+    cadence_seconds: 900
+    labelled: true
+    topology: true
+    evidence_level: synthetic
+    redistribute_source: false
+    output_run_id: synthetic_pon_v1
+  microsoft_optical:
+    role: real_optical_behaviour_and_alert_stability
+    source_candidates:
+      - sources/microsoft_optical/raw/plots_dataset_release
+    cadence_seconds: 900
+    labelled: false
+    topology: segment_membership
+    evidence_level: public_real
+    source_url: https://www.microsoft.com/en-us/download/details.aspx?id=54267
+    licence_status: microsoft_research_data_agreement_restricted
+    licence_review_required: true
+    redistribute_source: false
+    redistribute_derived_data: false
+    output_run_id: microsoft_optical_v1
+  ran_pm:
+    role: real_operator_telemetry_portability_and_workload
+    source_candidates:
+      - sources/ran_pm/17815388/raw
+    cadence_seconds: 900
+    labelled: false
+    topology: base_station_and_sector
+    evidence_level: public_real
+    source_url: https://zenodo.org/records/17815388
+    licence_status: CC-BY-4.0
+    licence_review_required: false
+    redistribute_source: false
+    output_run_id: ran_pm_v1
+  optical_failure:
+    role: controlled_physical_failure_evaluation
+    source_candidates:
+      - sources/optical_failure/raw
+    cadence_seconds: 3.5
+    labelled: true
+    topology: testbed_device
+    evidence_level: testbed_fault
+    source_url: https://github.com/Network-And-Services/optical-failure-dataset
+    licence_status: no_explicit_repository_licence_verified
+    licence_review_required: true
+    redistribute_source: false
+    redistribute_derived_data: false
+    output_run_id: optical_failure_v1
+rules:
+  pool_raw_datasets: false
+  fit_one_model_across_metric_packs: false
+  public_unlabelled_cases_are_false_positives: false
+  holdout_may_influence_model_choice: false
