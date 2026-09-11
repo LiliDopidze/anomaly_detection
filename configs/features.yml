@@ -1,0 +1,49 @@
+version: 1
+
+# All windows are elapsed time, not row counts. At the PON cadence of
+# 15 minutes they correspond to 4, 24, 96 and 672 observations.
+temporal:
+  history_windows_seconds:
+    24h: 86400
+    7d: 604800
+  lag_windows_seconds:
+    1h: 3600
+    6h: 21600
+  activity_windows_seconds:
+    6h: 21600
+    24h: 86400
+  minimum_window_fraction: 0.50
+  history_metric_ids:
+    - optical.rx_power
+    - optical.olt_rx_power
+    - equipment.temperature
+    - optical.bias_current
+    - optical.fec_count
+    - service.throughput
+  lag_metric_ids:
+    - optical.rx_power
+    - optical.olt_rx_power
+    - optical.tx_power
+    - equipment.temperature
+    - optical.bias_current
+    - optical.fec_count
+    - ethernet.crc_errors
+    - service.throughput
+  activity_metric_ids:
+    - optical.ber
+    - ethernet.crc_errors
+    - equipment.uptime
+    - equipment.reboot_count
+
+isolation_forest:
+  n_estimators: 300
+  max_samples: 2048
+  max_features: 0.75
+  random_seed: 42
+  contextual_inputs:
+    - rapid_residual
+    - drift_cusum
+    - dispersion_change
+    - peer_deviation
+    - group_common_mode
+    - group_common_mode__affected_fraction

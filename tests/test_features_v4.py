@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from telco_anomaly.features import (  # noqa: E402
     add_causal_history,
     add_causal_seasonal_differences,
+    add_causal_temporal_features,
     directional_cusum,
     empirical_tail_evidence,
     feature_policy,
@@ -242,6 +243,89 @@ class CausalHistoryTests(unittest.TestCase):
         self.assertTrue(result.loc[4:6, name].isna().all())
         self.assertTrue(pd.notna(result.loc[7, name]))
 
+    def test_multi_timescale_features_are_causal_and_gap_safe(self):
+        metrics = catalogue(
+            (
+                "signal", "gauge", 1, "high_bad", "identity", 0.1,
+                None, None, None, None,
+            )
+        )
+        source = panel([0, 1, 2, 3, 4, 5, 20, 21, 22], signal=range(9))
+        transformed = transform_episode(source, metrics)
+        result = add_causal_temporal_features(
+            transformed,
+            metrics,
+            history_windows_seconds={"4s": 4},
+            lag_windows_seconds={"2s": 2},
+            minimum_window_fraction=0.50,
+        )
+
+        lag = "signal__level__lag_2s"
+        history = "signal__level__history_4s_z"
+        self.assertEqual(result.loc[4, lag], 2.0)
+        self.assertTrue(result.loc[6:7, lag].isna().all())
+        self.assertTrue(pd.notna(result.loc[3, history]))
+        self.assertTrue(result.loc[6:7, history].isna().all())
+
+        prefix = add_causal_temporal_features(
+            transform_episode(source.iloc[:5].copy(), metrics),
+            metrics,
+            history_windows_seconds={"4s": 4},
+            lag_windows_seconds={"2s": 2},
+            minimum_window_fraction=0.50,
+        )
+        pd.testing.assert_frame_equal(
+            result.iloc[:5].reset_index(drop=True),
+            prefix.reset_index(drop=True),
+        )
+
+    def test_error_activity_is_a_trailing_rate(self):
+        metrics = catalogue(
+            (
+                "errors", "interval_count", 1, "high_bad", "hurdle_log1p",
+                0.1, 0.0, None, None, None,
+            )
+        )
+        transformed = transform_episode(
+            panel([0, 1, 2, 3], errors=[0.0, 2.0, 0.0, 4.0]), metrics
+        )
+        result = add_causal_temporal_features(
+            transformed,
+            metrics,
+            activity_windows_seconds={"4s": 4},
+            minimum_window_fraction=0.50,
+        )
+        self.assertEqual(result.loc[3, "errors__nonzero__rate_4s"], 0.5)
+
+    def test_temporal_feature_families_respect_metric_selection(self):
+        metrics = catalogue(
+            (
+                "selected", "gauge", 1, "high_bad", "identity", 0.1,
+                None, None, None, None,
+            ),
+            (
+                "excluded", "gauge", 1, "high_bad", "identity", 0.1,
+                None, None, None, None,
+            ),
+        )
+        transformed = transform_episode(
+            panel(
+                [0, 1, 2, 3],
+                selected=[1.0, 2.0, 3.0, 4.0],
+                excluded=[4.0, 3.0, 2.0, 1.0],
+            ),
+            metrics,
+        )
+        result = add_causal_temporal_features(
+            transformed,
+            metrics,
+            lag_windows_seconds={"1s": 1},
+            lag_metric_ids=["selected"],
+        )
+
+        self.assertIn("selected__level__lag_1s", result)
+        self.assertNotIn("excluded__level__lag_1s", result)
+
 
 class EvidenceTests(unittest.TestCase):
     def test_empirical_tail_evidence_obeys_metric_direction(self):
@@ -298,6 +382,22 @@ class EvidenceTests(unittest.TestCase):
         policy = feature_policy(metrics).set_index("feature")
         self.assertEqual(policy.at["signal__level", "direction"], "low_bad")
         self.assertEqual(policy.at["signal__clipped", "role"], "data_quality")
+
+    def test_temporal_features_inherit_the_metric_direction(self):
+        metrics = catalogue(
+            (
+                "signal", "gauge", 1, "low_bad", "identity", 0.2,
+                None, None, None, None,
+            )
+        )
+        names = [
+            "signal__level__history_24h_z",
+            "signal__level__lag_1h",
+        ]
+        policy = feature_policy(metrics, names).set_index("feature")
+
+        self.assertEqual(policy.at[names[0], "direction"], "low_bad")
+        self.assertEqual(policy.at[names[1], "direction"], "low_bad")
 
 
 class DetectorIntegrationTests(unittest.TestCase):

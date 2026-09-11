@@ -111,18 +111,24 @@ saved with the canonical fingerprint and become frozen inputs to features.
 
 ## 7. Leakage-safe features
 
-All windows use elapsed time and exclude future values. Calibration-frozen
-self residuals remove legitimate entity offsets before any peer comparison.
-Short-change, drift, missing-duration, reset, and clipping evidence remain
-separate.
+All windows use elapsed time, restart after collection gaps, and exclude
+future values. Calibration-frozen self residuals remove legitimate entity
+offsets before any peer comparison. The compact feature set contains current
+levels or transformed magnitudes, first differences, approved seasonal
+differences, 1-hour and 6-hour changes, 24-hour and 7-day robust history
+deviations, and 6-hour and 24-hour error/reset activity summaries. Feature
+families are enabled only for metrics where they have a clear interpretation.
+Missingness and clipping remain explicit data-quality evidence; they are not
+silently converted into equipment-health values.
 
 Peer residuals compare one ONT against contemporaneous self residuals of its
 eligible peers. Their null scale is calibrated by topology level and group-size
 band; very small peer groups are disabled.
 
-Group features describe common movement: median descendant residual, affected
-fraction, available fraction, child-branch breadth, footprint size, and
-direction agreement. A future-data perturbation test proves feature causality.
+Group features describe common movement through the median descendant
+residual, affected fraction, available fraction, and the physical scope that
+supports the evidence. A future-data perturbation test proves feature
+causality.
 
 ## 8. Primary detector
 
@@ -146,18 +152,21 @@ space by affected fraction, so channel-level recall is reported by fault type.
 
 ## 9. Challengers
 
-Isolation Forest is the main challenger, trained on semantic residual windows,
-slopes, missingness, and cross-metric consistency—not raw vendor fields. It is
-compared at the same consolidated incident workload, and its contamination
-parameter does not set the production alert rate.
+Isolation Forest is the main challenger, trained on robust semantic residuals
+and cross-metric consistency—not raw vendor fields or identifiers. Three
+variants isolate what adds value: current-state features only, current plus
+causal temporal features, and self scores plus topology context. They are
+compared at the same consolidated incident workload. The model's
+``contamination`` setting does not set the production alert rate; late
+calibration thresholds do.
 
 Robust PCA is a smaller correlated-change challenger. Autoencoders are deferred
 until substantially more real labelled and unlabelled operator telemetry is
 available. Matrix profile is limited to diagnostic univariate experiments.
 
 Required ablations are rapid only; rapid plus drift; self plus peer; self plus
-peer plus group; primary versus Isolation Forest; and approved seasonal versus
-non-seasonal references.
+peer plus group; the three Isolation Forest variants; and approved seasonal
+versus non-seasonal references.
 
 ## 10. Thresholds and incidents
 

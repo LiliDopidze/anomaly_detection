@@ -9,13 +9,16 @@ import telco_anomaly.detectors as detector_helpers
 from telco_anomaly.contract import OPTIONAL_CORE_SCHEMAS
 from telco_anomaly.detectors import (
     _deduplicate_scope_alerts,
+    append_contextual_isolation_scores,
     alert_grid_from_score_file,
     calibration_thresholds,
+    fit_contextual_isolation_forest,
     fit_residual_bundle,
     split_feature_file_by_time,
     fit_topology_reference,
     score_topology_file,
     score_partition_file,
+    score_residual_episode,
 )
 from telco_anomaly.evaluation import ALERT_COLUMNS, form_cases
 
@@ -109,6 +112,71 @@ def test_entity_references_use_full_calibration_not_the_ml_sample(tmp_path):
     assert bundle["training_rows"] == 30
     assert len(bundle["entity_centre"]) == 50
     assert bundle["entity_reference_counts"].min().min() == 40
+
+
+def test_contextual_isolation_forest_fits_and_scores(tmp_path):
+    source = tmp_path / "combined_scores.parquet"
+    destination = tmp_path / "contextual_scores.parquet"
+    rows = 200
+    frame = pd.DataFrame({
+        "event_ts": pd.date_range(BASE, periods=rows, freq="15min"),
+        "entity_id": [f"ont-{value % 10}" for value in range(rows)],
+        "episode_id": [f"episode-{value % 10}" for value in range(rows)],
+        "rapid_residual": np.sin(np.arange(rows) / 7),
+        "peer_deviation": np.cos(np.arange(rows) / 11),
+        "group_common_mode": np.sin(np.arange(rows) / 17),
+    })
+    frame.to_parquet(source, index=False)
+
+    bundle = fit_contextual_isolation_forest(
+        source,
+        ["rapid_residual", "peer_deviation", "group_common_mode"],
+        maximum_training_rows=150,
+        trees=10,
+        maximum_samples=64,
+    )
+    append_contextual_isolation_scores(bundle, source, destination)
+    scored = pd.read_parquet(destination)
+
+    assert len(scored) == rows
+    assert scored["isolation_forest_contextual"].notna().all()
+    assert set(scored["isolation_forest_contextual__leading_feature"]) <= set(
+        bundle["feature_columns"]
+    )
+
+
+def test_isolation_forest_keeps_base_and_temporal_variants(tmp_path):
+    path = tmp_path / "features.parquet"
+    rows = 200
+    frame = pd.DataFrame({
+        "event_ts": pd.date_range(BASE, periods=rows, freq="15min"),
+        "entity_id": "ont-1",
+        "episode_id": "episode-1",
+        "a__level": np.sin(np.arange(rows) / 7),
+        "b__level": np.cos(np.arange(rows) / 11),
+        "a__level__lag_1h": np.sin(np.arange(rows) / 5),
+    })
+    frame.to_parquet(path, index=False)
+
+    bundle = fit_residual_bundle(
+        path,
+        use_entity_reference=False,
+        maximum_training_rows=150,
+        isolation_trees=10,
+        isolation_max_samples=64,
+        fit_multivariate=True,
+    )
+    scored = score_residual_episode(
+        bundle,
+        frame,
+        cadence_seconds=900,
+        dispersion_window_seconds=3600,
+        cusum_allowance=0.5,
+    )
+
+    assert bundle["isolation_base_features"] == ["a__level", "b__level"]
+    assert scored["isolation_forest_base"].notna().all()
+    assert scored["isolation_forest_temporal"].notna().all()
 
 
 def test_thresholds_are_quantiles_of_entity_day_block_maxima(tmp_path):
