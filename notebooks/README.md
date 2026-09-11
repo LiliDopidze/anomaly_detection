@@ -52,7 +52,7 @@ stage run ID—for example:
 
 ```bash
 export PON_FEATURE_RUN_ID=synthetic_pon_features_v4
-export PON_MODEL_RUN_ID=synthetic_pon_models_v4
+export PON_MODEL_RUN_ID=synthetic_pon_models_v5
 ```
 
 Keep downstream run IDs aligned with the inputs printed at the top of each
@@ -64,6 +64,12 @@ partitions. In Colab it uses `/content` for large temporary wide tables and
 copies only final feature files to Drive. It prints progress after each major
 step and every 25 entity episodes. Set `TELCO_WORK_ROOT` only when a different
 local scratch disk is required; do not point it at Google Drive.
+
+Notebook 06 reuses the immutable v4 feature run. It needs at least 4 GB of
+local scratch space by default, keeps DuckDB spill files under that scratch
+directory, and deletes residual and topology intermediates immediately after
+use. If a previous Colab attempt filled `/content`, restart the runtime before
+rerunning Notebook 06; Notebook 05 does not need to be rerun.
 
 ## Public Telecom qualification
 

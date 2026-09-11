@@ -9,8 +9,11 @@ application.
 from __future__ import annotations
 
 import math
+import os
 import shutil
+import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import duckdb
@@ -35,7 +38,7 @@ from .features import (
 )
 
 
-MODEL_CORE_VERSION = "4.1.0"
+MODEL_CORE_VERSION = "4.2.0"
 MODEL_IDS = (
     "rapid_residual",
     "drift_cusum",
@@ -56,6 +59,28 @@ SHORT_SCALE_FLOOR_FRACTION = 0.25
 RELATIVE_SCALE_FLOOR = 1e-6
 ABSOLUTE_SCALE_FLOOR = 1e-12
 PCA_EIGENVALUE_FLOOR = 1e-12
+
+
+@contextmanager
+def _model_duckdb(work_directory=None):
+    """Use bounded memory and disposable local spill space for model scans."""
+
+    parent = Path(
+        work_directory
+        or os.getenv("TELCO_WORK_ROOT", tempfile.gettempdir())
+    )
+    parent.mkdir(parents=True, exist_ok=True)
+    memory_limit = os.getenv("TELCO_MODEL_DUCKDB_MEMORY_LIMIT", "2GB")
+    threads = int(os.getenv("TELCO_MODEL_DUCKDB_THREADS", "2"))
+    with tempfile.TemporaryDirectory(
+        dir=parent, prefix="telco-model-duckdb-"
+    ) as spill_directory:
+        with duckdb.connect() as connection:
+            connection.execute("SET memory_limit = ?", [memory_limit])
+            connection.execute("SET threads = ?", [threads])
+            connection.execute("SET temp_directory = ?", [spill_directory])
+            connection.execute("SET preserve_insertion_order = false")
+            yield connection
 
 
 def duration_to_observations(duration_seconds, cadence_seconds):
@@ -814,7 +839,6 @@ def calibration_thresholds(
     fire across timestamps, metrics and topology levels inside a channel.
     """
 
-    connection = duckdb.connect()
     rows = []
     source = _sql_literal(str(Path(score_path)))
     block = _sql_identifier(block_column)
@@ -824,85 +848,88 @@ def calibration_thresholds(
         if not np.isfinite(duration) or duration <= 0:
             raise ValueError("block_duration_seconds must be positive")
     score_columns = set(pq.ParquetFile(score_path).schema_arrow.names)
-    for model_id in model_ids:
-        model_column = _sql_identifier(model_id)
-        scope_columns = {
-            f"{model_id}__scope_type", f"{model_id}__scope_id",
-        }
-        if scope_columns <= score_columns:
-            base_key = (
-                f"coalesce(CAST({_sql_identifier(model_id + '__scope_type')} AS VARCHAR), '') "
-                f"|| ':' || coalesce(CAST({_sql_identifier(model_id + '__scope_id')} AS VARCHAR), '')"
-            )
-            block_label = f"{model_id}_scope"
-            # A physical-scope score is repeated on descendant entity rows so
-            # every incident member can consume it. Completeness is therefore
-            # the number of distinct observation times, not descendant rows.
-            block_rows = "count(DISTINCT event_ts)"
-        else:
-            base_key = f"CAST({block} AS VARCHAR)"
-            block_label = block_column
-            block_rows = f"count({model_column})"
-        if duration is not None:
-            block_key = (
-                f"({base_key}) || ':' || "
-                f"CAST(floor(epoch(event_ts) / {duration}) AS BIGINT)"
-            )
-            block_label = f"{block_label}+{duration:g}s"
-        else:
-            block_key = base_key
+    with _model_duckdb(Path(score_path).parent) as connection:
+        for model_id in model_ids:
+            model_column = _sql_identifier(model_id)
+            scope_columns = {
+                f"{model_id}__scope_type", f"{model_id}__scope_id",
+            }
+            if scope_columns <= score_columns:
+                base_key = (
+                    f"coalesce(CAST({_sql_identifier(model_id + '__scope_type')} AS VARCHAR), '') "
+                    f"|| ':' || coalesce(CAST({_sql_identifier(model_id + '__scope_id')} AS VARCHAR), '')"
+                )
+                block_label = f"{model_id}_scope"
+                # A scope score is repeated on descendant rows. Completeness
+                # therefore counts distinct observation times, not children.
+                block_rows = "count(DISTINCT event_ts)"
+            else:
+                base_key = f"CAST({block} AS VARCHAR)"
+                block_label = block_column
+                block_rows = f"count({model_column})"
+            if duration is not None:
+                block_key = (
+                    f"({base_key}) || ':' || "
+                    f"CAST(floor(epoch(event_ts) / {duration}) AS BIGINT)"
+                )
+                block_label = f"{block_label}+{duration:g}s"
+            else:
+                block_key = base_key
 
-        block_counts = connection.execute(f"""
-            SELECT count(*) AS total_blocks,
-                   count(*) FILTER (WHERE rows >= {int(minimum_block_rows)})
-                       AS used_blocks
-            FROM (
+            maxima = connection.execute(f"""
                 SELECT {block_key} AS calibration_block,
+                       max({model_column}) AS block_maximum,
                        {block_rows} AS rows
                 FROM read_parquet({source})
                 WHERE {model_column} IS NOT NULL
                 GROUP BY calibration_block
-            )
-        """).fetchone()
-        total_blocks, used_blocks = map(int, block_counts)
-        if used_blocks == 0:
-            raise ValueError(
-                f"No calibration blocks for {model_id} contain at least "
-                f"{minimum_block_rows} rows"
-            )
-
-        for quantile in quantiles:
-            threshold = connection.execute(
-                f"""
-                SELECT quantile_cont(block_maximum, CAST(? AS FLOAT))
-                FROM (
-                    SELECT {block_key} AS calibration_block,
-                           max({model_column}) AS block_maximum
-                    FROM read_parquet({source})
-                    WHERE {model_column} IS NOT NULL
-                    GROUP BY calibration_block
-                    HAVING {block_rows} >= {int(minimum_block_rows)}
-                )
-                """,
-                [float(quantile)],
-            ).fetchone()[0]
-            if threshold is None or not np.isfinite(threshold):
+            """).df()
+            total_blocks = len(maxima)
+            usable = maxima.loc[
+                maxima["rows"].ge(int(minimum_block_rows)), "block_maximum"
+            ]
+            used_blocks = len(usable)
+            if used_blocks == 0:
                 raise ValueError(
-                    f"{model_id} has no finite calibration threshold at "
-                    f"quantile {quantile}"
+                    f"No calibration blocks for {model_id} contain at least "
+                    f"{minimum_block_rows} rows"
                 )
-            rows.append({
-                "model_id": model_id,
-                "threshold_quantile": float(quantile),
-                "threshold": float(threshold),
-                "threshold_block": block_label,
-                "threshold_method": "empirical_quantile_of_block_maxima",
-                "minimum_block_rows": int(minimum_block_rows),
-                "blocks_total": total_blocks,
-                "blocks_used": used_blocks,
-                "blocks_excluded": total_blocks - used_blocks,
-            })
-    connection.close()
+
+            connection.register("calibration_block_maxima", maxima)
+            requested_quantiles = list(map(float, quantiles))
+            quantile_expressions = ", ".join(
+                "quantile_cont(block_maximum, CAST(? AS FLOAT))"
+                for _ in requested_quantiles
+            )
+            threshold_values = connection.execute(
+                f"""
+                SELECT {quantile_expressions}
+                FROM calibration_block_maxima
+                WHERE rows >= ?
+                """,
+                [*requested_quantiles, int(minimum_block_rows)],
+            ).fetchone()
+            connection.unregister("calibration_block_maxima")
+
+            for quantile, threshold in zip(
+                requested_quantiles, threshold_values
+            ):
+                if threshold is None or not np.isfinite(threshold):
+                    raise ValueError(
+                        f"{model_id} has no finite calibration threshold at "
+                        f"quantile {quantile}"
+                    )
+                rows.append({
+                    "model_id": model_id,
+                    "threshold_quantile": quantile,
+                    "threshold": float(threshold),
+                    "threshold_block": block_label,
+                    "threshold_method": "empirical_quantile_of_block_maxima",
+                    "minimum_block_rows": int(minimum_block_rows),
+                    "blocks_total": total_blocks,
+                    "blocks_used": used_blocks,
+                    "blocks_excluded": total_blocks - used_blocks,
+                })
     return pd.DataFrame(rows)
 
 
@@ -1475,7 +1502,7 @@ def _robust_reference(frame, minimum_scales=None):
 
 def _reference_sample(path, maximum_rows, random_seed):
     source = _sql_literal(str(Path(path)))
-    with duckdb.connect() as connection:
+    with _model_duckdb() as connection:
         return connection.execute(f"""
             SELECT * FROM read_parquet({source})
             USING SAMPLE reservoir({int(maximum_rows)} ROWS)
@@ -1501,7 +1528,7 @@ def _full_entity_reference(path, features, scale_floors, minimum_rows=30):
             f"approx_quantile({column}, 0.75) AS {_sql_identifier(feature + '__q75')}",
         ])
     source = _sql_literal(str(Path(path)))
-    with duckdb.connect() as connection:
+    with _model_duckdb() as connection:
         summary = connection.execute(f"""
             SELECT CAST(entity_id AS VARCHAR) AS entity_id,
                    {', '.join(expressions)}
@@ -1815,13 +1842,17 @@ def score_residual_episode(
     cadence_seconds,
     dispersion_window_seconds,
     cusum_allowance,
+    residuals=None,
 ):
     """Score one episode with rapid, drift, dispersion and residual ML channels."""
 
     if float(cadence_seconds) <= 0:
         raise ValueError("cadence_seconds must be positive")
 
-    residuals = _residual_frame(bundle, features)
+    if residuals is None:
+        residuals = _residual_frame(bundle, features)
+    else:
+        residuals = residuals[bundle["feature_columns"]]
     available = residuals.notna().sum(axis=1)
     minimum = max(1, int(np.ceil(len(bundle["feature_columns"]) * 0.20)))
     ready = available.ge(minimum)
@@ -1930,8 +1961,10 @@ def score_residual_file(
     dispersion_window_seconds,
     cusum_allowance,
     residual_destination=None,
+    residual_features=None,
     score_start=None,
     score_end=None,
+    progress_every=25,
 ):
     """Score complete episodes, then keep only the requested partition.
 
@@ -1946,33 +1979,55 @@ def score_residual_file(
     residual_destination = (
         Path(residual_destination) if residual_destination is not None else None
     )
+    residual_features = list(
+        bundle["feature_columns"]
+        if residual_features is None else residual_features
+    )
+    unknown = set(residual_features) - set(bundle["feature_columns"])
+    if unknown:
+        raise ValueError(f"Unknown residual features: {sorted(unknown)}")
+    started = time.perf_counter()
+    written_rows = 0
+    episode_count = 0
     try:
-        for episode in iter_episode_frames(features_path):
+        for episode_count, episode in enumerate(
+            iter_episode_frames(features_path), start=1
+        ):
             residuals = _residual_frame(bundle, episode)
-            residual_frame = episode[IDENTITY_COLUMNS].copy()
-            residual_frame[bundle["feature_columns"]] = residuals
+            residual_frame = None
+            if residual_destination is not None:
+                residual_frame = episode[IDENTITY_COLUMNS].copy()
+                residual_frame[residual_features] = residuals[residual_features]
             scores = score_residual_episode(
                 bundle,
                 episode,
                 cadence_seconds=cadence_seconds,
                 dispersion_window_seconds=dispersion_window_seconds,
                 cusum_allowance=cusum_allowance,
+                residuals=residuals,
             )
             timestamps = pd.to_datetime(scores["event_ts"], utc=True)
             if score_start is not None:
                 scores = scores.loc[timestamps.ge(score_start)]
-                residual_frame = residual_frame.loc[timestamps.ge(score_start)]
+                if residual_frame is not None:
+                    residual_frame = residual_frame.loc[
+                        timestamps.ge(score_start)
+                    ]
                 timestamps = pd.to_datetime(scores["event_ts"], utc=True)
             if score_end is not None:
                 scores = scores.loc[timestamps.lt(score_end)]
-                residual_frame = residual_frame.loc[timestamps.lt(score_end)]
+                if residual_frame is not None:
+                    residual_frame = residual_frame.loc[
+                        timestamps.lt(score_end)
+                    ]
             if scores.empty:
                 continue
+            written_rows += len(scores)
             table = pa.Table.from_pandas(scores, preserve_index=False)
             if writer is None:
                 writer = pq.ParquetWriter(destination, table.schema, compression="zstd")
             writer.write_table(table)
-            if residual_destination is not None:
+            if residual_frame is not None:
                 residual_table = pa.Table.from_pandas(
                     residual_frame.reset_index(drop=True), preserve_index=False
                 )
@@ -1982,6 +2037,16 @@ def score_residual_file(
                         residual_destination, residual_table.schema, compression="zstd"
                     )
                 residual_writer.write_table(residual_table)
+            if progress_every and (
+                episode_count == 1
+                or episode_count % int(progress_every) == 0
+            ):
+                print(
+                    f"    scoring: {episode_count} episodes, "
+                    f"{written_rows:,} rows, "
+                    f"{(time.perf_counter() - started) / 60:.1f} minutes",
+                    flush=True,
+                )
     finally:
         if writer is not None:
             writer.close()
@@ -1991,6 +2056,12 @@ def score_residual_file(
         raise ValueError("Feature file produced no residual scores")
     if residual_destination is not None and residual_writer is None:
         raise ValueError("Feature file produced no residual rows")
+    print(
+        f"    scoring complete — {episode_count} episodes, "
+        f"{written_rows:,} rows in "
+        f"{(time.perf_counter() - started) / 60:.1f} minutes",
+        flush=True,
+    )
     return destination
 
 
@@ -2030,32 +2101,43 @@ def _model_topology(topology):
     return physical
 
 
-def _peer_candidate_sql(residual_source, features, peer_group_type, min_peers):
-    parts = []
-    for feature in features:
-        column = _sql_identifier(feature)
-        window = (
-            "PARTITION BY r.event_ts, t.group_id "
-            "ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING "
-            "EXCLUDE CURRENT ROW"
+def _long_residual_sql(residual_source, features):
+    """Read a residual file once and expose selected features in long form."""
+
+    columns = ", ".join(_sql_identifier(feature) for feature in features)
+    return f"""
+        UNPIVOT (
+            SELECT event_ts, CAST(entity_id AS VARCHAR) AS entity_id,
+                   CAST(episode_id AS VARCHAR) AS episode_id, {columns}
+            FROM read_parquet({residual_source})
         )
-        parts.append(f"""
-            SELECT * FROM (
-                SELECT r.event_ts, CAST(r.entity_id AS VARCHAR) AS entity_id,
-                       CAST(r.episode_id AS VARCHAR) AS episode_id,
-                       t.group_type, t.group_id,
-                       {_sql_literal(feature)} AS leading_feature,
-                       count(r.{column}) OVER ({window}) AS available_count,
-                       abs(r.{column} - median(r.{column}) OVER ({window})) AS raw_score,
-                       CAST(NULL AS DOUBLE) AS affected_fraction
-                FROM read_parquet({residual_source}) AS r
-                JOIN model_topology AS t
-                  ON CAST(r.entity_id AS VARCHAR) = t.entity_id
-                WHERE t.group_type = {_sql_literal(peer_group_type)}
-            ) AS peer
-            WHERE raw_score IS NOT NULL AND available_count >= {int(min_peers)}
-        """)
-    return " UNION ALL ".join(parts)
+        ON {columns}
+        INTO NAME leading_feature VALUE residual
+    """
+
+
+def _peer_candidate_sql(residual_source, features, peer_group_type, min_peers):
+    residuals = _long_residual_sql(residual_source, features)
+    window = (
+        "PARTITION BY r.event_ts, t.group_id, r.leading_feature "
+        "ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING "
+        "EXCLUDE CURRENT ROW"
+    )
+    return f"""
+        SELECT * FROM (
+            SELECT r.event_ts, r.entity_id, r.episode_id,
+                   t.group_type, t.group_id, r.leading_feature,
+                   count(r.residual) OVER ({window}) AS available_count,
+                   abs(
+                       r.residual - median(r.residual) OVER ({window})
+                   ) AS raw_score,
+                   CAST(NULL AS DOUBLE) AS affected_fraction
+            FROM ({residuals}) AS r
+            JOIN model_topology AS t ON r.entity_id = t.entity_id
+            WHERE t.group_type = {_sql_literal(peer_group_type)}
+        ) AS peer
+        WHERE raw_score IS NOT NULL AND available_count >= {int(min_peers)}
+    """
 
 
 def _group_candidate_sql(
@@ -2066,28 +2148,23 @@ def _group_candidate_sql(
     min_group_fraction,
 ):
     allowed = ", ".join(_sql_literal(value) for value in group_types)
-    parts = []
-    for feature in features:
-        column = _sql_identifier(feature)
-        parts.append(f"""
-            SELECT r.event_ts, t.group_type, t.group_id,
-                   {_sql_literal(feature)} AS leading_feature,
-                   count(r.{column}) AS available_count,
-                   count(r.{column}) * 1.0 / max(t.group_size)
-                       AS available_fraction,
-                   abs(median(r.{column})) * sqrt(count(r.{column})) AS raw_score,
-                   avg(CASE WHEN abs(r.{column}) >= 3 THEN 1.0 ELSE 0.0 END)
-                       AS affected_fraction
-            FROM read_parquet({residual_source}) AS r
-            JOIN model_topology AS t
-              ON CAST(r.entity_id AS VARCHAR) = t.entity_id
-            WHERE t.group_type IN ({allowed}) AND r.{column} IS NOT NULL
-            GROUP BY r.event_ts, t.group_type, t.group_id
-            HAVING count(r.{column}) >= {int(min_group_entities)}
-               AND count(r.{column}) * 1.0 / max(t.group_size)
-                   >= {float(min_group_fraction)}
-        """)
-    return " UNION ALL ".join(parts)
+    residuals = _long_residual_sql(residual_source, features)
+    return f"""
+        SELECT r.event_ts, t.group_type, t.group_id, r.leading_feature,
+               count(r.residual) AS available_count,
+               count(r.residual) * 1.0 / max(t.group_size)
+                   AS available_fraction,
+               abs(median(r.residual)) * sqrt(count(r.residual)) AS raw_score,
+               avg(CASE WHEN abs(r.residual) >= 3 THEN 1.0 ELSE 0.0 END)
+                   AS affected_fraction
+        FROM ({residuals}) AS r
+        JOIN model_topology AS t ON r.entity_id = t.entity_id
+        WHERE t.group_type IN ({allowed})
+        GROUP BY r.event_ts, t.group_type, t.group_id, r.leading_feature
+        HAVING count(r.residual) >= {int(min_group_entities)}
+           AND count(r.residual) * 1.0 / max(t.group_size)
+               >= {float(min_group_fraction)}
+    """
 
 
 def fit_topology_reference(
@@ -2121,7 +2198,7 @@ def fit_topology_reference(
         source, feature_columns, group_types,
         min_group_entities, min_group_fraction,
     )
-    with duckdb.connect() as connection:
+    with _model_duckdb(Path(calibration_residuals).parent) as connection:
         connection.register("model_topology", physical)
         reference = connection.execute(f"""
             WITH candidates AS (
@@ -2178,7 +2255,7 @@ def score_topology_file(
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    with duckdb.connect() as connection:
+    with _model_duckdb(destination.parent) as connection:
         connection.register("model_topology", physical)
         connection.register("topology_reference", reference)
         query = f"""
@@ -2199,12 +2276,20 @@ def score_topology_file(
                  AND q.size_band = {_size_band_sql('p.available_count')}
                  AND q.leading_feature = p.leading_feature
             ),
-            peer_ranked AS (
-                SELECT *, row_number() OVER (
-                    PARTITION BY event_ts, entity_id, episode_id
-                    ORDER BY score DESC, leading_feature
-                ) AS rank
+            peer_best AS (
+                SELECT event_ts, entity_id, episode_id,
+                       max(score) AS score,
+                       arg_max(
+                           leading_feature, score ORDER BY leading_feature ASC
+                       ) AS leading_feature,
+                       arg_max(
+                           available_count, score ORDER BY leading_feature ASC
+                       ) AS available_count,
+                       arg_max(
+                           size_band, score ORDER BY leading_feature ASC
+                       ) AS size_band
                 FROM peer_normalised
+                GROUP BY event_ts, entity_id, episode_id
             ),
             group_raw AS ({group}),
             group_normalised AS (
@@ -2219,16 +2304,43 @@ def score_topology_file(
                  AND q.leading_feature = g.leading_feature
             ),
             group_entities AS (
-                SELECT i.event_ts, i.entity_id, i.episode_id, g.* EXCLUDE(event_ts),
-                       row_number() OVER (
-                           PARTITION BY i.event_ts, i.entity_id, i.episode_id
-                           ORDER BY g.score DESC, g.group_type, g.leading_feature
-                       ) AS rank
+                SELECT i.event_ts, i.entity_id, i.episode_id,
+                       g.* EXCLUDE(event_ts)
                 FROM group_normalised AS g
                 JOIN model_topology AS t
                   ON g.group_type = t.group_type AND g.group_id = t.group_id
                 JOIN identities AS i
                   ON i.entity_id = t.entity_id AND i.event_ts = g.event_ts
+            ),
+            group_best AS (
+                SELECT event_ts, entity_id, episode_id,
+                       max(score) AS score,
+                       arg_max(
+                           leading_feature, score
+                           ORDER BY group_type ASC, leading_feature ASC
+                       ) AS leading_feature,
+                       arg_max(
+                           group_type, score
+                           ORDER BY group_type ASC, leading_feature ASC
+                       ) AS group_type,
+                       arg_max(
+                           group_id, score
+                           ORDER BY group_type ASC, leading_feature ASC
+                       ) AS group_id,
+                       arg_max(
+                           available_count, score
+                           ORDER BY group_type ASC, leading_feature ASC
+                       ) AS available_count,
+                       arg_max(
+                           available_fraction, score
+                           ORDER BY group_type ASC, leading_feature ASC
+                       ) AS available_fraction,
+                       arg_max(
+                           affected_fraction, score
+                           ORDER BY group_type ASC, leading_feature ASC
+                       ) AS affected_fraction
+                FROM group_entities
+                GROUP BY event_ts, entity_id, episode_id
             )
             SELECT i.*,
                    p.score AS peer_deviation,
@@ -2243,13 +2355,12 @@ def score_topology_file(
                    g.available_fraction AS group_available_fraction,
                    g.affected_fraction AS group_common_mode__affected_fraction
             FROM identities AS i
-            LEFT JOIN peer_ranked AS p
+            LEFT JOIN peer_best AS p
               ON i.event_ts = p.event_ts AND i.entity_id = p.entity_id
-             AND i.episode_id = p.episode_id AND p.rank = 1
-            LEFT JOIN group_entities AS g
+             AND i.episode_id = p.episode_id
+            LEFT JOIN group_best AS g
               ON i.event_ts = g.event_ts AND i.entity_id = g.entity_id
-             AND i.episode_id = g.episode_id AND g.rank = 1
-            ORDER BY i.entity_id, i.episode_id, i.event_ts
+             AND i.episode_id = g.episode_id
         """
         connection.execute(
             f"COPY ({query}) TO {_sql_literal(str(destination))} "
@@ -2276,7 +2387,7 @@ def fit_contextual_isolation_forest(
         raise ValueError("Contextual Isolation Forest needs at least two inputs")
     columns = ", ".join(_sql_identifier(name) for name in candidates)
     source = _sql_literal(str(Path(score_path)))
-    with duckdb.connect() as connection:
+    with _model_duckdb(Path(score_path).parent) as connection:
         sample = connection.execute(f"""
             SELECT {columns}
             FROM read_parquet({source})
@@ -2385,7 +2496,7 @@ def merge_score_files(self_scores, topology_scores, destination):
         "group_common_mode__affected_fraction",
     ]
     selected = ", ".join(f"t.{_sql_identifier(name)}" for name in topology_columns)
-    with duckdb.connect() as connection:
+    with _model_duckdb(destination.parent) as connection:
         connection.execute(f"""
             COPY (
                 SELECT s.*, {selected}
@@ -2425,6 +2536,11 @@ def score_partition_file(
     stem = destination.stem
     self_scores = workspace / f"{stem}__self.parquet"
     residuals = workspace / f"{stem}__residuals.parquet"
+    topology_enabled = resolved_policy.get("topology_enabled", False)
+    topology_features = (
+        resolved_policy.get("topology_features", bundle["feature_columns"])
+        if topology_enabled else None
+    )
 
     started = time.perf_counter()
     score_residual_file(
@@ -2434,10 +2550,11 @@ def score_partition_file(
         cadence_seconds=cadence_seconds,
         dispersion_window_seconds=dispersion_window_seconds,
         cusum_allowance=resolved_policy["cusum_allowance"],
-        residual_destination=residuals,
+        residual_destination=residuals if topology_enabled else None,
+        residual_features=topology_features,
     )
 
-    if resolved_policy.get("topology_enabled", False):
+    if topology_enabled:
         if topology is None or topology_reference is None:
             raise ValueError("Frozen topology scoring requires topology and its reference")
         topology_scores = workspace / f"{stem}__topology.parquet"
@@ -2452,15 +2569,19 @@ def score_partition_file(
             min_group_entities=resolved_policy["min_group_entities"],
             min_group_fraction=resolved_policy["min_group_fraction"],
         )
+        residuals.unlink(missing_ok=True)
         combined = (
             workspace / f"{stem}__combined.parquet"
             if contextual_isolation_bundle is not None else destination
         )
         merge_score_files(self_scores, topology_scores, combined)
+        self_scores.unlink(missing_ok=True)
+        topology_scores.unlink(missing_ok=True)
         if contextual_isolation_bundle is not None:
             append_contextual_isolation_scores(
                 contextual_isolation_bundle, combined, destination
             )
+            combined.unlink(missing_ok=True)
     else:
         if contextual_isolation_bundle is not None:
             raise ValueError(
@@ -2468,6 +2589,7 @@ def score_partition_file(
             )
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(self_scores, destination)
+        self_scores.unlink(missing_ok=True)
 
     print(
         f"  scored {Path(feature_path).name} in "
