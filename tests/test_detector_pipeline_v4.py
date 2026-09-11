@@ -18,6 +18,7 @@ from telco_anomaly.detectors import (
     fit_topology_reference,
     score_topology_file,
     score_partition_file,
+    score_residual_file,
     score_residual_episode,
 )
 from telco_anomaly.evaluation import ALERT_COLUMNS, form_cases
@@ -72,9 +73,10 @@ def test_partition_scoring_uses_the_frozen_cusum_policy(tmp_path, monkeypatch):
     def fake_residual_score(bundle, source, target, **settings):
         observed.update(settings)
         pd.DataFrame({"score": [2.0]}).to_parquet(target, index=False)
-        pd.DataFrame({"residual": [3.0]}).to_parquet(
-            settings["residual_destination"], index=False
-        )
+        if settings["residual_destination"] is not None:
+            pd.DataFrame({"residual": [3.0]}).to_parquet(
+                settings["residual_destination"], index=False
+            )
 
     monkeypatch.setattr(detector_helpers, "score_residual_file", fake_residual_score)
     score_partition_file(
@@ -85,7 +87,55 @@ def test_partition_scoring_uses_the_frozen_cusum_policy(tmp_path, monkeypatch):
     )
 
     assert observed["cusum_allowance"] == 0.25
+    assert observed["residual_destination"] is None
     assert pd.read_parquet(destination).loc[0, "score"] == 2.0
+
+
+def test_partition_scoring_removes_topology_intermediates(tmp_path, monkeypatch):
+    feature_path = tmp_path / "features.parquet"
+    destination = tmp_path / "scores.parquet"
+    workspace = tmp_path / "work"
+    pd.DataFrame({"feature": [1.0]}).to_parquet(feature_path, index=False)
+
+    def fake_residual_score(bundle, source, target, **settings):
+        pd.DataFrame({"self": [1.0]}).to_parquet(target, index=False)
+        pd.DataFrame({"residual": [2.0]}).to_parquet(
+            settings["residual_destination"], index=False
+        )
+
+    def fake_topology_score(source, topology, reference, target, **settings):
+        pd.DataFrame({"topology": [3.0]}).to_parquet(target, index=False)
+
+    def fake_merge(self_scores, topology_scores, target):
+        pd.DataFrame({"combined": [4.0]}).to_parquet(target, index=False)
+
+    monkeypatch.setattr(detector_helpers, "score_residual_file", fake_residual_score)
+    monkeypatch.setattr(detector_helpers, "score_topology_file", fake_topology_score)
+    monkeypatch.setattr(detector_helpers, "merge_score_files", fake_merge)
+
+    score_partition_file(
+        {"feature_columns": ["signal__level"]},
+        feature_path,
+        destination,
+        workspace,
+        cadence_seconds=900,
+        dispersion_window_seconds=86_400,
+        resolved_policy={
+            "cusum_allowance": 0.25,
+            "topology_enabled": True,
+            "topology_features": ["signal__level"],
+            "peer_group_type": "pon_port",
+            "group_types": ["pon_port"],
+            "min_peers": 7,
+            "min_group_entities": 3,
+            "min_group_fraction": 0.5,
+        },
+        topology=pd.DataFrame({"entity_id": ["ont-1"]}),
+        topology_reference=pd.DataFrame({"channel": ["peer_deviation"]}),
+    )
+
+    assert pd.read_parquet(destination).loc[0, "combined"] == 4.0
+    assert not list(workspace.glob("*.parquet"))
 
 
 def test_entity_references_use_full_calibration_not_the_ml_sample(tmp_path):
@@ -177,6 +227,45 @@ def test_isolation_forest_keeps_base_and_temporal_variants(tmp_path):
     assert bundle["isolation_base_features"] == ["a__level", "b__level"]
     assert scored["isolation_forest_base"].notna().all()
     assert scored["isolation_forest_temporal"].notna().all()
+
+
+def test_residual_export_keeps_only_requested_topology_features(tmp_path):
+    feature_path = tmp_path / "features.parquet"
+    score_path = tmp_path / "scores.parquet"
+    residual_path = tmp_path / "residuals.parquet"
+    rows = 120
+    frame = pd.DataFrame({
+        "event_ts": pd.date_range(BASE, periods=rows, freq="15min"),
+        "entity_id": "ont-1",
+        "episode_id": "episode-1",
+        "a__level": np.sin(np.arange(rows) / 7),
+        "b__level": np.cos(np.arange(rows) / 11),
+    })
+    frame.to_parquet(feature_path, index=False)
+    bundle = fit_residual_bundle(
+        feature_path,
+        use_entity_reference=False,
+        maximum_training_rows=100,
+        isolation_trees=10,
+        isolation_max_samples=64,
+        fit_multivariate=False,
+    )
+
+    score_residual_file(
+        bundle,
+        feature_path,
+        score_path,
+        cadence_seconds=900,
+        dispersion_window_seconds=3600,
+        cusum_allowance=0.5,
+        residual_destination=residual_path,
+        residual_features=["a__level"],
+        progress_every=0,
+    )
+
+    assert pd.read_parquet(residual_path).columns.tolist() == [
+        "event_ts", "entity_id", "episode_id", "a__level",
+    ]
 
 
 def test_thresholds_are_quantiles_of_entity_day_block_maxima(tmp_path):
