@@ -8,6 +8,7 @@ fault labels.
 from __future__ import annotations
 
 import math
+import re
 
 import numpy as np
 import pandas as pd
@@ -295,12 +296,22 @@ def feature_policy(
 
     requested = list(map(str, feature_names))
     resolved = []
+    temporal_markers = ("__history_", "__lag_", "__rate_", "__sum_")
     for name in requested:
         base = name.removesuffix("__history_z")
+        marker = next((value for value in temporal_markers if value in base), None)
+        if marker is not None:
+            base = base.split(marker, 1)[0]
         if base not in policy.index:
             raise ValueError(f"No metric policy for feature {name!r}")
         item = policy.loc[base].to_dict()
         item["feature"] = name
+        if "__history_" in name:
+            item["minimum_scale"] = 0.25
+        elif "__rate_" in name:
+            item["minimum_scale"] = 0.01
+        elif "__sum_" in name:
+            item["minimum_scale"] = max(0.25, float(item["minimum_scale"]))
         resolved.append(item)
     return pd.DataFrame(resolved)
 
@@ -417,6 +428,180 @@ def add_causal_history(
             result.loc[indices] = ((values - centre) / scale).to_numpy()
 
         output[f"{name}__history_z"] = result
+    return output
+
+
+def _validated_windows(windows, name):
+    """Return a clean label-to-seconds mapping for temporal features."""
+
+    result = {}
+    for label, seconds in (windows or {}).items():
+        label = str(label)
+        if not re.fullmatch(r"[A-Za-z0-9_]+", label):
+            raise ValueError(f"Invalid {name} window label: {label!r}")
+        seconds = float(seconds)
+        if not np.isfinite(seconds) or seconds <= 0:
+            raise ValueError(f"{name} windows must be positive")
+        result[label] = seconds
+    return result
+
+
+def add_causal_temporal_features(
+    features: pd.DataFrame,
+    catalogue: pd.DataFrame,
+    *,
+    history_windows_seconds=None,
+    lag_windows_seconds=None,
+    activity_windows_seconds=None,
+    history_metric_ids=None,
+    lag_metric_ids=None,
+    activity_metric_ids=None,
+    minimum_window_fraction=0.50,
+    gap_tolerance=1.5,
+) -> pd.DataFrame:
+    """Add a small, causal multi-timescale representation of each metric.
+
+    Continuous transformed levels receive robust trailing deviations and
+    exact-lag changes. Zero/error indicators receive trailing occurrence
+    rates. Counter resets and high-bad counter increments receive trailing
+    totals. Every calculation restarts after a collection gap.
+    """
+
+    history_windows = _validated_windows(
+        history_windows_seconds, "history"
+    )
+    lag_windows = _validated_windows(lag_windows_seconds, "lag")
+    activity_windows = _validated_windows(
+        activity_windows_seconds, "activity"
+    )
+    if not 0 < float(minimum_window_fraction) <= 1:
+        raise ValueError("minimum_window_fraction must be in (0, 1]")
+    if float(gap_tolerance) < 1:
+        raise ValueError("gap_tolerance must be at least 1")
+
+    output = features.copy()
+    timestamps = pd.Series(
+        pd.to_datetime(output["event_ts"], utc=True), index=output.index
+    )
+    metadata = _catalogue(catalogue)
+    policies = feature_policy(catalogue).set_index("feature")
+    def selected_metrics(values):
+        return (
+            set(map(str, metadata.index))
+            if values is None
+            else set(map(str, values))
+        )
+
+    history_metric_ids = selected_metrics(history_metric_ids)
+    lag_metric_ids = selected_metrics(lag_metric_ids)
+    activity_metric_ids = selected_metrics(activity_metric_ids)
+    unknown_metrics = (
+        history_metric_ids | lag_metric_ids | activity_metric_ids
+    ) - set(map(str, metadata.index))
+    if unknown_metrics:
+        raise ValueError(
+            "Temporal feature configuration contains unknown metrics: "
+            f"{sorted(unknown_metrics)}"
+        )
+
+    continuous_suffixes = (
+        "__level", "__positive_log10", "__positive_log1p",
+    )
+    continuous = [
+        name for name in output
+        if name in policies.index and name.endswith(continuous_suffixes)
+    ]
+    activity = [
+        name for name in output
+        if name in policies.index and name.endswith(("__nonzero", "__reset"))
+    ]
+    activity += [
+        name for name in output
+        if name in policies.index
+        and name.endswith("__increment")
+        and policies.at[name, "direction"] == "high_bad"
+    ]
+
+    for name in [*continuous, *activity]:
+        metric_id = str(policies.at[name, "metric_id"])
+        cadence = pd.to_numeric(
+            pd.Series([metadata.at[metric_id, "expected_cadence_seconds"]]),
+            errors="coerce",
+        ).iloc[0]
+        if pd.isna(cadence) or float(cadence) <= 0:
+            continue
+        cadence = float(cadence)
+        gap = timestamps.diff().dt.total_seconds().gt(cadence * gap_tolerance)
+        segments = gap.cumsum()
+
+        if name in continuous:
+            floor = float(policies.at[name, "minimum_scale"])
+            selected_history = (
+                history_windows if metric_id in history_metric_ids else {}
+            )
+            for label, seconds in selected_history.items():
+                result = pd.Series(np.nan, index=output.index, dtype=float)
+                minimum_rows = max(
+                    3, math.ceil(seconds * minimum_window_fraction / cadence)
+                )
+                for _, indices in output.groupby(segments, sort=False).groups.items():
+                    values = pd.Series(
+                        pd.to_numeric(output.loc[indices, name], errors="coerce")
+                        .to_numpy(),
+                        index=pd.DatetimeIndex(timestamps.loc[indices]),
+                        dtype=float,
+                    )
+                    trailing = values.rolling(
+                        pd.Timedelta(seconds=seconds),
+                        closed="left",
+                        min_periods=minimum_rows,
+                    )
+                    centre = trailing.median()
+                    scale = (
+                        trailing.quantile(0.75) - trailing.quantile(0.25)
+                    ) / 1.349
+                    scale = scale.where(scale.gt(floor), floor)
+                    result.loc[indices] = ((values - centre) / scale).to_numpy()
+                output[f"{name}__history_{label}_z"] = result
+
+            selected_lags = lag_windows if metric_id in lag_metric_ids else {}
+            for label, seconds in selected_lags.items():
+                result = pd.Series(np.nan, index=output.index, dtype=float)
+                for _, indices in output.groupby(segments, sort=False).groups.items():
+                    values = pd.Series(
+                        pd.to_numeric(output.loc[indices, name], errors="coerce")
+                        .to_numpy(),
+                        index=pd.DatetimeIndex(timestamps.loc[indices]),
+                        dtype=float,
+                    )
+                    previous = values.reindex(
+                        values.index - pd.Timedelta(seconds=seconds)
+                    ).to_numpy()
+                    result.loc[indices] = values.to_numpy() - previous
+                output[f"{name}__lag_{label}"] = result
+
+        if name in activity and metric_id in activity_metric_ids:
+            aggregation = "rate" if name.endswith("__nonzero") else "sum"
+            for label, seconds in activity_windows.items():
+                result = pd.Series(np.nan, index=output.index, dtype=float)
+                minimum_rows = max(
+                    2, math.ceil(seconds * minimum_window_fraction / cadence)
+                )
+                for _, indices in output.groupby(segments, sort=False).groups.items():
+                    values = pd.Series(
+                        pd.to_numeric(output.loc[indices, name], errors="coerce")
+                        .to_numpy(),
+                        index=pd.DatetimeIndex(timestamps.loc[indices]),
+                        dtype=float,
+                    )
+                    trailing = values.rolling(
+                        pd.Timedelta(seconds=seconds),
+                        min_periods=minimum_rows,
+                    )
+                    summary = trailing.mean() if aggregation == "rate" else trailing.sum()
+                    result.loc[indices] = summary.to_numpy()
+                output[f"{name}__{aggregation}_{label}"] = result
+
     return output
 
 

@@ -26,6 +26,7 @@ from sklearn.preprocessing import RobustScaler
 from .features import (
     add_causal_history,
     add_causal_seasonal_differences,
+    add_causal_temporal_features,
     directional_cusum,
     empirical_tail_evidence,
     feature_policy,
@@ -34,7 +35,7 @@ from .features import (
 )
 
 
-MODEL_CORE_VERSION = "4.0.0"
+MODEL_CORE_VERSION = "4.1.0"
 MODEL_IDS = (
     "rapid_residual",
     "drift_cusum",
@@ -1267,8 +1268,15 @@ def measurement_features(
     minimum_history_seconds=None,
     gap_tolerance=1.5,
     seasonal_periods=None,
+    history_windows_seconds=None,
+    lag_windows_seconds=None,
+    activity_windows_seconds=None,
+    history_metric_ids=None,
+    lag_metric_ids=None,
+    activity_metric_ids=None,
+    minimum_window_fraction=0.50,
 ):
-    """Apply catalogue transforms and optional causal self-history features."""
+    """Apply metric transforms and optional causal temporal features."""
 
     output = transform_episode(
         panel, catalogue, gap_tolerance=float(gap_tolerance)
@@ -1276,6 +1284,23 @@ def measurement_features(
     output = add_causal_seasonal_differences(
         output, catalogue, seasonal_periods or {}
     )
+    if any((
+        history_windows_seconds,
+        lag_windows_seconds,
+        activity_windows_seconds,
+    )):
+        return add_causal_temporal_features(
+            output,
+            catalogue,
+            history_windows_seconds=history_windows_seconds,
+            lag_windows_seconds=lag_windows_seconds,
+            activity_windows_seconds=activity_windows_seconds,
+            history_metric_ids=history_metric_ids,
+            lag_metric_ids=lag_metric_ids,
+            activity_metric_ids=activity_metric_ids,
+            minimum_window_fraction=float(minimum_window_fraction),
+            gap_tolerance=float(gap_tolerance),
+        )
     if history_window_seconds is None:
         return output
     if minimum_history_seconds is None:
@@ -1347,6 +1372,13 @@ def materialize_measurement_features(
     minimum_history_seconds=None,
     gap_tolerance=1.5,
     seasonal_periods=None,
+    history_windows_seconds=None,
+    lag_windows_seconds=None,
+    activity_windows_seconds=None,
+    history_metric_ids=None,
+    lag_metric_ids=None,
+    activity_metric_ids=None,
+    minimum_window_fraction=0.50,
     score_start=None,
     score_end=None,
     progress_every=25,
@@ -1377,6 +1409,13 @@ def materialize_measurement_features(
                 minimum_history_seconds=minimum_history_seconds,
                 gap_tolerance=gap_tolerance,
                 seasonal_periods=seasonal_periods,
+                history_windows_seconds=history_windows_seconds,
+                lag_windows_seconds=lag_windows_seconds,
+                activity_windows_seconds=activity_windows_seconds,
+                history_metric_ids=history_metric_ids,
+                lag_metric_ids=lag_metric_ids,
+                activity_metric_ids=activity_metric_ids,
+                minimum_window_fraction=minimum_window_fraction,
             )
             times = pd.to_datetime(features["event_ts"], utc=True)
             if score_start is not None:
@@ -1525,6 +1564,38 @@ def _residual_frame(bundle, frame):
     return (values - centre) / scale
 
 
+def _is_temporal_feature(name):
+    """Identify features added by the multi-timescale temporal layer."""
+
+    return any(
+        marker in str(name)
+        for marker in ("__history_", "__lag_", "__rate_", "__sum_")
+    )
+
+
+def _fit_isolation_forest(
+    values,
+    *,
+    trees,
+    maximum_samples,
+    maximum_features,
+    random_seed,
+):
+    """Fit one reproducible Isolation Forest with bounded tree samples."""
+
+    maximum_samples = min(int(maximum_samples), len(values))
+    if maximum_samples < 2:
+        raise ValueError("Isolation Forest requires at least two rows")
+    return IsolationForest(
+        n_estimators=int(trees),
+        max_samples=maximum_samples,
+        max_features=maximum_features,
+        contamination="auto",
+        random_state=int(random_seed),
+        n_jobs=-1,
+    ).fit(values)
+
+
 def fit_residual_bundle(
     calibration_features,
     *,
@@ -1536,6 +1607,8 @@ def fit_residual_bundle(
     maximum_training_rows=150_000,
     random_seed=42,
     isolation_trees=200,
+    isolation_max_samples=1024,
+    isolation_max_features=1.0,
     fit_multivariate=False,
 ):
     """Fit frozen robust references and optional residual ML models."""
@@ -1548,11 +1621,24 @@ def fit_residual_bundle(
         column for column in sample
         if column not in IDENTITY_COLUMNS and not column.endswith("__clipped")
     ]
-    usable = [
-        column for column in candidates
-        if sample[column].notna().mean() >= 0.20
-        and sample[column].dropna().nunique() > 1
-    ]
+    feature_audit = pd.DataFrame({
+        "feature": candidates,
+        "available_fraction": [sample[name].notna().mean() for name in candidates],
+        "unique_values": [sample[name].dropna().nunique() for name in candidates],
+    })
+    feature_audit["retained"] = (
+        feature_audit["available_fraction"].ge(0.20)
+        & feature_audit["unique_values"].gt(1)
+    )
+    feature_audit["reason"] = np.select(
+        [
+            feature_audit["available_fraction"].lt(0.20),
+            feature_audit["unique_values"].le(1),
+        ],
+        ["less_than_20_percent_available", "constant_or_empty"],
+        default="retained",
+    )
+    usable = feature_audit.loc[feature_audit["retained"], "feature"].tolist()
     if not usable:
         raise ValueError("No usable calibration features")
 
@@ -1640,9 +1726,12 @@ def fit_residual_bundle(
         "training_rows": len(sample),
         "random_seed": int(random_seed),
         "isolation_trees": int(isolation_trees),
+        "isolation_max_samples": int(isolation_max_samples),
+        "isolation_max_features": isolation_max_features,
         "fit_multivariate": bool(fit_multivariate),
         "feature_directions": directions,
         "minimum_scales": scale_floors,
+        "feature_audit": feature_audit,
     }
     residuals = _residual_frame(bundle, sample[[*IDENTITY_COLUMNS, *usable]])
     clean = residuals.fillna(0).clip(-50, 50)
@@ -1659,15 +1748,31 @@ def fit_residual_bundle(
         cumulative = np.cumsum(pca.explained_variance_ratio_)
         keep = min(int(np.searchsorted(cumulative, 0.90) + 1), component_limit)
         bundle["pca"] = PCA(n_components=keep, svd_solver="full").fit(clean)
-        bundle["isolation_forest"] = IsolationForest(
-            n_estimators=int(isolation_trees),
-            max_samples=min(1024, len(clean)),
-            contamination="auto",
-            random_state=int(random_seed),
-            n_jobs=-1,
-        ).fit(clean)
+        base_features = [name for name in usable if not _is_temporal_feature(name)]
+        if len(base_features) < 2:
+            raise ValueError("The base Isolation Forest needs at least two features")
+        bundle["isolation_base_features"] = base_features
+        bundle["isolation_forest_base"] = _fit_isolation_forest(
+            clean[base_features],
+            trees=isolation_trees,
+            maximum_samples=isolation_max_samples,
+            maximum_features=isolation_max_features,
+            random_seed=random_seed,
+        )
+        bundle["isolation_forest_temporal"] = _fit_isolation_forest(
+            clean,
+            trees=isolation_trees,
+            maximum_samples=isolation_max_samples,
+            maximum_features=isolation_max_features,
+            random_seed=random_seed,
+        )
+        # Compatibility for model cards written before the variants were named.
+        bundle["isolation_forest"] = bundle["isolation_forest_temporal"]
     else:
         bundle["pca"] = None
+        bundle["isolation_base_features"] = []
+        bundle["isolation_forest_base"] = None
+        bundle["isolation_forest_temporal"] = None
         bundle["isolation_forest"] = None
     return bundle
 
@@ -1765,16 +1870,33 @@ def score_residual_episode(
 
     clean = residuals.fillna(0).clip(-50, 50)
     pca_values = np.full(len(features), np.nan)
-    isolation_values = np.full(len(features), np.nan)
+    isolation_base_values = np.full(len(features), np.nan)
+    isolation_temporal_values = np.full(len(features), np.nan)
     pca_leading = np.full(len(features), None, dtype=object)
-    isolation_leading = rapid_leading.copy()
+    isolation_base_leading = rapid_leading.copy()
+    isolation_temporal_leading = rapid_leading.copy()
     if bundle["pca"] is not None:
         projected = bundle["pca"].transform(clean)
         reconstruction = bundle["pca"].inverse_transform(projected)
         error = (clean.to_numpy() - reconstruction) ** 2
         pca_values = error.mean(axis=1)
         pca_leading = np.asarray(bundle["feature_columns"], dtype=object)[error.argmax(axis=1)]
-        isolation_values = -bundle["isolation_forest"].decision_function(clean)
+        temporal_model = bundle.get(
+            "isolation_forest_temporal", bundle.get("isolation_forest")
+        )
+        if temporal_model is not None:
+            isolation_temporal_values = -temporal_model.decision_function(clean)
+            isolation_temporal_leading = np.asarray(
+                bundle["feature_columns"], dtype=object
+            )[np.abs(clean.to_numpy()).argmax(axis=1)]
+        base_model = bundle.get("isolation_forest_base")
+        base_features = bundle.get("isolation_base_features", [])
+        if base_model is not None and base_features:
+            base_values = clean[base_features]
+            isolation_base_values = -base_model.decision_function(base_values)
+            isolation_base_leading = np.asarray(base_features, dtype=object)[
+                np.abs(base_values.to_numpy()).argmax(axis=1)
+            ]
 
     output = features[IDENTITY_COLUMNS].copy()
     output["available_features"] = available.to_numpy()
@@ -1784,7 +1906,12 @@ def score_residual_episode(
         "drift_cusum": (drift_values, drift_leading),
         "dispersion_change": (dispersion_values, dispersion_leading),
         "pca_spe": (pca_values, pca_leading),
-        "isolation_forest": (isolation_values, isolation_leading),
+        "isolation_forest_base": (
+            isolation_base_values, isolation_base_leading,
+        ),
+        "isolation_forest_temporal": (
+            isolation_temporal_values, isolation_temporal_leading,
+        ),
     }
     for channel, (values, leading) in channels.items():
         output[channel] = np.where(ready, values, np.nan)
@@ -2131,6 +2258,117 @@ def score_topology_file(
     return destination
 
 
+def fit_contextual_isolation_forest(
+    score_path,
+    candidate_features,
+    *,
+    maximum_training_rows=150_000,
+    random_seed=42,
+    trees=300,
+    maximum_samples=2048,
+    maximum_features=0.75,
+):
+    """Fit an Isolation Forest to self and topology evidence together."""
+
+    available = set(pq.ParquetFile(score_path).schema_arrow.names)
+    candidates = [name for name in candidate_features if name in available]
+    if len(candidates) < 2:
+        raise ValueError("Contextual Isolation Forest needs at least two inputs")
+    columns = ", ".join(_sql_identifier(name) for name in candidates)
+    source = _sql_literal(str(Path(score_path)))
+    with duckdb.connect() as connection:
+        sample = connection.execute(f"""
+            SELECT {columns}
+            FROM read_parquet({source})
+            USING SAMPLE reservoir({int(maximum_training_rows)} ROWS)
+            REPEATABLE ({int(random_seed)})
+        """).df().replace([np.inf, -np.inf], np.nan)
+
+    audit = pd.DataFrame({
+        "feature": candidates,
+        "available_fraction": [sample[name].notna().mean() for name in candidates],
+        "unique_values": [sample[name].dropna().nunique() for name in candidates],
+    })
+    audit["retained"] = (
+        audit["available_fraction"].ge(0.50)
+        & audit["unique_values"].gt(1)
+    )
+    retained = audit.loc[audit["retained"], "feature"].tolist()
+    if len(retained) < 2:
+        raise ValueError("Contextual evidence has fewer than two usable inputs")
+
+    imputer = SimpleImputer(strategy="median")
+    scaler = RobustScaler(quantile_range=(25, 75))
+    values = imputer.fit_transform(sample[retained])
+    scaled = np.clip(
+        scaler.fit_transform(values), -SCALED_FEATURE_CAP, SCALED_FEATURE_CAP
+    )
+    model = _fit_isolation_forest(
+        scaled,
+        trees=trees,
+        maximum_samples=maximum_samples,
+        maximum_features=maximum_features,
+        random_seed=random_seed,
+    )
+    return {
+        "feature_columns": retained,
+        "feature_audit": audit,
+        "imputer": imputer,
+        "scaler": scaler,
+        "model": model,
+        "scaled_feature_cap": SCALED_FEATURE_CAP,
+        "training_rows": len(sample),
+        "random_seed": int(random_seed),
+    }
+
+
+def append_contextual_isolation_scores(
+    bundle,
+    score_path,
+    destination,
+    *,
+    batch_rows=100_000,
+):
+    """Append the contextual Isolation Forest channel to a score file."""
+
+    score_path, destination = Path(score_path), Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    parquet = pq.ParquetFile(score_path)
+    writer = None
+    names = np.asarray(bundle["feature_columns"], dtype=object)
+    try:
+        for batch in parquet.iter_batches(batch_size=int(batch_rows)):
+            frame = batch.to_pandas()
+            clean = frame[bundle["feature_columns"]].replace(
+                [np.inf, -np.inf], np.nan
+            )
+            values = bundle["imputer"].transform(clean)
+            scaled = bundle["scaler"].transform(values)
+            scaled = np.clip(
+                scaled,
+                -float(bundle["scaled_feature_cap"]),
+                float(bundle["scaled_feature_cap"]),
+            )
+            frame["isolation_forest_contextual"] = -bundle[
+                "model"
+            ].decision_function(scaled)
+            frame["isolation_forest_contextual__leading_feature"] = names[
+                np.abs(scaled).argmax(axis=1)
+            ]
+            table = pa.Table.from_pandas(frame, preserve_index=False)
+            if writer is None:
+                writer = pq.ParquetWriter(
+                    destination, table.schema, compression="zstd"
+                )
+            writer.write_table(table)
+    finally:
+        if writer is not None:
+            writer.close()
+    if writer is None:
+        raise ValueError("Score file produced no contextual model rows")
+    return destination
+
+
 def merge_score_files(self_scores, topology_scores, destination):
     """Add optional topology channels to the ordinary entity score file."""
 
@@ -2172,6 +2410,7 @@ def score_partition_file(
     resolved_policy,
     topology=None,
     topology_reference=None,
+    contextual_isolation_bundle=None,
 ):
     """Apply one frozen scoring procedure to any feature partition.
 
@@ -2213,8 +2452,20 @@ def score_partition_file(
             min_group_entities=resolved_policy["min_group_entities"],
             min_group_fraction=resolved_policy["min_group_fraction"],
         )
-        merge_score_files(self_scores, topology_scores, destination)
+        combined = (
+            workspace / f"{stem}__combined.parquet"
+            if contextual_isolation_bundle is not None else destination
+        )
+        merge_score_files(self_scores, topology_scores, combined)
+        if contextual_isolation_bundle is not None:
+            append_contextual_isolation_scores(
+                contextual_isolation_bundle, combined, destination
+            )
     else:
+        if contextual_isolation_bundle is not None:
+            raise ValueError(
+                "Contextual Isolation Forest requires frozen topology evidence"
+            )
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(self_scores, destination)
 

@@ -51,8 +51,8 @@ silently overwritten. After changing data, configuration, or code, set a new
 stage run ID—for example:
 
 ```bash
-export PON_FEATURE_RUN_ID=synthetic_pon_features_v3
-export PON_MODEL_RUN_ID=synthetic_pon_models_v3
+export PON_FEATURE_RUN_ID=synthetic_pon_features_v4
+export PON_MODEL_RUN_ID=synthetic_pon_models_v4
 ```
 
 Keep downstream run IDs aligned with the inputs printed at the top of each
