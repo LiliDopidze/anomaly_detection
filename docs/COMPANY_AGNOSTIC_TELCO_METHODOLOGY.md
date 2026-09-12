@@ -121,9 +121,13 @@ families are enabled only for metrics where they have a clear interpretation.
 Missingness and clipping remain explicit data-quality evidence; they are not
 silently converted into equipment-health values.
 
-Peer residuals compare one ONT against contemporaneous self residuals of its
-eligible peers. Their null scale is calibrated by topology level and group-size
-band; very small peer groups are disabled.
+Peer residuals compare one entity against contemporaneous self residuals of
+its eligible peers. Only current-state features from metrics explicitly marked
+``peer_eligible`` by the dataset adapter enter cross-entity scoring; temporal
+lags stay in the self-history and multivariate channels. Their null scale is
+calibrated by topology level and group-size band, and very small peer groups
+are disabled. This lets each operator supply its own identifiers and hierarchy
+without changing the detector.
 
 Group features describe common movement through the median descendant
 residual, affected fraction, available fraction, and the physical scope that

@@ -24,28 +24,6 @@ peer_policy:
   preferred_levels: [splitter_l2, pon_port, splitter_l1, olt]
   minimum_valid_peers: 7
   minimum_entity_coverage: 0.80
-  stable_group_scale_from: 15
 group_policy:
   minimum_entities: 3
   minimum_available_fraction: 0.50
-  physical_levels: [splitter_l2, splitter_l1, pon_port, olt]
-  # Cross-entity evidence uses a compact set of current-state signals. Each
-  # dataset needs its own reviewed registry because metric IDs are pack-owned.
-  residual_features_by_dataset:
-    synthetic_pon:
-      - optical.rx_power__level
-      - optical.olt_rx_power__level
-      - optical.tx_power__level
-      - equipment.temperature__level
-      - optical.bias_current__level
-      - equipment.voltage__level
-      - optical.ber__nonzero
-      - optical.ber__positive_log10
-      - optical.fec_count__level
-      - ethernet.crc_errors__nonzero
-      - ethernet.crc_errors__positive_log1p
-      - equipment.uptime__reset
-      - equipment.reboot_count__increment
-      - service.throughput__level
-identifiability:
-  equivalent_descendant_sets_are_ambiguous: true

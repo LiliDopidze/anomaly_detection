@@ -361,6 +361,10 @@ def test_peer_and_common_mode_scores_use_calibration_topology(tmp_path):
     )
     scores = pd.read_parquet(score_path)
 
+    assert len(scores) == len(residuals)
+    assert not scores.duplicated([
+        "event_ts", "entity_id", "episode_id",
+    ]).any()
     assert scores["peer_deviation"].notna().all()
     assert scores["group_common_mode"].notna().all()
     assert set(scores["peer_valid_peers"]) == {7}
