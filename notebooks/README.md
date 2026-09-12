@@ -68,9 +68,11 @@ local scratch disk is required; do not point it at Google Drive.
 
 Notebook 06 reuses the immutable v4 feature run. It needs at least 4 GB of
 local scratch space by default, keeps DuckDB spill files under that scratch
-directory, and deletes residual and topology intermediates immediately after
-use. If a previous Colab attempt filled `/content`, restart the runtime before
-rerunning Notebook 06; Notebook 05 does not need to be rerun.
+directory, and uses a conservative 1 GB / one-thread DuckDB default for Colab.
+Topology calculation and final joins run as separate bounded stages, and their
+intermediate files are deleted immediately after use. If a previous Colab
+attempt filled `/content`, restart the runtime before rerunning Notebook 06;
+Notebook 05 does not need to be rerun.
 
 ## Public Telecom qualification
 

@@ -38,7 +38,7 @@ from .features import (
 )
 
 
-MODEL_CORE_VERSION = "4.3.0"
+MODEL_CORE_VERSION = "4.3.1"
 MODEL_IDS = (
     "rapid_residual",
     "drift_cusum",
@@ -70,8 +70,8 @@ def _model_duckdb(work_directory=None):
         or os.getenv("TELCO_WORK_ROOT", tempfile.gettempdir())
     )
     parent.mkdir(parents=True, exist_ok=True)
-    memory_limit = os.getenv("TELCO_MODEL_DUCKDB_MEMORY_LIMIT", "2GB")
-    threads = int(os.getenv("TELCO_MODEL_DUCKDB_THREADS", "2"))
+    memory_limit = os.getenv("TELCO_MODEL_DUCKDB_MEMORY_LIMIT", "1GB")
+    threads = int(os.getenv("TELCO_MODEL_DUCKDB_THREADS", "1"))
     with tempfile.TemporaryDirectory(
         dir=parent, prefix="telco-model-duckdb-"
     ) as spill_directory:
@@ -2103,6 +2103,14 @@ def _model_topology(topology):
         ["entity_id", "group_type", "group_id"]
     ].astype(str)
     physical = physical.drop_duplicates()
+    membership_rows = physical.groupby(
+        ["entity_id", "group_type"], sort=False
+    ).size()
+    if membership_rows.gt(1).any():
+        raise ValueError(
+            "Topology scoring requires one effective membership per entity "
+            "and group type. Materialise time-valid memberships before scoring."
+        )
     physical["group_size"] = physical.groupby(
         ["group_type", "group_id"]
     )["entity_id"].transform("nunique")
@@ -2262,6 +2270,79 @@ def _chosen_value_case(feature_specs, value_suffix, leading_column="score"):
     return "CASE " + " ".join(cases) + " ELSE NULL END"
 
 
+def _scope_value_case(scope_specs, value_suffix, leading_column="score"):
+    """Select metadata from the first maximum-scoring topology scope."""
+
+    cases = []
+    for group_type, alias in scope_specs:
+        score = _sql_identifier(alias + "__score")
+        value = (
+            _sql_literal(group_type)
+            if value_suffix is None
+            else _sql_identifier(alias + value_suffix)
+        )
+        cases.append(f"WHEN {score} = {leading_column} THEN {value}")
+    return "CASE " + " ".join(cases) + " ELSE NULL END"
+
+
+def _group_entity_best_sql(residual_source, scope_specs):
+    """Choose the strongest physical scope without a long entity expansion."""
+
+    joins = []
+    values = []
+    for group_type, alias in scope_specs:
+        joins.append(f"""
+            LEFT JOIN topology_group_feature_best AS {alias}
+              ON {alias}.group_type = {_sql_literal(group_type)}
+             AND {alias}.group_id = m.{_sql_identifier(alias + '__group_id')}
+             AND {alias}.event_ts = i.event_ts
+        """)
+        for source_name, suffix in (
+            ("score", "__score"),
+            ("leading_feature", "__leading_feature"),
+            ("group_id", "__group_id"),
+            ("available_count", "__available_count"),
+            ("available_fraction", "__available_fraction"),
+            ("affected_fraction", "__affected_fraction"),
+        ):
+            values.append(
+                f"{alias}.{source_name} AS {_sql_identifier(alias + suffix)}"
+            )
+
+    scores = [
+        _sql_identifier(alias + "__score") for _, alias in scope_specs
+    ]
+    best_score = f"greatest({', '.join(scores)})"
+    return f"""
+        WITH identities AS (
+            SELECT event_ts, CAST(entity_id AS VARCHAR) AS entity_id,
+                   CAST(episode_id AS VARCHAR) AS episode_id
+            FROM read_parquet({residual_source})
+        ), joined AS (
+            SELECT i.*, {', '.join(values)}
+            FROM identities AS i
+            LEFT JOIN model_entity_topology AS m USING (entity_id)
+            {' '.join(joins)}
+        ), best AS (
+            SELECT *, {best_score} AS score
+            FROM joined
+        )
+        SELECT event_ts, entity_id, episode_id, score,
+               {_scope_value_case(scope_specs, '__leading_feature')}
+                   AS leading_feature,
+               {_scope_value_case(scope_specs, None)} AS group_type,
+               {_scope_value_case(scope_specs, '__group_id')} AS group_id,
+               {_scope_value_case(scope_specs, '__available_count')}
+                   AS available_count,
+               {_scope_value_case(scope_specs, '__available_fraction')}
+                   AS available_fraction,
+               {_scope_value_case(scope_specs, '__affected_fraction')}
+                   AS affected_fraction
+        FROM best
+        WHERE score IS NOT NULL
+    """
+
+
 def fit_topology_reference(
     calibration_residuals,
     topology,
@@ -2371,12 +2452,40 @@ def score_topology_file(
     """Score eligible peer and common-mode evidence from frozen residuals.
 
     Wide intermediate tables keep memory proportional to source rows rather
-    than source rows multiplied by the number of features.
+    than source rows multiplied by features or topology levels. Compact peer
+    and group evidence is written between stages so each DuckDB connection can
+    release its working memory before the next join.
     """
 
     physical = _model_topology(topology)
+    known_types = set(physical["group_type"])
+    if peer_group_type not in known_types:
+        raise ValueError(f"Unknown peer group type: {peer_group_type}")
+    group_types = sorted({
+        name for name in group_types if name in known_types
+    })
+    if not group_types:
+        raise ValueError("No requested common-mode topology level is available")
     features = sorted(reference["leading_feature"].astype(str).unique())
     feature_specs = _topology_feature_specs(features)
+    scope_specs = [
+        (group_type, f"scope_{index:02d}")
+        for index, group_type in enumerate(group_types)
+    ]
+    membership_columns = {
+        group_type: alias + "__group_id"
+        for group_type, alias in scope_specs
+    }
+    entity_topology = (
+        physical.loc[
+            physical["group_type"].isin(group_types),
+            ["entity_id", "group_type", "group_id"],
+        ]
+        .pivot(index="entity_id", columns="group_type", values="group_id")
+        .reindex(columns=group_types)
+        .rename(columns=membership_columns)
+        .reset_index()
+    )
     source = _sql_literal(str(Path(residuals_path)))
     peer_sql = _peer_wide_sql(source, feature_specs, peer_group_type)
     group_sql = _group_wide_sql(source, feature_specs, group_types)
@@ -2449,109 +2558,115 @@ def score_topology_file(
         WHERE score IS NOT NULL
     """
 
-    with _model_duckdb(destination.parent) as connection:
-        connection.register("model_topology", physical)
+    with tempfile.TemporaryDirectory(
+        dir=destination.parent, prefix="topology-evidence-"
+    ) as evidence_name:
+        evidence_root = Path(evidence_name)
+        peer_path = evidence_root / "peer.parquet"
+        group_path = evidence_root / "group.parquet"
+        peer_joined_path = evidence_root / "identities_with_peer.parquet"
 
-        started = time.perf_counter()
-        print("    topology scoring: peer evidence", flush=True)
-        connection.execute(
-            f"CREATE TEMP TABLE topology_peer_wide AS {peer_sql}"
-        )
-        connection.execute(
-            f"CREATE TEMP TABLE topology_peer_best AS {peer_best_sql}"
-        )
-        connection.execute("DROP TABLE topology_peer_wide")
-        print(
-            f"    topology scoring: peer complete in "
-            f"{(time.perf_counter() - started) / 60:.1f} minutes",
-            flush=True,
-        )
+        with _model_duckdb(destination.parent) as connection:
+            connection.register("model_topology", physical)
 
-        started = time.perf_counter()
-        print("    topology scoring: group evidence", flush=True)
-        connection.execute(
-            f"CREATE TEMP TABLE topology_group_wide AS {group_sql}"
-        )
-        connection.execute(
-            f"CREATE TEMP TABLE topology_group_feature_best "
-            f"AS {group_feature_best_sql}"
-        )
-        connection.execute("DROP TABLE topology_group_wide")
-        print(
-            f"    topology scoring: group complete in "
-            f"{(time.perf_counter() - started) / 60:.1f} minutes",
-            flush=True,
-        )
-
-        output_sql = f"""
-            WITH identities AS (
-                SELECT event_ts, CAST(entity_id AS VARCHAR) AS entity_id,
-                       CAST(episode_id AS VARCHAR) AS episode_id
-                FROM read_parquet({source})
-            ),
-            group_entities AS (
-                SELECT i.event_ts, i.entity_id, i.episode_id,
-                       g.* EXCLUDE(event_ts)
-                FROM topology_group_feature_best AS g
-                JOIN model_topology AS t
-                  ON g.group_type = t.group_type AND g.group_id = t.group_id
-                JOIN identities AS i
-                  ON i.entity_id = t.entity_id AND i.event_ts = g.event_ts
-            ),
-            group_best AS (
-                SELECT event_ts, entity_id, episode_id,
-                       max(score) AS score,
-                       arg_max(
-                           leading_feature, score
-                           ORDER BY group_type ASC, leading_feature ASC
-                       ) AS leading_feature,
-                       arg_max(
-                           group_type, score
-                           ORDER BY group_type ASC, leading_feature ASC
-                       ) AS group_type,
-                       arg_max(
-                           group_id, score
-                           ORDER BY group_type ASC, leading_feature ASC
-                       ) AS group_id,
-                       arg_max(
-                           available_count, score
-                           ORDER BY group_type ASC, leading_feature ASC
-                       ) AS available_count,
-                       arg_max(
-                           available_fraction, score
-                           ORDER BY group_type ASC, leading_feature ASC
-                       ) AS available_fraction,
-                       arg_max(
-                           affected_fraction, score
-                           ORDER BY group_type ASC, leading_feature ASC
-                       ) AS affected_fraction
-                FROM group_entities
-                GROUP BY event_ts, entity_id, episode_id
+            started = time.perf_counter()
+            print("    topology scoring: peer evidence", flush=True)
+            connection.execute(
+                f"CREATE TEMP TABLE topology_peer_wide AS {peer_sql}"
             )
-            SELECT i.*,
-                   p.score AS peer_deviation,
-                   p.leading_feature AS peer_deviation__leading_feature,
-                   p.available_count AS peer_valid_peers,
-                   p.size_band AS peer_size_band,
-                   g.score AS group_common_mode,
-                   g.leading_feature AS group_common_mode__leading_feature,
-                   g.group_type AS group_common_mode__scope_type,
-                   g.group_id AS group_common_mode__scope_id,
-                   g.available_count AS group_valid_entities,
-                   g.available_fraction AS group_available_fraction,
-                   g.affected_fraction AS group_common_mode__affected_fraction
-            FROM identities AS i
-            LEFT JOIN topology_peer_best AS p
-              ON i.event_ts = p.event_ts AND i.entity_id = p.entity_id
-             AND i.episode_id = p.episode_id
-            LEFT JOIN group_best AS g
-              ON i.event_ts = g.event_ts AND i.entity_id = g.entity_id
-             AND i.episode_id = g.episode_id
-        """
-        connection.execute(
-            f"COPY ({output_sql}) TO {_sql_literal(str(destination))} "
-            "(FORMAT PARQUET, COMPRESSION ZSTD)"
-        )
+            connection.execute(
+                f"CREATE TEMP TABLE topology_peer_best AS {peer_best_sql}"
+            )
+            connection.execute("DROP TABLE topology_peer_wide")
+            connection.execute(
+                f"COPY topology_peer_best TO {_sql_literal(str(peer_path))} "
+                "(FORMAT PARQUET, COMPRESSION ZSTD)"
+            )
+            connection.execute("DROP TABLE topology_peer_best")
+            print(
+                f"    topology scoring: peer complete in "
+                f"{(time.perf_counter() - started) / 60:.1f} minutes",
+                flush=True,
+            )
+
+            started = time.perf_counter()
+            print("    topology scoring: group evidence", flush=True)
+            connection.execute(
+                f"CREATE TEMP TABLE topology_group_wide AS {group_sql}"
+            )
+            connection.execute(
+                f"CREATE TEMP TABLE topology_group_feature_best "
+                f"AS {group_feature_best_sql}"
+            )
+            connection.execute("DROP TABLE topology_group_wide")
+            connection.register("model_entity_topology", entity_topology)
+            group_best_sql = _group_entity_best_sql(source, scope_specs)
+            connection.execute(
+                f"CREATE TEMP TABLE topology_group_best AS {group_best_sql}"
+            )
+            connection.execute("DROP TABLE topology_group_feature_best")
+            connection.execute(
+                f"COPY topology_group_best TO {_sql_literal(str(group_path))} "
+                "(FORMAT PARQUET, COMPRESSION ZSTD)"
+            )
+            print(
+                f"    topology scoring: group complete in "
+                f"{(time.perf_counter() - started) / 60:.1f} minutes",
+                flush=True,
+            )
+
+        # Each merge has one small hash side. Closing the calculation
+        # connection first prevents earlier window and aggregate state from
+        # competing with the final Parquet write for memory.
+        peer_source = _sql_literal(str(peer_path))
+        group_source = _sql_literal(str(group_path))
+        peer_joined = _sql_literal(str(peer_joined_path))
+        with _model_duckdb(destination.parent) as connection:
+            started = time.perf_counter()
+            print("    topology scoring: bounded final merge", flush=True)
+            connection.execute(f"""
+                COPY (
+                    SELECT i.event_ts,
+                           CAST(i.entity_id AS VARCHAR) AS entity_id,
+                           CAST(i.episode_id AS VARCHAR) AS episode_id,
+                           p.score AS peer_deviation,
+                           p.leading_feature
+                               AS peer_deviation__leading_feature,
+                           p.available_count AS peer_valid_peers,
+                           p.size_band AS peer_size_band
+                    FROM read_parquet({source}) AS i
+                    LEFT JOIN read_parquet({peer_source}) AS p
+                      ON i.event_ts = p.event_ts
+                     AND CAST(i.entity_id AS VARCHAR) = p.entity_id
+                     AND CAST(i.episode_id AS VARCHAR) = p.episode_id
+                ) TO {peer_joined}
+                (FORMAT PARQUET, COMPRESSION ZSTD)
+            """)
+            connection.execute(f"""
+                COPY (
+                    SELECT p.*,
+                           g.score AS group_common_mode,
+                           g.leading_feature
+                               AS group_common_mode__leading_feature,
+                           g.group_type AS group_common_mode__scope_type,
+                           g.group_id AS group_common_mode__scope_id,
+                           g.available_count AS group_valid_entities,
+                           g.available_fraction AS group_available_fraction,
+                           g.affected_fraction
+                               AS group_common_mode__affected_fraction
+                    FROM read_parquet({peer_joined}) AS p
+                    LEFT JOIN read_parquet({group_source}) AS g
+                      ON p.event_ts = g.event_ts
+                     AND CAST(p.entity_id AS VARCHAR) = g.entity_id
+                     AND CAST(p.episode_id AS VARCHAR) = g.episode_id
+                ) TO {_sql_literal(str(destination))}
+                (FORMAT PARQUET, COMPRESSION ZSTD)
+            """)
+            print(
+                f"    topology scoring: merge complete in "
+                f"{(time.perf_counter() - started) / 60:.1f} minutes",
+                flush=True,
+            )
     return destination
 
 
