@@ -14,6 +14,7 @@ from telco_anomaly.detectors import (
     calibration_thresholds,
     fit_contextual_isolation_forest,
     fit_residual_bundle,
+    merge_score_files,
     split_feature_file_by_time,
     fit_topology_reference,
     score_topology_file,
@@ -38,6 +39,24 @@ def topology_fixture(entities):
     return pd.DataFrame(
         rows, columns=OPTIONAL_CORE_SCHEMAS["topology_memberships"]
     )
+
+
+def topology_score_fixture(keys):
+    """Build the fixed topology-score interface for merge tests."""
+
+    frame = keys[["event_ts", "entity_id", "episode_id"]].copy()
+    frame["peer_deviation"] = np.arange(len(frame), dtype=float)
+    frame["peer_deviation__leading_feature"] = "signal__level"
+    frame["peer_valid_peers"] = 7
+    frame["peer_size_band"] = "7-14"
+    frame["group_common_mode"] = 2.0
+    frame["group_common_mode__leading_feature"] = "signal__level"
+    frame["group_common_mode__scope_type"] = "pon_port"
+    frame["group_common_mode__scope_id"] = "pon-0"
+    frame["group_valid_entities"] = 8
+    frame["group_available_fraction"] = 1.0
+    frame["group_common_mode__affected_fraction"] = 0.5
+    return frame
 
 
 def test_calibration_feature_split_is_chronological_and_complete(tmp_path):
@@ -378,6 +397,88 @@ def test_peer_and_common_mode_scores_use_calibration_topology(tmp_path):
     assert scores["group_common_mode"].notna().all()
     assert set(scores["peer_valid_peers"]) == {7}
     assert not list(tmp_path.glob("topology-evidence-*"))
+
+
+def test_score_merge_is_low_memory_ordered_and_one_to_one(tmp_path, monkeypatch):
+    # The previous one-query hash-join-plus-sort failed at this memory limit.
+    monkeypatch.setenv("TELCO_MODEL_DUCKDB_MEMORY_LIMIT", "48MB")
+    rows = []
+    for entity_number in reversed(range(50)):
+        entity = f"ont-{entity_number:02d}"
+        for step in reversed(range(1_500)):
+            rows.append((
+                BASE + pd.Timedelta(minutes=15 * step),
+                entity,
+                f"{entity}::episode-1",
+                float(entity_number + step),
+            ))
+    self_scores = pd.DataFrame(rows, columns=[
+        "event_ts", "entity_id", "episode_id", "rapid_residual",
+    ])
+    topology_scores = topology_score_fixture(self_scores)
+    expected = self_scores.merge(
+        topology_scores, on=["event_ts", "entity_id", "episode_id"]
+    ).sort_values(["entity_id", "episode_id", "event_ts"]).reset_index(drop=True)
+
+    self_path = tmp_path / "self.parquet"
+    topology_path = tmp_path / "topology.parquet"
+    destination = tmp_path / "combined.parquet"
+    self_scores.sample(frac=1, random_state=1).to_parquet(self_path, index=False)
+    topology_scores.sample(frac=1, random_state=2).to_parquet(
+        topology_path, index=False
+    )
+
+    merge_score_files(self_path, topology_path, destination)
+    result = pd.read_parquet(destination)
+
+    pd.testing.assert_frame_equal(result, expected, check_dtype=False)
+    assert not list(tmp_path.glob("score-merge-*"))
+
+
+def test_score_merge_rejects_duplicate_topology_keys_atomically(tmp_path):
+    self_scores = pd.DataFrame({
+        "event_ts": [BASE],
+        "entity_id": ["ont-01"],
+        "episode_id": ["ont-01::episode-1"],
+        "rapid_residual": [1.0],
+    })
+    topology_scores = topology_score_fixture(pd.concat(
+        [self_scores, self_scores], ignore_index=True
+    ))
+    self_path = tmp_path / "self.parquet"
+    topology_path = tmp_path / "topology.parquet"
+    destination = tmp_path / "combined.parquet"
+    self_scores.to_parquet(self_path, index=False)
+    topology_scores.to_parquet(topology_path, index=False)
+
+    with np.testing.assert_raises_regex(ValueError, "not one-to-one"):
+        merge_score_files(self_path, topology_path, destination)
+
+    assert not destination.exists()
+    assert not list(tmp_path.glob("score-merge-*"))
+
+
+def test_score_merge_rejects_missing_topology_keys_atomically(tmp_path):
+    self_scores = pd.DataFrame({
+        "event_ts": [BASE, BASE + pd.Timedelta(minutes=15)],
+        "entity_id": ["ont-01", "ont-01"],
+        "episode_id": ["ont-01::episode-1", "ont-01::episode-1"],
+        "rapid_residual": [1.0, 2.0],
+    })
+    topology_keys = self_scores.copy()
+    topology_keys.loc[1, "event_ts"] = BASE + pd.Timedelta(minutes=30)
+    topology_scores = topology_score_fixture(topology_keys)
+    self_path = tmp_path / "self.parquet"
+    topology_path = tmp_path / "topology.parquet"
+    destination = tmp_path / "combined.parquet"
+    self_scores.to_parquet(self_path, index=False)
+    topology_scores.to_parquet(topology_path, index=False)
+
+    with np.testing.assert_raises_regex(ValueError, "no topology match"):
+        merge_score_files(self_path, topology_path, destination)
+
+    assert not destination.exists()
+    assert not list(tmp_path.glob("score-merge-*"))
 
 
 def test_topology_scoring_rejects_multiple_effective_memberships(tmp_path):

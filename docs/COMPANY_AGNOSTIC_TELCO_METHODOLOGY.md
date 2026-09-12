@@ -3,7 +3,7 @@
 | Document field | Value |
 |---|---|
 | Revision | 12 September 2026 |
-| Implementation baseline | `SPEC-CORE 1.0.0`, `SPEC-EVAL 1.0.0`, pack interface `1.0.0`, detector core `4.3.1` |
+| Implementation baseline | `SPEC-CORE 1.0.0`, `SPEC-EVAL 1.0.0`, pack interface `1.0.0`, detector core `4.3.2` |
 | Primary domain | Fixed-access PON/ONT telemetry |
 | Audience | Data scientists, statisticians, ML engineers, data engineers, Telecom SMEs, and technical reviewers |
 | Status | Research-grade implementation with production-oriented controls; an operator pilot is still required before a production-performance claim |
@@ -1541,6 +1541,8 @@ notebook patterns can exhaust Colab memory or disk. The implementation uses:
 - entity/episode batching;
 - a bounded model-fit reservoir;
 - decomposed topology passes rather than one wide global join;
+- separate disk-backed join and ordered-write stages for the final
+  self/topology score merge;
 - temporary workspaces with explicit cleanup;
 - compact evidence outputs rather than repeated full score copies.
 
