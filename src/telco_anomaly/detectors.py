@@ -38,7 +38,7 @@ from .features import (
 )
 
 
-MODEL_CORE_VERSION = "4.2.0"
+MODEL_CORE_VERSION = "4.3.0"
 MODEL_IDS = (
     "rapid_residual",
     "drift_cusum",
@@ -850,6 +850,8 @@ def calibration_thresholds(
     score_columns = set(pq.ParquetFile(score_path).schema_arrow.names)
     with _model_duckdb(Path(score_path).parent) as connection:
         for model_id in model_ids:
+            started = time.perf_counter()
+            print(f"    threshold calibration: {model_id}", flush=True)
             model_column = _sql_identifier(model_id)
             scope_columns = {
                 f"{model_id}__scope_type", f"{model_id}__scope_id",
@@ -930,6 +932,12 @@ def calibration_thresholds(
                     "blocks_used": used_blocks,
                     "blocks_excluded": total_blocks - used_blocks,
                 })
+            print(
+                f"    threshold calibration: {model_id} complete "
+                f"({used_blocks}/{total_blocks} blocks used, "
+                f"{time.perf_counter() - started:.1f}s)",
+                flush=True,
+            )
     return pd.DataFrame(rows)
 
 
@@ -2101,70 +2109,157 @@ def _model_topology(topology):
     return physical
 
 
-def _long_residual_sql(residual_source, features):
-    """Read a residual file once and expose selected features in long form."""
+def _topology_feature_specs(feature_columns):
+    """Give canonical feature names short, safe SQL aliases."""
 
-    columns = ", ".join(_sql_identifier(feature) for feature in features)
-    return f"""
-        UNPIVOT (
-            SELECT event_ts, CAST(entity_id AS VARCHAR) AS entity_id,
-                   CAST(episode_id AS VARCHAR) AS episode_id, {columns}
-            FROM read_parquet({residual_source})
-        )
-        ON {columns}
-        INTO NAME leading_feature VALUE residual
-    """
+    features = sorted(dict.fromkeys(map(str, feature_columns)))
+    if not features:
+        raise ValueError("Topology scoring requires at least one feature")
+    return [(feature, f"feature_{index:02d}") for index, feature in enumerate(features)]
 
 
-def _peer_candidate_sql(residual_source, features, peer_group_type, min_peers):
-    residuals = _long_residual_sql(residual_source, features)
+def _peer_wide_sql(residual_source, feature_specs, peer_group_type):
+    """Calculate peer counts and deviations without expanding rows by feature."""
+
     window = (
-        "PARTITION BY r.event_ts, t.group_id, r.leading_feature "
+        "PARTITION BY r.event_ts, t.group_id "
         "ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING "
         "EXCLUDE CURRENT ROW"
     )
+    statistics = []
+    for feature, alias in feature_specs:
+        value = f"r.{_sql_identifier(feature)}"
+        statistics.extend([
+            f"count({value}) OVER ({window}) AS {_sql_identifier(alias + '__count')}",
+            f"abs({value} - median({value}) OVER ({window})) "
+            f"AS {_sql_identifier(alias + '__raw')}",
+        ])
     return f"""
-        SELECT * FROM (
-            SELECT r.event_ts, r.entity_id, r.episode_id,
-                   t.group_type, t.group_id, r.leading_feature,
-                   count(r.residual) OVER ({window}) AS available_count,
-                   abs(
-                       r.residual - median(r.residual) OVER ({window})
-                   ) AS raw_score,
-                   CAST(NULL AS DOUBLE) AS affected_fraction
-            FROM ({residuals}) AS r
-            JOIN model_topology AS t ON r.entity_id = t.entity_id
-            WHERE t.group_type = {_sql_literal(peer_group_type)}
-        ) AS peer
-        WHERE raw_score IS NOT NULL AND available_count >= {int(min_peers)}
+        SELECT r.event_ts, CAST(r.entity_id AS VARCHAR) AS entity_id,
+               CAST(r.episode_id AS VARCHAR) AS episode_id,
+               t.group_type, t.group_id, {', '.join(statistics)}
+        FROM read_parquet({residual_source}) AS r
+        JOIN model_topology AS t
+          ON CAST(r.entity_id AS VARCHAR) = t.entity_id
+        WHERE t.group_type = {_sql_literal(peer_group_type)}
     """
 
 
-def _group_candidate_sql(
-    residual_source,
-    features,
-    group_types,
-    min_group_entities,
-    min_group_fraction,
-):
+def _group_wide_sql(residual_source, feature_specs, group_types):
+    """Calculate common-mode statistics once per timestamp and physical group."""
+
     allowed = ", ".join(_sql_literal(value) for value in group_types)
-    residuals = _long_residual_sql(residual_source, features)
+    statistics = []
+    for feature, alias in feature_specs:
+        value = f"r.{_sql_identifier(feature)}"
+        statistics.extend([
+            f"count({value}) AS {_sql_identifier(alias + '__count')}",
+            f"abs(median({value})) * sqrt(count({value})) "
+            f"AS {_sql_identifier(alias + '__raw')}",
+            "avg(CASE "
+            f"WHEN {value} IS NULL THEN NULL "
+            f"WHEN abs({value}) >= 3 THEN 1.0 ELSE 0.0 END) "
+            f"AS {_sql_identifier(alias + '__affected')}",
+        ])
     return f"""
-        SELECT r.event_ts, t.group_type, t.group_id, r.leading_feature,
-               count(r.residual) AS available_count,
-               count(r.residual) * 1.0 / max(t.group_size)
-                   AS available_fraction,
-               abs(median(r.residual)) * sqrt(count(r.residual)) AS raw_score,
-               avg(CASE WHEN abs(r.residual) >= 3 THEN 1.0 ELSE 0.0 END)
-                   AS affected_fraction
-        FROM ({residuals}) AS r
-        JOIN model_topology AS t ON r.entity_id = t.entity_id
+        SELECT r.event_ts, t.group_type, t.group_id,
+               max(t.group_size) AS group_size, {', '.join(statistics)}
+        FROM read_parquet({residual_source}) AS r
+        JOIN model_topology AS t
+          ON CAST(r.entity_id AS VARCHAR) = t.entity_id
         WHERE t.group_type IN ({allowed})
-        GROUP BY r.event_ts, t.group_type, t.group_id, r.leading_feature
-        HAVING count(r.residual) >= {int(min_group_entities)}
-           AND count(r.residual) * 1.0 / max(t.group_size)
-               >= {float(min_group_fraction)}
+        GROUP BY r.event_ts, t.group_type, t.group_id
     """
+
+
+def _reference_summary_sql(
+    table_name,
+    feature_specs,
+    channel,
+    *,
+    minimum_count,
+    minimum_fraction=None,
+    upper_quantile,
+):
+    """Aggregate a wide topology table into calibration reference rows."""
+
+    queries = []
+    for feature, alias in feature_specs:
+        count_column = _sql_identifier(alias + "__count")
+        raw_column = _sql_identifier(alias + "__raw")
+        filters = [
+            f"{raw_column} IS NOT NULL",
+            f"{count_column} >= {int(minimum_count)}",
+        ]
+        if minimum_fraction is not None:
+            filters.append(
+                f"{count_column} * 1.0 / group_size >= {float(minimum_fraction)}"
+            )
+        size_band = _size_band_sql(count_column)
+        queries.append(f"""
+            SELECT {_sql_literal(channel)} AS channel, group_type,
+                   {size_band} AS size_band,
+                   {_sql_literal(feature)} AS leading_feature,
+                   count(*) AS reference_rows,
+                   median({raw_column}) AS centre,
+                   quantile_cont({raw_column}, {float(upper_quantile)}) AS upper
+            FROM {table_name}
+            WHERE {' AND '.join(filters)}
+            GROUP BY group_type, {size_band}
+        """)
+    return " UNION ALL ".join(queries)
+
+
+def _size_band_condition(count_column, size_band):
+    if size_band == "lt_7":
+        return f"{count_column} < 7"
+    if size_band == "7_14":
+        return f"{count_column} >= 7 AND {count_column} < 15"
+    if size_band == "15_29":
+        return f"{count_column} >= 15 AND {count_column} < 30"
+    if size_band == "30_plus":
+        return f"{count_column} >= 30"
+    raise ValueError(f"Unknown topology size band: {size_band}")
+
+
+def _normalised_topology_score(reference, channel, feature, alias):
+    """Create a CASE expression from the small frozen reference table."""
+
+    rows = reference.loc[
+        reference["channel"].eq(channel)
+        & reference["leading_feature"].astype(str).eq(str(feature))
+    ].sort_values(["group_type", "size_band"])
+    count_column = _sql_identifier(alias + "__count")
+    raw_column = _sql_identifier(alias + "__raw")
+    cases = []
+    for row in rows.itertuples(index=False):
+        condition = (
+            f"group_type = {_sql_literal(row.group_type)} AND "
+            f"{_size_band_condition(count_column, row.size_band)}"
+        )
+        score = (
+            f"greatest(0.0, ({raw_column} - {float(row.centre)!r}) "
+            f"/ {float(row.scale)!r})"
+        )
+        cases.append(f"WHEN {condition} THEN {score}")
+    if not cases:
+        return "CAST(NULL AS DOUBLE)"
+    return "CASE " + " ".join(cases) + " ELSE NULL END"
+
+
+def _chosen_value_case(feature_specs, value_suffix, leading_column="score"):
+    """Select metadata belonging to the first maximum-scoring feature."""
+
+    cases = []
+    for feature, alias in feature_specs:
+        score = _sql_identifier(alias + "__score")
+        value = (
+            _sql_literal(feature)
+            if value_suffix is None
+            else _sql_identifier(alias + value_suffix)
+        )
+        cases.append(f"WHEN {score} = {leading_column} THEN {value}")
+    return "CASE " + " ".join(cases) + " ELSE NULL END"
 
 
 def fit_topology_reference(
@@ -2180,7 +2275,11 @@ def fit_topology_reference(
     minimum_reference_rows=100,
     upper_quantile=0.995,
 ):
-    """Fit calibration-only null scales for peer and group evidence."""
+    """Fit calibration-only null scales for peer and group evidence.
+
+    Features remain in columns while peer and group statistics are calculated.
+    This avoids multiplying a large telemetry table by the feature count.
+    """
 
     physical = _model_topology(topology)
     known_types = set(physical["group_type"])
@@ -2191,35 +2290,62 @@ def fit_topology_reference(
         raise ValueError("No requested common-mode topology level is available")
 
     source = _sql_literal(str(Path(calibration_residuals)))
-    peer = _peer_candidate_sql(
-        source, feature_columns, peer_group_type, min_peers
+    feature_specs = _topology_feature_specs(feature_columns)
+    peer_sql = _peer_wide_sql(source, feature_specs, peer_group_type)
+    group_sql = _group_wide_sql(source, feature_specs, group_types)
+    peer_reference_sql = _reference_summary_sql(
+        "topology_peer_wide",
+        feature_specs,
+        "peer_deviation",
+        minimum_count=min_peers,
+        upper_quantile=upper_quantile,
     )
-    group = _group_candidate_sql(
-        source, feature_columns, group_types,
-        min_group_entities, min_group_fraction,
+    group_reference_sql = _reference_summary_sql(
+        "topology_group_wide",
+        feature_specs,
+        "group_common_mode",
+        minimum_count=min_group_entities,
+        minimum_fraction=min_group_fraction,
+        upper_quantile=upper_quantile,
     )
+
     with _model_duckdb(Path(calibration_residuals).parent) as connection:
         connection.register("model_topology", physical)
-        reference = connection.execute(f"""
-            WITH candidates AS (
-                SELECT 'peer_deviation' AS channel, group_type,
-                       {_size_band_sql('available_count')} AS size_band,
-                       leading_feature, raw_score
-                FROM ({peer})
-                UNION ALL
-                SELECT 'group_common_mode' AS channel, group_type,
-                       {_size_band_sql('available_count')} AS size_band,
-                       leading_feature, raw_score
-                FROM ({group})
-            )
-            SELECT channel, group_type, size_band, leading_feature,
-                   count(*) AS reference_rows,
-                   median(raw_score) AS centre,
-                   quantile_cont(raw_score, {float(upper_quantile)}) AS upper
-            FROM candidates
-            GROUP BY channel, group_type, size_band, leading_feature
-            ORDER BY channel, group_type, size_band, leading_feature
-        """).df()
+        started = time.perf_counter()
+        print(
+            f"    topology reference: peer statistics "
+            f"({len(feature_specs)} features)",
+            flush=True,
+        )
+        connection.execute(
+            f"CREATE TEMP TABLE topology_peer_wide AS {peer_sql}"
+        )
+        peer_reference = connection.execute(peer_reference_sql).df()
+        connection.execute("DROP TABLE topology_peer_wide")
+        print(
+            f"    topology reference: peer complete in "
+            f"{(time.perf_counter() - started) / 60:.1f} minutes",
+            flush=True,
+        )
+
+        started = time.perf_counter()
+        print("    topology reference: group statistics", flush=True)
+        connection.execute(
+            f"CREATE TEMP TABLE topology_group_wide AS {group_sql}"
+        )
+        group_reference = connection.execute(group_reference_sql).df()
+        connection.execute("DROP TABLE topology_group_wide")
+        print(
+            f"    topology reference: group complete in "
+            f"{(time.perf_counter() - started) / 60:.1f} minutes",
+            flush=True,
+        )
+
+    reference = pd.concat(
+        [peer_reference, group_reference], ignore_index=True
+    ).sort_values(
+        ["channel", "group_type", "size_band", "leading_feature"]
+    ).reset_index(drop=True)
     reference["scale"] = reference["upper"] - reference["centre"]
     reference = reference.loc[
         reference["reference_rows"].ge(int(minimum_reference_rows))
@@ -2242,71 +2368,131 @@ def score_topology_file(
     min_group_entities=3,
     min_group_fraction=0.50,
 ):
-    """Score eligible peer and common-mode evidence from frozen residuals."""
+    """Score eligible peer and common-mode evidence from frozen residuals.
+
+    Wide intermediate tables keep memory proportional to source rows rather
+    than source rows multiplied by the number of features.
+    """
 
     physical = _model_topology(topology)
     features = sorted(reference["leading_feature"].astype(str).unique())
+    feature_specs = _topology_feature_specs(features)
     source = _sql_literal(str(Path(residuals_path)))
-    peer = _peer_candidate_sql(source, features, peer_group_type, min_peers)
-    group = _group_candidate_sql(
-        source, features, group_types,
-        min_group_entities, min_group_fraction,
-    )
+    peer_sql = _peer_wide_sql(source, feature_specs, peer_group_type)
+    group_sql = _group_wide_sql(source, feature_specs, group_types)
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
 
+    peer_scores = []
+    group_scores = []
+    for feature, alias in feature_specs:
+        peer_score = _normalised_topology_score(
+            reference, "peer_deviation", feature, alias
+        )
+        peer_count = _sql_identifier(alias + "__count")
+        peer_scores.append(
+            f"CASE WHEN {peer_count} >= {int(min_peers)} "
+            f"THEN ({peer_score}) ELSE NULL END "
+            f"AS {_sql_identifier(alias + '__score')}"
+        )
+
+        group_score = _normalised_topology_score(
+            reference, "group_common_mode", feature, alias
+        )
+        group_count = _sql_identifier(alias + "__count")
+        group_scores.append(
+            f"CASE WHEN {group_count} >= {int(min_group_entities)} "
+            f"AND {group_count} * 1.0 / group_size >= {float(min_group_fraction)} "
+            f"THEN ({group_score}) ELSE NULL END "
+            f"AS {_sql_identifier(alias + '__score')}"
+        )
+
+    score_columns = [
+        _sql_identifier(alias + "__score") for _, alias in feature_specs
+    ]
+    best_score = f"greatest({', '.join(score_columns)})"
+    leading_feature = _chosen_value_case(feature_specs, None)
+    selected_count = _chosen_value_case(feature_specs, "__count")
+    selected_affected = _chosen_value_case(feature_specs, "__affected")
+
+    peer_best_sql = f"""
+        WITH normalised AS (
+            SELECT *, {', '.join(peer_scores)}
+            FROM topology_peer_wide
+        ), best AS (
+            SELECT *, {best_score} AS score
+            FROM normalised
+        ), selected AS (
+            SELECT event_ts, entity_id, episode_id, score,
+                   {leading_feature} AS leading_feature,
+                   {selected_count} AS available_count
+            FROM best
+            WHERE score IS NOT NULL
+        )
+        SELECT *, {_size_band_sql('available_count')} AS size_band
+        FROM selected
+    """
+    group_feature_best_sql = f"""
+        WITH normalised AS (
+            SELECT *, {', '.join(group_scores)}
+            FROM topology_group_wide
+        ), best AS (
+            SELECT *, {best_score} AS score
+            FROM normalised
+        )
+        SELECT event_ts, group_type, group_id, score,
+               {leading_feature} AS leading_feature,
+               {selected_count} AS available_count,
+               {selected_count} * 1.0 / group_size AS available_fraction,
+               {selected_affected} AS affected_fraction
+        FROM best
+        WHERE score IS NOT NULL
+    """
+
     with _model_duckdb(destination.parent) as connection:
         connection.register("model_topology", physical)
-        connection.register("topology_reference", reference)
-        query = f"""
+
+        started = time.perf_counter()
+        print("    topology scoring: peer evidence", flush=True)
+        connection.execute(
+            f"CREATE TEMP TABLE topology_peer_wide AS {peer_sql}"
+        )
+        connection.execute(
+            f"CREATE TEMP TABLE topology_peer_best AS {peer_best_sql}"
+        )
+        connection.execute("DROP TABLE topology_peer_wide")
+        print(
+            f"    topology scoring: peer complete in "
+            f"{(time.perf_counter() - started) / 60:.1f} minutes",
+            flush=True,
+        )
+
+        started = time.perf_counter()
+        print("    topology scoring: group evidence", flush=True)
+        connection.execute(
+            f"CREATE TEMP TABLE topology_group_wide AS {group_sql}"
+        )
+        connection.execute(
+            f"CREATE TEMP TABLE topology_group_feature_best "
+            f"AS {group_feature_best_sql}"
+        )
+        connection.execute("DROP TABLE topology_group_wide")
+        print(
+            f"    topology scoring: group complete in "
+            f"{(time.perf_counter() - started) / 60:.1f} minutes",
+            flush=True,
+        )
+
+        output_sql = f"""
             WITH identities AS (
                 SELECT event_ts, CAST(entity_id AS VARCHAR) AS entity_id,
                        CAST(episode_id AS VARCHAR) AS episode_id
                 FROM read_parquet({source})
             ),
-            peer_raw AS ({peer}),
-            peer_normalised AS (
-                SELECT p.*,
-                       greatest(0.0, (p.raw_score - q.centre) / q.scale) AS score,
-                       {_size_band_sql('p.available_count')} AS size_band
-                FROM peer_raw AS p
-                JOIN topology_reference AS q
-                  ON q.channel = 'peer_deviation'
-                 AND q.group_type = p.group_type
-                 AND q.size_band = {_size_band_sql('p.available_count')}
-                 AND q.leading_feature = p.leading_feature
-            ),
-            peer_best AS (
-                SELECT event_ts, entity_id, episode_id,
-                       max(score) AS score,
-                       arg_max(
-                           leading_feature, score ORDER BY leading_feature ASC
-                       ) AS leading_feature,
-                       arg_max(
-                           available_count, score ORDER BY leading_feature ASC
-                       ) AS available_count,
-                       arg_max(
-                           size_band, score ORDER BY leading_feature ASC
-                       ) AS size_band
-                FROM peer_normalised
-                GROUP BY event_ts, entity_id, episode_id
-            ),
-            group_raw AS ({group}),
-            group_normalised AS (
-                SELECT g.*,
-                       greatest(0.0, (g.raw_score - q.centre) / q.scale) AS score,
-                       {_size_band_sql('g.available_count')} AS size_band
-                FROM group_raw AS g
-                JOIN topology_reference AS q
-                  ON q.channel = 'group_common_mode'
-                 AND q.group_type = g.group_type
-                 AND q.size_band = {_size_band_sql('g.available_count')}
-                 AND q.leading_feature = g.leading_feature
-            ),
             group_entities AS (
                 SELECT i.event_ts, i.entity_id, i.episode_id,
                        g.* EXCLUDE(event_ts)
-                FROM group_normalised AS g
+                FROM topology_group_feature_best AS g
                 JOIN model_topology AS t
                   ON g.group_type = t.group_type AND g.group_id = t.group_id
                 JOIN identities AS i
@@ -2355,7 +2541,7 @@ def score_topology_file(
                    g.available_fraction AS group_available_fraction,
                    g.affected_fraction AS group_common_mode__affected_fraction
             FROM identities AS i
-            LEFT JOIN peer_best AS p
+            LEFT JOIN topology_peer_best AS p
               ON i.event_ts = p.event_ts AND i.entity_id = p.entity_id
              AND i.episode_id = p.episode_id
             LEFT JOIN group_best AS g
@@ -2363,7 +2549,7 @@ def score_topology_file(
              AND i.episode_id = g.episode_id
         """
         connection.execute(
-            f"COPY ({query}) TO {_sql_literal(str(destination))} "
+            f"COPY ({output_sql}) TO {_sql_literal(str(destination))} "
             "(FORMAT PARQUET, COMPRESSION ZSTD)"
         )
     return destination
