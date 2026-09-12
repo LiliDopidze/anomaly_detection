@@ -362,12 +362,49 @@ def test_peer_and_common_mode_scores_use_calibration_topology(tmp_path):
     scores = pd.read_parquet(score_path)
 
     assert len(scores) == len(residuals)
+    assert scores.columns.tolist() == [
+        "event_ts", "entity_id", "episode_id",
+        "peer_deviation", "peer_deviation__leading_feature",
+        "peer_valid_peers", "peer_size_band",
+        "group_common_mode", "group_common_mode__leading_feature",
+        "group_common_mode__scope_type", "group_common_mode__scope_id",
+        "group_valid_entities", "group_available_fraction",
+        "group_common_mode__affected_fraction",
+    ]
     assert not scores.duplicated([
         "event_ts", "entity_id", "episode_id",
     ]).any()
     assert scores["peer_deviation"].notna().all()
     assert scores["group_common_mode"].notna().all()
     assert set(scores["peer_valid_peers"]) == {7}
+    assert not list(tmp_path.glob("topology-evidence-*"))
+
+
+def test_topology_scoring_rejects_multiple_effective_memberships(tmp_path):
+    entities = [f"ont-{number:02d}" for number in range(8)]
+    topology = topology_fixture(entities)
+    conflicting = topology.iloc[[0]].copy()
+    conflicting["group_id"] = "different-port"
+    topology = pd.concat([topology, conflicting], ignore_index=True)
+    residual_path = tmp_path / "residuals.parquet"
+    pd.DataFrame({
+        "event_ts": [BASE],
+        "entity_id": [entities[0]],
+        "episode_id": [f"{entities[0]}::episode-1"],
+        "m1__level": [0.0],
+    }).to_parquet(residual_path, index=False)
+
+    with np.testing.assert_raises_regex(
+        ValueError, "one effective membership"
+    ):
+        fit_topology_reference(
+            residual_path,
+            topology,
+            ["m1__level"],
+            peer_group_type="pon_port",
+            group_types=["pon_port"],
+            minimum_reference_rows=1,
+        )
 
 
 def test_repeated_group_score_becomes_one_physical_alert(tmp_path):

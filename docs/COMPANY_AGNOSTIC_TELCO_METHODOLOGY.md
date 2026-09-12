@@ -131,8 +131,11 @@ without changing the detector.
 
 Group features describe common movement through the median descendant
 residual, affected fraction, available fraction, and the physical scope that
-supports the evidence. A future-data perturbation test proves feature
-causality.
+supports the evidence. The current batch scorer fails closed if an entity has
+more than one membership for the same topology level in a scored partition.
+A real estate with re-homing therefore needs effective-time joins before an
+operator claim can be made; silently using the latest inventory is not valid.
+A future-data perturbation test proves feature causality.
 
 ## 8. Primary detector
 
@@ -179,7 +182,10 @@ calibration slice supplies empirical daily-block maxima for candidate channel
 thresholds, so in-sample residuals cannot make the tails look artificially
 light. For each portfolio, a label-free operating point is the most sensitive
 candidate whose complete consolidated incident rate on late calibration stays
-inside the declared workload budget. Development labels may choose among
+inside the declared workload budget. On an ascending quantile grid this is the
+smallest admissible quantile, because higher quantiles produce higher
+thresholds and lower sensitivity. These are empirical block-maxima quantiles,
+not conformal guarantees. Development labels may choose among
 these pre-calibrated portfolio operating points, but never choose the
 threshold quantile. Persistence is expressed in elapsed time. Consolidation
 requires temporal overlap plus shared entity or a
