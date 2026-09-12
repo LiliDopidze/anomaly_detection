@@ -38,7 +38,7 @@ from .features import (
 )
 
 
-MODEL_CORE_VERSION = "4.3.1"
+MODEL_CORE_VERSION = "4.3.2"
 MODEL_IDS = (
     "rapid_residual",
     "drift_cusum",
@@ -2782,12 +2782,21 @@ def append_contextual_isolation_scores(
 
 
 def merge_score_files(self_scores, topology_scores, destination):
-    """Add optional topology channels to the ordinary entity score file."""
+    """Join self and topology scores in two bounded, disk-backed stages.
 
+    Keeping the hash join and global sort in one DuckDB query forces both
+    blocking operators to compete for memory.  Materialising the unsorted join
+    first releases its state before the ordered Parquet file is written.
+    """
+
+    self_scores = Path(self_scores)
+    topology_scores = Path(topology_scores)
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    self_source = _sql_literal(str(Path(self_scores)))
-    topology_source = _sql_literal(str(Path(topology_scores)))
+    if destination.exists():
+        raise FileExistsError(f"Score destination already exists: {destination}")
+
+    key_columns = ["event_ts", "entity_id", "episode_id"]
     topology_columns = [
         "peer_deviation", "peer_deviation__leading_feature",
         "peer_valid_peers", "peer_size_band",
@@ -2796,18 +2805,93 @@ def merge_score_files(self_scores, topology_scores, destination):
         "group_valid_entities", "group_available_fraction",
         "group_common_mode__affected_fraction",
     ]
-    selected = ", ".join(f"t.{_sql_identifier(name)}" for name in topology_columns)
-    with _model_duckdb(destination.parent) as connection:
-        connection.execute(f"""
-            COPY (
-                SELECT s.*, {selected}
-                FROM read_parquet({self_source}) AS s
-                LEFT JOIN read_parquet({topology_source}) AS t
-                USING (event_ts, entity_id, episode_id)
-                ORDER BY entity_id, episode_id, event_ts
-            ) TO {_sql_literal(str(destination))}
-            (FORMAT PARQUET, COMPRESSION ZSTD)
-        """)
+    for path, required in (
+        (self_scores, key_columns),
+        (topology_scores, [*key_columns, *topology_columns]),
+    ):
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        available = set(pq.ParquetFile(path).schema_arrow.names)
+        missing = set(required) - available
+        if missing:
+            raise ValueError(
+                f"{path.name} is missing score columns: {sorted(missing)}"
+            )
+
+    expected_rows = pq.ParquetFile(self_scores).metadata.num_rows
+    topology_rows = pq.ParquetFile(topology_scores).metadata.num_rows
+    if expected_rows == 0:
+        raise ValueError("Self score file is empty")
+    if topology_rows != expected_rows:
+        raise ValueError(
+            "Topology score keys are not one-to-one: "
+            f"{expected_rows:,} self rows and {topology_rows:,} topology rows"
+        )
+
+    self_source = _sql_literal(str(self_scores))
+    topology_source = _sql_literal(str(topology_scores))
+    selected = ", ".join(
+        f"t.{_sql_identifier(name)}" for name in topology_columns
+    )
+
+    with tempfile.TemporaryDirectory(
+        dir=destination.parent, prefix="score-merge-"
+    ) as merge_name:
+        merge_root = Path(merge_name)
+        joined = merge_root / "joined.parquet"
+        staged = merge_root / "combined.parquet"
+
+        print("    score merge: joining self and topology evidence", flush=True)
+        with _model_duckdb(destination.parent) as connection:
+            connection.execute(f"""
+                COPY (
+                    SELECT s.*, {selected},
+                           t.event_ts IS NOT NULL AS __topology_match
+                    FROM read_parquet({self_source}) AS s
+                    LEFT JOIN read_parquet({topology_source}) AS t
+                    USING (event_ts, entity_id, episode_id)
+                ) TO {_sql_literal(str(joined))}
+                (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 16384)
+            """)
+
+        joined_rows = pq.ParquetFile(joined).metadata.num_rows
+        if joined_rows != expected_rows:
+            raise ValueError(
+                "Topology score keys are not one-to-one: "
+                f"{expected_rows:,} self rows produced {joined_rows:,} rows"
+            )
+
+        joined_columns = pq.ParquetFile(joined).schema_arrow.names
+        output_columns = ", ".join(
+            _sql_identifier(name)
+            for name in joined_columns
+            if name != "__topology_match"
+        )
+
+        print("    score merge: validating and ordering merged evidence", flush=True)
+        joined_source = _sql_literal(str(joined))
+        with _model_duckdb(destination.parent) as connection:
+            missing_matches = connection.execute(f"""
+                SELECT count(*)
+                FROM read_parquet({joined_source})
+                WHERE NOT __topology_match
+            """).fetchone()[0]
+            if missing_matches:
+                raise ValueError(
+                    "Topology score keys are not one-to-one: "
+                    f"{missing_matches:,} self rows have no topology match"
+                )
+            connection.execute(f"""
+                COPY (
+                    SELECT {output_columns}
+                    FROM read_parquet({joined_source})
+                    ORDER BY entity_id, episode_id, event_ts
+                ) TO {_sql_literal(str(staged))}
+                (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 16384)
+            """)
+
+        staged.replace(destination)
+        print(f"    score merge: {expected_rows:,} rows complete", flush=True)
     return destination
 
 
