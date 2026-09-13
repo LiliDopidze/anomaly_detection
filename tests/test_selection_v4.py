@@ -1,14 +1,17 @@
 import pandas as pd
 
-from telco_anomaly.selection import select_development_candidate
+from telco_anomaly.selection import (
+    qualify_localisation,
+    select_development_candidate,
+)
 
 
 def _comparison():
     return pd.DataFrame([
-        ("simple", "rapid_only", 0.30, 0.008, 0.01),
-        ("rich", "full_topology", 0.31, 0.008, 0.01),
+        ("simple", "rapid_only", 0.30, 0.22, 0.008, 0.01),
+        ("rich", "full_topology", 0.31, 0.21, 0.008, 0.01),
     ], columns=[
-        "candidate_key", "portfolio", "event_recall",
+        "candidate_key", "portfolio", "event_recall", "event_recall_ci_low",
         "false_incidents_per_entity_day_ci_high", "missing_score_fraction",
     ])
 
@@ -20,7 +23,7 @@ def _select(frame, faults=50):
         false_incident_budget=0.01,
         budget_safety_factor=0.90,
         minimum_faults=30,
-        minimum_recall=0.20,
+        minimum_recall_ci_low=0.20,
         maximum_missing_score_fraction=0.20,
         portfolio_preference=["rapid_only", "full_topology"],
     )
@@ -44,3 +47,57 @@ def test_fails_closed_when_development_denominator_is_too_small():
     selected, decision = _select(_comparison(), faults=10)
     assert selected is None
     assert decision["status"] == "blocked_insufficient_faults"
+
+
+def test_recall_point_estimate_cannot_bypass_uncertainty_gate():
+    frame = _comparison().iloc[[0]].copy()
+    frame["event_recall"] = 0.50
+    frame["event_recall_ci_low"] = 0.19
+
+    selected, decision = _select(frame)
+
+    assert selected is None
+    assert decision["status"] == "blocked_no_candidate_meets_gates"
+    assert decision["minimum_recall_ci_low"] == 0.20
+
+
+def _localisation_row(faults=20, successes=8, ci_low=0.20):
+    return pd.Series({
+        "multi_entity_faults": faults,
+        "multi_entity_detected_and_localised": successes,
+        "multi_entity_joint_detection_and_localisation_recall": (
+            successes / faults if faults else float("nan")
+        ),
+        "multi_entity_joint_detection_and_localisation_recall_ci_low": ci_low,
+        "multi_entity_joint_detection_and_localisation_recall_ci_high": 0.62,
+    })
+
+
+def test_localisation_requires_a_registered_performance_gate():
+    result = qualify_localisation(
+        _localisation_row(), minimum_multi_entity_faults=20
+    )
+
+    assert result["status"] == "not_established_unregistered_performance_gate"
+
+
+def test_localisation_is_separate_and_fail_closed():
+    insufficient = qualify_localisation(
+        _localisation_row(faults=19, successes=19, ci_low=0.83),
+        minimum_multi_entity_faults=20,
+        minimum_joint_recall_ci_low=0.20,
+    )
+    below = qualify_localisation(
+        _localisation_row(ci_low=0.19),
+        minimum_multi_entity_faults=20,
+        minimum_joint_recall_ci_low=0.20,
+    )
+    boundary = qualify_localisation(
+        _localisation_row(ci_low=0.20),
+        minimum_multi_entity_faults=20,
+        minimum_joint_recall_ci_low=0.20,
+    )
+
+    assert insufficient["status"] == "not_established_insufficient_multi_entity_faults"
+    assert below["status"] == "not_qualified_joint_recall_bound"
+    assert boundary["status"] == "qualified"

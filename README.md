@@ -129,10 +129,15 @@ For exact run instructions and the purpose of every notebook, see
   Empirical tail thresholds also require minimum block support. Only then are
   frozen operating points compared on development truth; holdout remains
   sealed until one configuration passes every gate.
-- The selected model fails closed if no candidate satisfies the workload and
-  evidence gates.
+- Detection credit requires an actually alerting entity to overlap an affected
+  entity; a predicted topology footprint is localisation evidence only.
+- False-incident workload uses scoreable portfolio exposure and reports the
+  calendar denominator beside it.
+- Detection selection fails closed unless the 95% Wilson lower recall bound,
+  Garwood workload upper bound, sample-size, and availability gates all pass.
 - Localisation reports the smallest supported observable scope and preserves
-  topology ambiguity. It is probable location, not causal root cause.
+  topology ambiguity. It is qualified separately from detection and remains a
+  probable location, not causal root cause.
 - Synthetic results do not establish real-fleet effectiveness. Operator data
   is required before production claims.
 

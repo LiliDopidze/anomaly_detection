@@ -8,12 +8,16 @@ metric calculation.  It contains no sector-specific logic.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import duckdb
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2
+import pyarrow.parquet as pq
+from scipy.stats import chi2, norm
 
 
-EVALUATION_CORE_VERSION = "4.1.0"
+EVALUATION_CORE_VERSION = "4.2.0"
 PARTITIONS = ("calibration", "development", "holdout")
 SCORE_COLUMNS = [
     "event_ts", "entity_id", "episode_id", "anomaly_score", "model_id",
@@ -920,6 +924,107 @@ def _wilson_interval(successes, total, z=1.96):
     return centre - margin, centre + margin
 
 
+def wilson_interval(successes, total, confidence_level=0.95):
+    """Return a two-sided Wilson interval for a binomial proportion."""
+
+    confidence_level = float(confidence_level)
+    if not np.isfinite(confidence_level) or not 0 < confidence_level < 1:
+        raise ValueError("confidence_level must lie strictly between zero and one")
+    if int(successes) != successes or int(total) != total:
+        raise ValueError("successes and total must be integers")
+    successes, total = int(successes), int(total)
+    if successes < 0 or total < 0 or successes > total:
+        raise ValueError("Require 0 <= successes <= total")
+    z = norm.ppf(1 - (1 - confidence_level) / 2)
+    return _wilson_interval(successes, total, z=z)
+
+
+def scoreable_exposures(score_path, channel_groups, exposure_unit, cadence_seconds):
+    """Calculate portfolio scoreable time in one bounded Parquet scan.
+
+    A timestamp is scoreable when at least one selected channel is finite. The
+    function counts the union, so simultaneous channels never double-count
+    exposure. Calendar exposure should be reported separately.
+    """
+
+    groups = {
+        str(name): list(dict.fromkeys(map(str, channels)))
+        for name, channels in channel_groups.items()
+    }
+    if not groups or any(not channels for channels in groups.values()):
+        raise ValueError("Every score group must contain at least one channel")
+    if exposure_unit not in {"entity_day", "episode", "observed_hour"}:
+        raise ValueError("Unsupported exposure unit")
+    if not np.isfinite(cadence_seconds) or float(cadence_seconds) <= 0:
+        raise ValueError("cadence_seconds must be positive")
+
+    score_path = Path(score_path)
+    available = set(pq.ParquetFile(score_path).schema_arrow.names)
+    requested = set().union(*map(set, groups.values()))
+    missing = requested - available
+    if missing:
+        raise ValueError(f"Score file is missing channels: {sorted(missing)}")
+
+    def identifier(value):
+        return '"' + value.replace('"', '""') + '"'
+
+    aliases = {
+        channel: f"score_available_{index}"
+        for index, channel in enumerate(sorted(requested))
+    }
+    availability = ",\n".join(
+        f"max(CASE WHEN {identifier(channel)} IS NOT NULL "
+        f"AND isfinite(CAST({identifier(channel)} AS DOUBLE)) "
+        f"THEN 1 ELSE 0 END) AS {identifier(alias)}"
+        for channel, alias in aliases.items()
+    )
+    totals = []
+    for name, channels in groups.items():
+        condition = " OR ".join(
+            f"{identifier(aliases[channel])} = 1" for channel in channels
+        )
+        expression = (
+            f"count(DISTINCT (entity_id, episode_id)) FILTER (WHERE {condition})"
+            if exposure_unit == "episode"
+            else f"sum(CASE WHEN {condition} THEN 1 ELSE 0 END)"
+        )
+        totals.append(f"{expression} AS {identifier(name)}")
+
+    source = str(score_path).replace("'", "''")
+    with duckdb.connect() as connection:
+        row = connection.execute(f"""
+            WITH scoreable_keys AS (
+                SELECT CAST(entity_id AS VARCHAR) AS entity_id,
+                       CAST(episode_id AS VARCHAR) AS episode_id,
+                       event_ts,
+                       {availability}
+                FROM read_parquet('{source}')
+                GROUP BY entity_id, episode_id, event_ts
+            )
+            SELECT {', '.join(totals)}
+            FROM scoreable_keys
+        """).fetchone()
+
+    if exposure_unit == "episode":
+        return {name: float(count or 0) for name, count in zip(groups, row)}
+    divisor = 86_400 if exposure_unit == "entity_day" else 3_600
+    return {
+        name: float(count or 0) * float(cadence_seconds) / divisor
+        for name, count in zip(groups, row)
+    }
+
+
+def scoreable_exposure(score_path, channels, exposure_unit, cadence_seconds):
+    """Convenience wrapper for one selected channel portfolio."""
+
+    return scoreable_exposures(
+        score_path,
+        {"selected": channels},
+        exposure_unit,
+        cadence_seconds,
+    )["selected"]
+
+
 def poisson_rate_interval(count, exposure, confidence_level=0.95):
     """Return an exact two-sided Garwood interval for a Poisson rate."""
 
@@ -1484,6 +1589,7 @@ def evaluate_cases(
     decision_horizon_seconds,
     topology_memberships=None,
     min_reliable_faults=5,
+    confidence_level=0.95,
 ):
     """One-to-one case-to-fault evaluation at operational workload level."""
 
@@ -1498,20 +1604,10 @@ def evaluate_cases(
 
     _, descendants, levels, equivalent = _topology_context(topology_memberships)
     windows = _fault_windows(events, intervals, decision_horizon_seconds)
+    # Detection credit comes only from entities that actually raised an alert.
+    # A predicted topology footprint is evaluated below as localisation output;
+    # it must never manufacture detection overlap with an affected entity.
     case_entities = case_members[["case_id", "entity_id"]].drop_duplicates().copy()
-    footprint_rows = []
-    for case in cases.itertuples(index=False):
-        if str(case.scope_type) == "entity":
-            continue
-        for entity_id in descendants.get(
-            (str(case.scope_type), str(case.scope_id)), ()
-        ):
-            footprint_rows.append((str(case.case_id), str(entity_id)))
-    if footprint_rows:
-        case_entities = pd.concat([
-            case_entities,
-            pd.DataFrame(footprint_rows, columns=["case_id", "entity_id"]),
-        ], ignore_index=True).drop_duplicates()
     candidates = case_entities.merge(
         windows, on="entity_id", how="inner"
     ).merge(cases[["case_id", "case_start"]], on="case_id", how="inner")
@@ -1678,7 +1774,9 @@ def evaluate_cases(
 
     rows = []
     def ratio(name, numerator, denominator):
-        low, high = _wilson_interval(numerator, denominator)
+        low, high = wilson_interval(
+            numerator, denominator, confidence_level
+        )
         rows.append({"metric": name, "value": numerator / denominator if denominator else np.nan,
                      "numerator": numerator, "denominator": denominator,
                      "ci_low": low, "ci_high": high, "unit": "ratio"})
@@ -1717,7 +1815,9 @@ def evaluate_cases(
         (f"false_cases_per_{exposure_unit}", nuisance_cases, "cases"),
         (f"total_cases_per_{exposure_unit}", len(cases), "cases"),
     ):
-        low, high = _poisson_rate_interval(count, exposure_value)
+        low, high = poisson_rate_interval(
+            count, exposure_value, confidence_level
+        )
         rows.append({"metric": name, "value": count / exposure_value if exposure_value else np.nan,
                      "numerator": count, "denominator": exposure_value,
                      "ci_low": low, "ci_high": high,
@@ -1778,7 +1878,7 @@ def evaluate_cases(
         by_type["scoreable_faults"].ge(min_reliable_faults), "estimable", "descriptive_only"
     )
     recall_intervals = [
-        _wilson_interval(detected, total)
+        wilson_interval(detected, total, confidence_level)
         for detected, total in zip(by_type["detected_faults"], by_type["scoreable_faults"])
     ]
     by_type[["recall_ci_low", "recall_ci_high"]] = recall_intervals

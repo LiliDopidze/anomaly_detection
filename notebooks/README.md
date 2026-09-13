@@ -17,16 +17,20 @@ into several notebooks.
 | `04_CALIBRATION_EDA` | Calibration `SPEC-CORE` | Time-series plots, robust profiles and frozen EDA decisions | No |
 | `05_FEATURE_ENGINEERING` | Calibration/development `SPEC-CORE` plus EDA decisions | Reusable causal fit, late-calibration, and development features | No |
 | `06_PRIMARY_UNSUPERVISED_MODEL` | Calibration/development features and topology | Direction-aware models, separate threshold/workload score slices, and a frozen scoring policy | No |
-| `07_CHALLENGER_MODELS` | Independent late-calibration workload plus development truth | Label-free operating points, labelled comparisons and, only if gates pass, a frozen selection | Development only |
+| `07_CHALLENGER_MODELS` | Independent late-calibration workload plus development truth | Label-free operating points, detection selection and separate localisation qualification | Development only |
 | `08_ALERTS_INCIDENTS_AND_DYING_GASP` | Frozen selection, scores and observable operational events | Persistent alerts and consolidated incidents | No |
 | `09_TOPOLOGY_LOCALISATION` | Incidents and observable topology | Ranked location candidates with ambiguity | No |
 | `10_LOCKED_EVALUATION` | Frozen model plus requested truth partition | Detection, workload and localisation metrics with uncertainty | Yes, after freeze |
 | `11_PUBLIC_DATASET_VALIDATION` | Optional public Telecom sources | Reviewed adapter drafts and separate qualification packs | Only for the controlled failure benchmark |
 | `12_INFERENCE_DEMO_AND_MODEL_CARD` | Frozen incidents, localisation and available results | Interactive chronological replay and model card | No |
 
-Notebook 07 deliberately fails closed. If no candidate satisfies the declared
-development gates, it writes `best_diagnostic_configuration.json` but not a
-deployable selection. To inspect the product flow without changing that fact,
+Notebook 07 deliberately fails closed. Workload uses portfolio-scoreable time
+and reports calendar time beside it. Recall must clear the 20% research floor
+with the lower endpoint of its two-sided 95% Wilson interval. Localisation is a
+separate capability and remains unqualified until both its sample-size rule and
+an explicitly registered performance target are met. If no candidate satisfies
+the detection gates, the notebook writes `best_diagnostic_configuration.json`
+but not a selected configuration. To inspect the product flow without changing that fact,
 set `ALLOW_DIAGNOSTIC_DEMO=1` for Notebook 08. Never use this switch to open
 holdout or claim deployment readiness.
 
@@ -81,6 +85,14 @@ the second half to verify workload. Notebook 07 applies the exact Poisson upper
 workload bound to that independent verification slice before development truth
 is consulted. It also refuses an empirical threshold with fewer than five
 expected calibration blocks in its upper tail.
+
+Selection revision v8 reuses the v7 score files; Notebook 06 does not need to
+be rerun. Notebook 07 still audits every threshold on label-free workload data,
+but evaluates development truth only once per portfolio at the independently
+chosen operating point. This removes the previous redundant four-threshold
+development loop. After downloading this revision, interrupt an older running
+Notebook 07 and run the new Notebook 07 from a fresh kernel, followed by 08–12
+only if a detection configuration is selected.
 
 ## Public Telecom qualification
 
