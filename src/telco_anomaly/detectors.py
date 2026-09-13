@@ -38,7 +38,7 @@ from .features import (
 )
 
 
-MODEL_CORE_VERSION = "4.3.2"
+MODEL_CORE_VERSION = "4.3.3"
 MODEL_IDS = (
     "rapid_residual",
     "drift_cusum",
@@ -2741,43 +2741,59 @@ def append_contextual_isolation_scores(
     *,
     batch_rows=100_000,
 ):
-    """Append the contextual Isolation Forest channel to a score file."""
+    """Append contextual scores while preserving the source Arrow schema."""
 
     score_path, destination = Path(score_path), Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        raise FileExistsError(f"Score destination already exists: {destination}")
+
     parquet = pq.ParquetFile(score_path)
-    writer = None
     names = np.asarray(bundle["feature_columns"], dtype=object)
-    try:
-        for batch in parquet.iter_batches(batch_size=int(batch_rows)):
-            frame = batch.to_pandas()
-            clean = frame[bundle["feature_columns"]].replace(
-                [np.inf, -np.inf], np.nan
-            )
-            values = bundle["imputer"].transform(clean)
-            scaled = bundle["scaler"].transform(values)
-            scaled = np.clip(
-                scaled,
-                -float(bundle["scaled_feature_cap"]),
-                float(bundle["scaled_feature_cap"]),
-            )
-            frame["isolation_forest_contextual"] = -bundle[
-                "model"
-            ].decision_function(scaled)
-            frame["isolation_forest_contextual__leading_feature"] = names[
-                np.abs(scaled).argmax(axis=1)
-            ]
-            table = pa.Table.from_pandas(frame, preserve_index=False)
-            if writer is None:
-                writer = pq.ParquetWriter(
-                    destination, table.schema, compression="zstd"
+    with tempfile.TemporaryDirectory(
+        dir=destination.parent, prefix="contextual-score-"
+    ) as temporary:
+        staged = Path(temporary) / "scores.parquet"
+        writer = None
+        try:
+            for batch in parquet.iter_batches(batch_size=int(batch_rows)):
+                frame = batch.to_pandas()
+                clean = frame[bundle["feature_columns"]].replace(
+                    [np.inf, -np.inf], np.nan
                 )
-            writer.write_table(table)
-    finally:
-        if writer is not None:
-            writer.close()
-    if writer is None:
-        raise ValueError("Score file produced no contextual model rows")
+                values = bundle["imputer"].transform(clean)
+                scaled = bundle["scaler"].transform(values)
+                scaled = np.clip(
+                    scaled,
+                    -float(bundle["scaled_feature_cap"]),
+                    float(bundle["scaled_feature_cap"]),
+                )
+                scores = -bundle["model"].decision_function(scaled)
+                leading = names[np.abs(scaled).argmax(axis=1)]
+
+                # Keep every existing Arrow field exactly as stored. Converting
+                # the full batch back from pandas can turn nullable integers
+                # into floats in one batch and integers in the next.
+                table = pa.Table.from_batches([batch])
+                table = table.append_column(
+                    "isolation_forest_contextual",
+                    pa.array(scores, type=pa.float64()),
+                )
+                table = table.append_column(
+                    "isolation_forest_contextual__leading_feature",
+                    pa.array(leading, type=pa.string()),
+                )
+                if writer is None:
+                    writer = pq.ParquetWriter(
+                        staged, table.schema, compression="zstd"
+                    )
+                writer.write_table(table)
+        finally:
+            if writer is not None:
+                writer.close()
+        if writer is None:
+            raise ValueError("Score file produced no contextual model rows")
+        staged.replace(destination)
     return destination
 
 

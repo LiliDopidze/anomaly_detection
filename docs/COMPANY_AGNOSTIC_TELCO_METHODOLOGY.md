@@ -3,7 +3,7 @@
 | Document field | Value |
 |---|---|
 | Revision | 12 September 2026 |
-| Implementation baseline | `SPEC-CORE 1.0.0`, `SPEC-EVAL 1.0.0`, pack interface `1.0.0`, detector core `4.3.2` |
+| Implementation baseline | `SPEC-CORE 1.0.0`, `SPEC-EVAL 1.0.0`, pack interface `1.0.0`, detector core `4.3.3` |
 | Primary domain | Fixed-access PON/ONT telemetry |
 | Audience | Data scientists, statisticians, ML engineers, data engineers, Telecom SMEs, and technical reviewers |
 | Status | Research-grade implementation with production-oriented controls; an operator pilot is still required before a production-performance claim |

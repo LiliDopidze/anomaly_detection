@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 import telco_anomaly.detectors as detector_helpers
 from telco_anomaly.contract import OPTIONAL_CORE_SCHEMAS
@@ -212,6 +214,58 @@ def test_contextual_isolation_forest_fits_and_scores(tmp_path):
     assert set(scored["isolation_forest_contextual__leading_feature"]) <= set(
         bundle["feature_columns"]
     )
+
+
+def test_contextual_scoring_preserves_nullable_integer_schema(tmp_path):
+    source = tmp_path / "combined_scores.parquet"
+    destination = tmp_path / "contextual_scores.parquet"
+    rows = 200
+    table = pa.table({
+        "event_ts": pa.array(
+            pd.date_range(BASE, periods=rows, freq="15min"),
+            type=pa.timestamp("ns", tz="UTC"),
+        ),
+        "entity_id": pa.array(["ont-1"] * rows, type=pa.string()),
+        "episode_id": pa.array(["episode-1"] * rows, type=pa.string()),
+        "rapid_residual": pa.array(
+            np.sin(np.arange(rows) / 7), type=pa.float64()
+        ),
+        "peer_deviation": pa.array(
+            np.cos(np.arange(rows) / 11), type=pa.float64()
+        ),
+        "group_common_mode": pa.array(
+            np.sin(np.arange(rows) / 17), type=pa.float64()
+        ),
+        "peer_valid_peers": pa.array(
+            [None] * 100 + [7] * 100, type=pa.int64()
+        ),
+    })
+    pq.write_table(table, source, row_group_size=100)
+
+    bundle = fit_contextual_isolation_forest(
+        source,
+        ["rapid_residual", "peer_deviation", "group_common_mode"],
+        maximum_training_rows=150,
+        trees=10,
+        maximum_samples=64,
+    )
+    append_contextual_isolation_scores(
+        bundle, source, destination, batch_rows=100
+    )
+
+    result = pd.read_parquet(destination)
+    schema = pq.ParquetFile(destination).schema_arrow
+    pd.testing.assert_frame_equal(
+        result[table.column_names], table.to_pandas(), check_dtype=False
+    )
+    assert schema.field("peer_valid_peers").type == pa.int64()
+    assert schema.field("isolation_forest_contextual").type == pa.float64()
+    assert schema.field(
+        "isolation_forest_contextual__leading_feature"
+    ).type == pa.string()
+    assert len(result) == rows
+    assert result["isolation_forest_contextual"].notna().all()
+    assert not list(tmp_path.glob("contextual-score-*"))
 
 
 def test_isolation_forest_keeps_base_and_temporal_variants(tmp_path):
