@@ -13,7 +13,7 @@ import pandas as pd
 from scipy.stats import chi2
 
 
-EVALUATION_CORE_VERSION = "4.0.0"
+EVALUATION_CORE_VERSION = "4.1.0"
 PARTITIONS = ("calibration", "development", "holdout")
 SCORE_COLUMNS = [
     "event_ts", "entity_id", "episode_id", "anomaly_score", "model_id",
@@ -376,10 +376,9 @@ def validate_scores(scores):
     if np.isinf(clean["anomaly_score"]).any():
         raise ValueError("Anomaly scores must not contain infinity")
 
-    # A detector may need a short warm-up before it can emit a score. Those
-    # rows are represented by NaN and are not alerts. Removing them also lets
-    # the timestamp-gap rule below reset persistence across an unscored span.
-    clean = clean.loc[clean["anomaly_score"].notna()].copy()
+    # A detector may need a short warm-up before it can emit a score. Keep
+    # those NaN rows: an unscored observation must break persistence rather
+    # than making two separated threshold breaches look consecutive.
     clean["episode_id"] = clean["episode_id"].astype(str)
     if "leading_feature" not in clean:
         clean["leading_feature"] = pd.NA
@@ -474,31 +473,6 @@ def apply_alert_cooldown(alerts, cooldown_seconds):
     return output
 
 
-def _alert_intervals(high, min_consecutive, recovery_consecutive):
-    """Return inclusive (start, end) index pairs from a boolean array."""
-
-    n = len(high)
-    if n == 0:
-        return []
-    boundaries = np.flatnonzero(np.diff(high)) + 1
-    starts = np.concatenate(([0], boundaries))
-    ends = np.concatenate((boundaries, [n]))
-
-    intervals = []
-    active = None
-    for start, end in zip(starts, ends):
-        length = end - start
-        if high[start]:
-            if active is None and length >= min_consecutive:
-                active = start
-        elif active is not None and length >= recovery_consecutive:
-            intervals.append((active, start - 1))
-            active = None
-    if active is not None:
-        intervals.append((active, n - 1))
-    return intervals
-
-
 def scores_to_alerts(
     scores,
     threshold,
@@ -506,21 +480,44 @@ def scores_to_alerts(
     min_consecutive=2,
     gap_factor=1.5,
     recovery_consecutive=None,
+    cadence_seconds=None,
+    recovery_threshold=None,
 ):
-    """Convert scores to causal alerts with a simple recovery rule.
+    """Convert scores to causal alerts with persistence and hysteresis.
 
-    An alert opens after ``min_consecutive`` high scores. It closes only after
-    ``recovery_consecutive`` normal scores, which prevents a short dip from
-    creating repeated notifications for one continuing anomaly.
+    An alert opens at the observation that satisfies ``min_consecutive``
+    threshold breaches. It closes after ``recovery_consecutive`` scores below
+    ``recovery_threshold``. A missing score or a long timestamp gap closes any
+    open alert and resets persistence.
+
+    ``cadence_seconds`` should be supplied when cadence is declared by the
+    data contract. If omitted, cadence is estimated from the observed
+    timestamps for backward compatibility.
     """
 
     scores = validate_scores(scores)
+    threshold = float(threshold)
+    if not np.isfinite(threshold):
+        raise ValueError("The alert threshold must be finite")
+    recovery_threshold = (
+        threshold if recovery_threshold is None else float(recovery_threshold)
+    )
+    if not np.isfinite(recovery_threshold):
+        raise ValueError("The recovery threshold must be finite")
+    if recovery_threshold > threshold:
+        raise ValueError("The recovery threshold cannot exceed the alert threshold")
     recovery_consecutive = (
         min_consecutive
         if recovery_consecutive is None else int(recovery_consecutive)
     )
     if min_consecutive < 1 or recovery_consecutive < 1:
         raise ValueError("Persistence and recovery must be positive")
+    if not np.isfinite(gap_factor) or gap_factor <= 0:
+        raise ValueError("gap_factor must be positive")
+    if cadence_seconds is not None:
+        cadence_seconds = float(cadence_seconds)
+        if not np.isfinite(cadence_seconds) or cadence_seconds <= 0:
+            raise ValueError("cadence_seconds must be positive when supplied")
 
     alerts = []
     for (model_id, entity_id, episode_id), group in scores.groupby(
@@ -535,41 +532,81 @@ def scores_to_alerts(
         affected_fractions = group["evidence_affected_fraction"].to_numpy()
 
         differences = timestamps.diff()
-        positive = differences.loc[differences.gt(pd.Timedelta(0))]
-        cadence = positive.median() if not positive.empty else pd.Timedelta(0)
-
-        # A long gap ends any open alert and clears the state machine, so
-        # each stretch of regular observations is handled independently.
-        if cadence > pd.Timedelta(0):
-            breaks = np.flatnonzero(differences.gt(cadence * gap_factor).to_numpy())
+        if cadence_seconds is None:
+            positive = differences.loc[differences.gt(pd.Timedelta(0))]
+            cadence = (
+                positive.median() if not positive.empty else pd.Timedelta(0)
+            )
         else:
-            breaks = np.empty(0, dtype=int)
-        segment_starts = np.concatenate(([0], breaks))
-        segment_ends = np.concatenate((breaks, [len(group)]))
+            cadence = pd.Timedelta(seconds=cadence_seconds)
 
-        high = values >= threshold
-        for segment_start, segment_end in zip(segment_starts, segment_ends):
-            window = high[segment_start:segment_end]
-            for start, end in _alert_intervals(
-                window, min_consecutive, recovery_consecutive
-            ):
-                start += segment_start
-                end += segment_start
-                peak = start + int(np.argmax(values[start:end + 1]))
-                alerts.append({
-                    "model_id": model_id,
-                    "entity_id": entity_id,
-                    "episode_id": episode_id,
-                    "alert_start": timestamps.iloc[start],
-                    "alert_end": timestamps.iloc[end] + cadence,
-                    "peak_ts": timestamps.iloc[peak],
-                    "peak_score": values[peak],
-                    "n_scores": end - start + 1,
-                    "leading_feature": features[peak],
-                    "evidence_scope_type": scope_types[peak],
-                    "evidence_scope_id": scope_ids[peak],
-                    "evidence_affected_fraction": affected_fractions[peak],
-                })
+        active_start = None
+        high_run = 0
+        recovery_run = 0
+
+        def close_alert(data_end, end_ts):
+            nonlocal active_start
+            if active_start is None or data_end < active_start:
+                active_start = None
+                return
+            window = values[active_start:data_end + 1]
+            peak = active_start + int(np.nanargmax(window))
+            alerts.append({
+                "model_id": model_id,
+                "entity_id": entity_id,
+                "episode_id": episode_id,
+                "alert_start": timestamps.iloc[active_start],
+                "alert_end": end_ts,
+                "peak_ts": timestamps.iloc[peak],
+                "peak_score": values[peak],
+                "n_scores": data_end - active_start + 1,
+                "leading_feature": features[peak],
+                "evidence_scope_type": scope_types[peak],
+                "evidence_scope_id": scope_ids[peak],
+                "evidence_affected_fraction": affected_fractions[peak],
+            })
+            active_start = None
+
+        for index, value in enumerate(values):
+            long_gap = (
+                index > 0
+                and cadence > pd.Timedelta(0)
+                and differences.iloc[index] > cadence * gap_factor
+            )
+            if long_gap:
+                close_alert(index - 1, timestamps.iloc[index - 1] + cadence)
+                high_run = 0
+                recovery_run = 0
+
+            if pd.isna(value):
+                if index > 0:
+                    close_alert(index - 1, timestamps.iloc[index - 1] + cadence)
+                high_run = 0
+                recovery_run = 0
+                continue
+
+            if active_start is None:
+                high_run = high_run + 1 if value >= threshold else 0
+                if high_run >= min_consecutive:
+                    # The alert exists only now; earlier breaches are evidence
+                    # for persistence, not alerts that were already observable.
+                    active_start = index
+                    recovery_run = 0
+                continue
+
+            if value < recovery_threshold:
+                recovery_run += 1
+                if recovery_run >= recovery_consecutive:
+                    # Resolution is knowable only at the observation that
+                    # satisfies the recovery rule; do not backdate it.
+                    close_alert(index, timestamps.iloc[index])
+                    high_run = 0
+                    recovery_run = 0
+            else:
+                recovery_run = 0
+
+        if active_start is not None:
+            close_alert(len(group) - 1, timestamps.iloc[-1] + cadence)
 
     output = pd.DataFrame(alerts)
     if output.empty:
@@ -883,14 +920,38 @@ def _wilson_interval(successes, total, z=1.96):
     return centre - margin, centre + margin
 
 
-def _poisson_rate_interval(count, exposure, alpha=0.05):
-    """Exact Garwood interval for an event rate."""
+def poisson_rate_interval(count, exposure, confidence_level=0.95):
+    """Return an exact two-sided Garwood interval for a Poisson rate."""
 
-    if exposure <= 0:
+    confidence_level = float(confidence_level)
+    if not np.isfinite(confidence_level) or not 0 < confidence_level < 1:
+        raise ValueError("confidence_level must lie strictly between zero and one")
+
+    count_value = float(count)
+    if (
+        not np.isfinite(count_value)
+        or count_value < 0
+        or not count_value.is_integer()
+    ):
+        raise ValueError("count must be a non-negative integer")
+    count = int(count_value)
+
+    exposure = float(exposure)
+    if not np.isfinite(exposure) or exposure <= 0:
         return np.nan, np.nan
+
+    alpha = 1 - confidence_level
     lower = 0.0 if count == 0 else chi2.ppf(alpha / 2, 2 * count) / 2
     upper = chi2.ppf(1 - alpha / 2, 2 * (count + 1)) / 2
     return lower / exposure, upper / exposure
+
+
+def _poisson_rate_interval(count, exposure, alpha=0.05):
+    """Backward-compatible wrapper around :func:`poisson_rate_interval`."""
+
+    return poisson_rate_interval(
+        count, exposure, confidence_level=1 - float(alpha)
+    )
 
 
 def _false_alert_cluster_count(false_alerts, entity_groups, window_seconds):

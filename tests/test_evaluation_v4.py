@@ -1,7 +1,82 @@
 import pandas as pd
 
 from telco_anomaly.contract import EVAL_SCHEMAS, SPLIT_SCHEMAS
-from telco_anomaly.evaluation import CASE_COLUMNS, evaluate_cases, partition_truth
+from telco_anomaly.evaluation import (
+    CASE_COLUMNS,
+    evaluate_cases,
+    partition_truth,
+    poisson_rate_interval,
+    scores_to_alerts,
+)
+
+
+def score_fixture(values):
+    return pd.DataFrame({
+        "event_ts": pd.date_range("2025-01-01", periods=len(values), freq="15min", tz="UTC"),
+        "entity_id": "ONT-1",
+        "episode_id": "episode-1",
+        "anomaly_score": values,
+        "model_id": "detector",
+    })
+
+
+def test_persistent_alert_fires_when_confirmation_is_observed():
+    alerts = scores_to_alerts(
+        score_fixture([0.0, 2.0, 2.0, 0.0, 0.0]),
+        1.0,
+        min_consecutive=2,
+        recovery_consecutive=2,
+        cadence_seconds=900,
+    )
+
+    assert len(alerts) == 1
+    assert alerts.loc[0, "alert_start"] == pd.Timestamp(
+        "2025-01-01 00:30:00", tz="UTC"
+    )
+    assert alerts.loc[0, "alert_end"] == pd.Timestamp(
+        "2025-01-01 01:00:00", tz="UTC"
+    )
+
+
+def test_missing_score_breaks_persistence_at_declared_cadence():
+    alerts = scores_to_alerts(
+        score_fixture([2.0, float("nan"), 2.0]),
+        1.0,
+        min_consecutive=2,
+        recovery_consecutive=1,
+        cadence_seconds=900,
+    )
+
+    assert alerts.empty
+
+
+def test_recovery_hysteresis_prevents_threshold_flicker():
+    values = [2.0, 2.0, 0.9, 2.0, 2.0, 0.7]
+    with_hysteresis = scores_to_alerts(
+        score_fixture(values),
+        1.0,
+        min_consecutive=2,
+        recovery_consecutive=1,
+        recovery_threshold=0.8,
+        cadence_seconds=900,
+    )
+    without_hysteresis = scores_to_alerts(
+        score_fixture(values),
+        1.0,
+        min_consecutive=2,
+        recovery_consecutive=1,
+        cadence_seconds=900,
+    )
+
+    assert len(with_hysteresis) == 1
+    assert len(without_hysteresis) == 2
+
+
+def test_poisson_interval_uses_requested_confidence_level():
+    _, upper_95 = poisson_rate_interval(20, 1_000, 0.95)
+    _, upper_99 = poisson_rate_interval(20, 1_000, 0.99)
+
+    assert upper_99 > upper_95
 
 
 def test_zero_case_candidate_is_a_valid_negative_result():

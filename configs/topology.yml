@@ -24,6 +24,18 @@ peer_policy:
   preferred_levels: [splitter_l2, pon_port, splitter_l1, olt]
   minimum_valid_peers: 7
   minimum_entity_coverage: 0.80
+  # Only like-for-like physical measurements enter peer scoring. Traffic,
+  # counters and reboot state remain useful incident context, but comparing
+  # them across customers creates nuisance alerts without exposure control.
+  metric_ids:
+    - optical.rx_power
+    - optical.olt_rx_power
+    - optical.tx_power
+    - equipment.temperature
+    - optical.bias_current
+    - equipment.voltage
 group_policy:
   minimum_entities: 3
   minimum_available_fraction: 0.50
+  minimum_affected_entities: 3
+  minimum_affected_fraction: 0.25

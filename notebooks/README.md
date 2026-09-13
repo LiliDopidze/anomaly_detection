@@ -15,9 +15,9 @@ into several notebooks.
 | `02_CANONICAL_DATA_MODEL` | Native telemetry, topology, service windows and separately staged truth | A vendor-neutral pack and truth-unmounted `SPEC-CORE` | Stages them, but the canonical detector run does not mount them |
 | `03_SPLITS_AND_TRUTH_LOCK` | Pack plus split definitions | Physical calibration, development and locked-holdout truth directories | Yes, evaluator setup only |
 | `04_CALIBRATION_EDA` | Calibration `SPEC-CORE` | Time-series plots, robust profiles and frozen EDA decisions | No |
-| `05_FEATURE_ENGINEERING` | Calibration/development `SPEC-CORE` plus EDA decisions | Causal features, with calibration split into separate fit and threshold slices | No |
-| `06_PRIMARY_UNSUPERVISED_MODEL` | Calibration/development features and topology | Early-calibration model, late-calibration thresholds, and frozen scoring policy | No |
-| `07_CHALLENGER_MODELS` | Late-calibration workload plus development truth | Label-free operating points, labelled comparisons and, only if gates pass, a frozen selection | Development only |
+| `05_FEATURE_ENGINEERING` | Calibration/development `SPEC-CORE` plus EDA decisions | Reusable causal fit, late-calibration, and development features | No |
+| `06_PRIMARY_UNSUPERVISED_MODEL` | Calibration/development features and topology | Direction-aware models, separate threshold/workload score slices, and a frozen scoring policy | No |
+| `07_CHALLENGER_MODELS` | Independent late-calibration workload plus development truth | Label-free operating points, labelled comparisons and, only if gates pass, a frozen selection | Development only |
 | `08_ALERTS_INCIDENTS_AND_DYING_GASP` | Frozen selection, scores and observable operational events | Persistent alerts and consolidated incidents | No |
 | `09_TOPOLOGY_LOCALISATION` | Incidents and observable topology | Ranked location candidates with ambiguity | No |
 | `10_LOCKED_EVALUATION` | Frozen model plus requested truth partition | Detection, workload and localisation metrics with uncertainty | Yes, after freeze |
@@ -53,7 +53,7 @@ stage run ID—for example:
 ```bash
 export TELCO_DATASET=synthetic_pon
 export TELCO_FEATURE_RUN_ID=synthetic_pon_features_v4
-export TELCO_MODEL_RUN_ID=synthetic_pon_models_v6
+export TELCO_MODEL_RUN_ID=synthetic_pon_models_v7
 ```
 
 Keep downstream run IDs aligned with the inputs printed at the top of each
@@ -73,6 +73,14 @@ Topology calculation and final joins run as separate bounded stages, and their
 intermediate files are deleted immediately after use. If a previous Colab
 attempt filled `/content`, restart the runtime before rerunning Notebook 06;
 Notebook 05 does not need to be rerun.
+
+The v7 model run fits Isolation Forest on adverse-direction residuals with a
+bounded number of features per metric and an entity-day-balanced calibration
+sample. It uses the first half of late calibration to estimate thresholds and
+the second half to verify workload. Notebook 07 applies the exact Poisson upper
+workload bound to that independent verification slice before development truth
+is consulted. It also refuses an empirical threshold with fewer than five
+expected calibration blocks in its upper tail.
 
 ## Public Telecom qualification
 

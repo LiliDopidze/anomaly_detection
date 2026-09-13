@@ -10,7 +10,10 @@ import pyarrow.parquet as pq
 import telco_anomaly.detectors as detector_helpers
 from telco_anomaly.contract import OPTIONAL_CORE_SCHEMAS
 from telco_anomaly.detectors import (
+    _balanced_isolation_features,
     _deduplicate_scope_alerts,
+    _directional_model_frame,
+    _second_metric_evidence,
     append_contextual_isolation_scores,
     alert_grid_from_score_file,
     calibration_thresholds,
@@ -302,6 +305,66 @@ def test_isolation_forest_keeps_base_and_temporal_variants(tmp_path):
     assert scored["isolation_forest_temporal"].notna().all()
 
 
+def test_isolation_inputs_respect_declared_harmful_direction():
+    residuals = pd.DataFrame({
+        "loss__level": [-8.0, 8.0],
+        "power__level": [-8.0, 8.0],
+        "temperature__level": [-8.0, 8.0],
+    })
+    directions = {
+        "loss__level": "high_bad",
+        "power__level": "low_bad",
+        "temperature__level": "two_sided",
+    }
+
+    oriented = _directional_model_frame(residuals, directions)
+
+    assert oriented["loss__level"].tolist() == [0.0, 8.0]
+    assert oriented["power__level"].tolist() == [8.0, 0.0]
+    assert oriented["temperature__level"].tolist() == [8.0, 8.0]
+
+
+def test_isolation_feature_selection_is_balanced_by_metric():
+    features = [
+        "a__level", "a__difference", "a__lag_1h", "a__history_24h_z",
+        "b__level", "b__difference", "b__lag_1h",
+        "state__state", "state__transition",
+    ]
+    policy = pd.DataFrame({
+        "feature": features,
+        "metric_id": [name.split("__", 1)[0] for name in features],
+    }).set_index("feature")
+
+    selected, audit = _balanced_isolation_features(
+        policy,
+        features,
+        maximum_features_per_metric=2,
+        contextual_metrics={"state"},
+    )
+
+    retained = audit.loc[audit["retained"]]
+    assert retained.groupby("metric_id").size().max() == 2
+    assert not any(name.startswith("state__") for name in selected)
+    assert {"a", "b"} == set(retained["metric_id"])
+
+
+def test_multimetric_score_requires_evidence_from_two_metrics():
+    evidence = pd.DataFrame({
+        "a__level": [6.0, 6.0],
+        "a__lag_1h": [5.0, 5.0],
+        "b__level": [0.2, 4.0],
+    })
+    metric_ids = {
+        "a__level": "a",
+        "a__lag_1h": "a",
+        "b__level": "b",
+    }
+
+    score = _second_metric_evidence(evidence, metric_ids)
+
+    assert score.tolist() == [0.2, 4.0]
+
+
 def test_residual_export_keeps_only_requested_topology_features(tmp_path):
     feature_path = tmp_path / "features.parquet"
     score_path = tmp_path / "scores.parquet"
@@ -366,6 +429,8 @@ def test_thresholds_are_quantiles_of_entity_day_block_maxima(tmp_path):
 
     assert result.loc[0, "threshold"] == 3.0
     assert result.loc[0, "blocks_used"] == 2
+    assert result.loc[0, "unique_block_maxima"] == 2
+    assert result.loc[0, "expected_tail_blocks"] == 1.0
 
 
 def test_scoped_threshold_completeness_counts_times_not_descendants(tmp_path):

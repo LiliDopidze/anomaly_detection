@@ -34,19 +34,24 @@ from .features import (
     empirical_tail_evidence,
     feature_policy,
     fit_empirical_tail_reference,
+    orient_residuals,
     transform_episode,
 )
 
 
-MODEL_CORE_VERSION = "4.3.3"
+MODEL_CORE_VERSION = "4.4.0"
 MODEL_IDS = (
     "rapid_residual",
+    "multimetric_residual",
     "drift_cusum",
     "peer_deviation",
     "group_common_mode",
     "dispersion_change",
     "pca_spe",
-    "isolation_forest",
+    "isolation_forest_base",
+    "isolation_forest_temporal",
+    "isolation_forest_confirmed",
+    "isolation_forest_contextual",
 )
 IDENTITY_COLUMNS = ["event_ts", "entity_id", "episode_id"]
 SCALED_FEATURE_CAP = 50.0
@@ -259,6 +264,7 @@ def split_feature_file_by_time(
                 COPY (
                     SELECT * FROM read_parquet({source_sql})
                     WHERE event_ts {operator} TIMESTAMPTZ {_sql_literal(cutoff.isoformat())}
+                    ORDER BY entity_id, episode_id, event_ts
                 ) TO {_sql_literal(str(destination))}
                 (FORMAT PARQUET, COMPRESSION ZSTD)
             """)
@@ -891,6 +897,7 @@ def calibration_thresholds(
                 maxima["rows"].ge(int(minimum_block_rows)), "block_maximum"
             ]
             used_blocks = len(usable)
+            unique_block_maxima = int(usable.nunique())
             if used_blocks == 0:
                 raise ValueError(
                     f"No calibration blocks for {model_id} contain at least "
@@ -931,6 +938,8 @@ def calibration_thresholds(
                     "blocks_total": total_blocks,
                     "blocks_used": used_blocks,
                     "blocks_excluded": total_blocks - used_blocks,
+                    "unique_block_maxima": unique_block_maxima,
+                    "expected_tail_blocks": used_blocks * (1 - quantile),
                 })
             print(
                 f"    threshold calibration: {model_id} complete "
@@ -938,7 +947,14 @@ def calibration_thresholds(
                 f"{time.perf_counter() - started:.1f}s)",
                 flush=True,
             )
-    return pd.DataFrame(rows)
+    result = pd.DataFrame(rows)
+    for model_id, group in result.groupby("model_id", sort=False):
+        ordered = group.sort_values("threshold_quantile")
+        if ordered["threshold"].diff().dropna().lt(-1e-12).any():
+            raise AssertionError(
+                f"Calibration thresholds decrease with quantile for {model_id}"
+            )
+    return result
 
 
 def _deduplicate_scope_alerts(alerts):
@@ -980,6 +996,16 @@ def _deduplicate_scope_alerts(alerts):
     return pd.DataFrame(ordinary + consolidated, columns=alerts.columns)
 
 
+def _recovery_threshold(alert_threshold, threshold_fraction):
+    """Return a lower off-threshold while preserving the score sign."""
+
+    fraction = float(threshold_fraction)
+    if not 0 < fraction <= 1:
+        raise ValueError("recovery_threshold_fraction must be in (0, 1]")
+    threshold = float(alert_threshold)
+    return threshold * fraction if threshold >= 0 else threshold / fraction
+
+
 def alerts_from_score_file(
     score_path,
     model_id,
@@ -987,6 +1013,8 @@ def alerts_from_score_file(
     *,
     min_consecutive,
     recovery_consecutive,
+    cadence_seconds=None,
+    recovery_threshold_fraction=1.0,
 ):
     """Create alerts episode by episode without materialising all scores."""
 
@@ -1032,6 +1060,10 @@ def alerts_from_score_file(
             threshold,
             min_consecutive=int(min_consecutive),
             recovery_consecutive=int(recovery_consecutive),
+            cadence_seconds=cadence_seconds,
+            recovery_threshold=_recovery_threshold(
+                threshold, recovery_threshold_fraction
+            ),
         )
         if not produced.empty:
             alerts.append(produced)
@@ -1054,6 +1086,8 @@ def alert_grid_from_score_file(
     *,
     persistence,
     recovery_consecutive,
+    cadence_seconds=None,
+    recovery_threshold_fraction=1.0,
 ):
     """Create all channel/threshold alert sets with one scan per channel."""
 
@@ -1105,6 +1139,10 @@ def alert_grid_from_score_file(
                     float(row.threshold),
                     min_consecutive=int(persistence[model_id]),
                     recovery_consecutive=int(recovery_consecutive),
+                    cadence_seconds=cadence_seconds,
+                    recovery_threshold=_recovery_threshold(
+                        float(row.threshold), recovery_threshold_fraction
+                    ),
                 )
                 if not produced.empty:
                     collected[float(row.threshold_quantile)].append(produced)
@@ -1508,11 +1546,40 @@ def _robust_reference(frame, minimum_scales=None):
     return centre, scale
 
 
-def _reference_sample(path, maximum_rows, random_seed):
+def _reference_sample(
+    path,
+    maximum_rows,
+    random_seed,
+    maximum_rows_per_entity_day=8,
+):
+    """Sample calibration across entity-days, then apply the global cap.
+
+    Adjacent telemetry rows are strongly correlated. Taking a small,
+    deterministic sample from every entity-day gives the multivariate models
+    broader regime coverage than a reservoir sample over raw rows alone.
+    """
+
+    rows_per_block = int(maximum_rows_per_entity_day)
+    if rows_per_block < 1:
+        raise ValueError("maximum_rows_per_entity_day must be positive")
     source = _sql_literal(str(Path(path)))
     with _model_duckdb() as connection:
         return connection.execute(f"""
-            SELECT * FROM read_parquet({source})
+            WITH ranked AS (
+                SELECT *, row_number() OVER (
+                    PARTITION BY CAST(entity_id AS VARCHAR),
+                                 CAST(event_ts AT TIME ZONE 'UTC' AS DATE)
+                    ORDER BY hash(
+                        CAST(entity_id AS VARCHAR), event_ts, {int(random_seed)}
+                    )
+                ) AS sample_rank
+                FROM read_parquet({source})
+            ), balanced AS (
+                SELECT * EXCLUDE (sample_rank)
+                FROM ranked
+                WHERE sample_rank <= {rows_per_block}
+            )
+            SELECT * FROM balanced
             USING SAMPLE reservoir({int(maximum_rows)} ROWS)
             REPEATABLE ({int(random_seed)})
         """).df()
@@ -1608,6 +1675,98 @@ def _is_temporal_feature(name):
     )
 
 
+def _isolation_feature_priority(name):
+    """Order compact Isolation Forest inputs within each metric."""
+
+    markers = (
+        "__nonzero", "__positive_log10", "__positive_log1p",
+        "__increment", "__reset", "__state", "__level",
+        "__history_24h_z", "__lag_1h", "__history_7d_z",
+        "__rate_6h", "__sum_6h", "__difference", "__lag_6h",
+        "__rate_24h", "__sum_24h", "__seasonal_difference",
+    )
+    return next(
+        (rank for rank, marker in enumerate(markers) if str(name).endswith(marker)),
+        len(markers),
+    )
+
+
+def _balanced_isolation_features(
+    policy,
+    feature_columns,
+    maximum_features_per_metric,
+    contextual_metrics=(),
+):
+    """Choose a deterministic, bounded number of features per metric."""
+
+    maximum = int(maximum_features_per_metric)
+    if maximum < 1:
+        raise ValueError("maximum_features_per_metric must be positive")
+    audit = policy.loc[list(feature_columns), ["metric_id"]].copy()
+    audit["feature"] = audit.index.astype(str)
+    audit = audit.reset_index(drop=True)
+    audit["priority"] = audit["feature"].map(_isolation_feature_priority)
+    audit["contextual_metric"] = audit["metric_id"].astype(str).isin(
+        set(map(str, contextual_metrics))
+    )
+    audit = audit.sort_values(
+        ["metric_id", "priority", "feature"], kind="stable"
+    )
+    audit["metric_rank"] = audit.groupby("metric_id").cumcount() + 1
+    audit["retained"] = (
+        ~audit["contextual_metric"] & audit["metric_rank"].le(maximum)
+    )
+    selected = audit.loc[audit["retained"], "feature"].tolist()
+    return selected, audit.reset_index(drop=True)
+
+
+def _directional_model_frame(residuals, directions):
+    """Orient model inputs so only declared harmful directions are large."""
+
+    return orient_residuals(residuals, directions).clip(lower=0, upper=50)
+
+
+def _empirical_vector_evidence(values, calibration):
+    """Convert a one-dimensional score to calibration-tail evidence."""
+
+    values = np.asarray(values, dtype=float)
+    calibration = np.sort(np.asarray(calibration, dtype=float))
+    result = np.full(len(values), np.nan)
+    valid = np.isfinite(values)
+    if not len(calibration):
+        return result
+    exceedances = len(calibration) - np.searchsorted(
+        calibration, values[valid], side="left"
+    )
+    result[valid] = -np.log10(
+        (exceedances + 1.0) / (len(calibration) + 1.0)
+    )
+    return result
+
+
+def _second_metric_evidence(evidence, feature_metric_ids):
+    """Return the second-largest tail score across distinct metrics."""
+
+    metric_scores = {}
+    for metric_id in sorted(set(feature_metric_ids.values())):
+        columns = [
+            name for name in evidence
+            if feature_metric_ids.get(name) == metric_id
+        ]
+        if columns:
+            metric_scores[metric_id] = evidence[columns].max(
+                axis=1, skipna=True
+            )
+    if len(metric_scores) < 2:
+        return np.full(len(evidence), np.nan)
+    values = pd.DataFrame(metric_scores, index=evidence.index).to_numpy(float)
+    finite_count = np.isfinite(values).sum(axis=1)
+    safe = np.where(np.isfinite(values), values, -np.inf)
+    second = np.partition(safe, -2, axis=1)[:, -2]
+    second[finite_count < 2] = np.nan
+    return second
+
+
 def _fit_isolation_forest(
     values,
     *,
@@ -1640,16 +1799,21 @@ def fit_residual_bundle(
     minimum_scales=None,
     reference_exclusions=None,
     maximum_training_rows=150_000,
+    maximum_rows_per_entity_day=8,
     random_seed=42,
     isolation_trees=200,
     isolation_max_samples=1024,
     isolation_max_features=1.0,
+    maximum_isolation_features_per_metric=5,
     fit_multivariate=False,
 ):
     """Fit frozen robust references and optional residual ML models."""
 
     sample = _reference_sample(
-        calibration_features, maximum_training_rows, random_seed
+        calibration_features,
+        maximum_training_rows,
+        random_seed,
+        maximum_rows_per_entity_day=maximum_rows_per_entity_day,
     )
     sample["entity_id"] = sample["entity_id"].astype(str)
     candidates = [
@@ -1700,9 +1864,24 @@ def fit_residual_bundle(
         policy = feature_policy(catalogue, usable).set_index("feature")
         catalogue_directions = policy["direction"].to_dict()
         catalogue_scales = policy["minimum_scale"].astype(float).to_dict()
+        catalogue_index = catalogue.assign(
+            metric_id=catalogue["metric_id"].astype(str)
+        ).set_index("metric_id")
+        contextual_metrics = set(
+            catalogue_index.index[
+                catalogue_index.get(
+                    "direction", pd.Series("two_sided", index=catalogue_index.index)
+                ).astype(str).eq("contextual")
+            ]
+        )
     else:
+        policy = pd.DataFrame({
+            "feature": usable,
+            "metric_id": [name.split("__", 1)[0] for name in usable],
+        }).set_index("feature")
         catalogue_directions = {}
         catalogue_scales = {}
+        contextual_metrics = set()
     directions = {
         name: (feature_directions or {}).get(
             name, catalogue_directions.get(name, "two_sided")
@@ -1759,10 +1938,15 @@ def fit_residual_bundle(
         "use_entity_reference": bool(use_entity_reference),
         "reference_exclusions": exclusions.to_dict("records"),
         "training_rows": len(sample),
+        "training_sample_strategy": "bounded_entity_day_then_global_reservoir",
+        "maximum_rows_per_entity_day": int(maximum_rows_per_entity_day),
         "random_seed": int(random_seed),
         "isolation_trees": int(isolation_trees),
         "isolation_max_samples": int(isolation_max_samples),
         "isolation_max_features": isolation_max_features,
+        "maximum_isolation_features_per_metric": int(
+            maximum_isolation_features_per_metric
+        ),
         "fit_multivariate": bool(fit_multivariate),
         "feature_directions": directions,
         "minimum_scales": scale_floors,
@@ -1783,31 +1967,56 @@ def fit_residual_bundle(
         cumulative = np.cumsum(pca.explained_variance_ratio_)
         keep = min(int(np.searchsorted(cumulative, 0.90) + 1), component_limit)
         bundle["pca"] = PCA(n_components=keep, svd_solver="full").fit(clean)
-        base_features = [name for name in usable if not _is_temporal_feature(name)]
+        isolation_features, isolation_audit = _balanced_isolation_features(
+            policy,
+            usable,
+            maximum_isolation_features_per_metric,
+            contextual_metrics=contextual_metrics,
+        )
+        base_features = [
+            name for name in isolation_features
+            if not _is_temporal_feature(name)
+        ]
         if len(base_features) < 2:
             raise ValueError("The base Isolation Forest needs at least two features")
+        if len(isolation_features) < 2:
+            raise ValueError("The temporal Isolation Forest needs at least two features")
         bundle["isolation_base_features"] = base_features
+        bundle["isolation_temporal_features"] = isolation_features
+        bundle["isolation_feature_audit"] = isolation_audit
+        bundle["feature_metric_ids"] = policy["metric_id"].astype(str).to_dict()
+        oriented = _directional_model_frame(residuals, directions).fillna(0)
         bundle["isolation_forest_base"] = _fit_isolation_forest(
-            clean[base_features],
+            oriented[base_features],
             trees=isolation_trees,
             maximum_samples=isolation_max_samples,
             maximum_features=isolation_max_features,
             random_seed=random_seed,
         )
         bundle["isolation_forest_temporal"] = _fit_isolation_forest(
-            clean,
+            oriented[isolation_features],
             trees=isolation_trees,
             maximum_samples=isolation_max_samples,
             maximum_features=isolation_max_features,
             random_seed=random_seed,
+        )
+        temporal_scores = -bundle[
+            "isolation_forest_temporal"
+        ].decision_function(oriented[isolation_features])
+        bundle["isolation_temporal_tail_reference"] = np.sort(
+            temporal_scores[np.isfinite(temporal_scores)]
         )
         # Compatibility for model cards written before the variants were named.
         bundle["isolation_forest"] = bundle["isolation_forest_temporal"]
     else:
         bundle["pca"] = None
         bundle["isolation_base_features"] = []
+        bundle["isolation_temporal_features"] = []
+        bundle["isolation_feature_audit"] = pd.DataFrame()
+        bundle["feature_metric_ids"] = policy["metric_id"].astype(str).to_dict()
         bundle["isolation_forest_base"] = None
         bundle["isolation_forest_temporal"] = None
+        bundle["isolation_temporal_tail_reference"] = np.array([])
         bundle["isolation_forest"] = None
     return bundle
 
@@ -1878,6 +2087,13 @@ def score_residual_episode(
     rapid_values, rapid_leading = _row_max(
         rapid_evidence, bundle["feature_columns"]
     )
+    multimetric_values = _second_metric_evidence(
+        rapid_evidence,
+        bundle.get(
+            "feature_metric_ids",
+            {name: name.split("__", 1)[0] for name in bundle["feature_columns"]},
+        ),
+    )
     level_features = [
         name for name in bundle["feature_columns"]
         if name.endswith((
@@ -1911,6 +2127,7 @@ def score_residual_episode(
     pca_values = np.full(len(features), np.nan)
     isolation_base_values = np.full(len(features), np.nan)
     isolation_temporal_values = np.full(len(features), np.nan)
+    isolation_confirmed_values = np.full(len(features), np.nan)
     pca_leading = np.full(len(features), None, dtype=object)
     isolation_base_leading = rapid_leading.copy()
     isolation_temporal_leading = rapid_leading.copy()
@@ -1923,18 +2140,32 @@ def score_residual_episode(
         temporal_model = bundle.get(
             "isolation_forest_temporal", bundle.get("isolation_forest")
         )
+        directional = _directional_model_frame(residuals, directions).fillna(0)
         if temporal_model is not None:
-            isolation_temporal_values = -temporal_model.decision_function(clean)
+            temporal_features = bundle.get(
+                "isolation_temporal_features", bundle["feature_columns"]
+            )
+            temporal_values = directional[temporal_features]
+            isolation_temporal_values = -temporal_model.decision_function(
+                temporal_values
+            )
             isolation_temporal_leading = np.asarray(
-                bundle["feature_columns"], dtype=object
-            )[np.abs(clean.to_numpy()).argmax(axis=1)]
+                temporal_features, dtype=object
+            )[temporal_values.to_numpy().argmax(axis=1)]
+            temporal_evidence = _empirical_vector_evidence(
+                isolation_temporal_values,
+                bundle.get("isolation_temporal_tail_reference", []),
+            )
+            isolation_confirmed_values = np.minimum(
+                temporal_evidence, rapid_values
+            )
         base_model = bundle.get("isolation_forest_base")
         base_features = bundle.get("isolation_base_features", [])
         if base_model is not None and base_features:
-            base_values = clean[base_features]
+            base_values = directional[base_features]
             isolation_base_values = -base_model.decision_function(base_values)
             isolation_base_leading = np.asarray(base_features, dtype=object)[
-                np.abs(base_values.to_numpy()).argmax(axis=1)
+                base_values.to_numpy().argmax(axis=1)
             ]
 
     output = features[IDENTITY_COLUMNS].copy()
@@ -1942,6 +2173,7 @@ def score_residual_episode(
     output["readiness"] = np.where(ready, "monitored", "temporarily_unscoreable")
     channels = {
         "rapid_residual": (rapid_values, rapid_leading),
+        "multimetric_residual": (multimetric_values, rapid_leading),
         "drift_cusum": (drift_values, drift_leading),
         "dispersion_change": (dispersion_values, dispersion_leading),
         "pca_spe": (pca_values, pca_leading),
@@ -1950,6 +2182,9 @@ def score_residual_episode(
         ),
         "isolation_forest_temporal": (
             isolation_temporal_values, isolation_temporal_leading,
+        ),
+        "isolation_forest_confirmed": (
+            isolation_confirmed_values, isolation_temporal_leading,
         ),
     }
     for channel, (values, leading) in channels.items():
@@ -2005,7 +2240,13 @@ def score_residual_file(
             residual_frame = None
             if residual_destination is not None:
                 residual_frame = episode[IDENTITY_COLUMNS].copy()
-                residual_frame[residual_features] = residuals[residual_features]
+                # Topology compares harmful-direction evidence, not signed
+                # deviations. A cooler device or improved optical power must
+                # not become a peer anomaly merely because it is unusual.
+                residual_frame[residual_features] = _directional_model_frame(
+                    residuals[residual_features],
+                    bundle.get("feature_directions", {}),
+                )
             scores = score_residual_episode(
                 bundle,
                 episode,
@@ -2127,7 +2368,7 @@ def _topology_feature_specs(feature_columns):
 
 
 def _peer_wide_sql(residual_source, feature_specs, peer_group_type):
-    """Calculate peer counts and deviations without expanding rows by feature."""
+    """Calculate one-sided, contemporaneously scaled peer deviations."""
 
     window = (
         "PARTITION BY r.event_ts, t.group_id "
@@ -2137,9 +2378,13 @@ def _peer_wide_sql(residual_source, feature_specs, peer_group_type):
     statistics = []
     for feature, alias in feature_specs:
         value = f"r.{_sql_identifier(feature)}"
+        median = f"median({value}) OVER ({window})"
+        q25 = f"quantile_cont({value}, 0.25) OVER ({window})"
+        q75 = f"quantile_cont({value}, 0.75) OVER ({window})"
         statistics.extend([
             f"count({value}) OVER ({window}) AS {_sql_identifier(alias + '__count')}",
-            f"abs({value} - median({value}) OVER ({window})) "
+            f"greatest(0.0, {value} - {median}) "
+            f"/ greatest(({q75} - {q25}) / 1.349, 0.25) "
             f"AS {_sql_identifier(alias + '__raw')}",
         ])
     return f"""
@@ -2162,11 +2407,11 @@ def _group_wide_sql(residual_source, feature_specs, group_types):
         value = f"r.{_sql_identifier(feature)}"
         statistics.extend([
             f"count({value}) AS {_sql_identifier(alias + '__count')}",
-            f"abs(median({value})) * sqrt(count({value})) "
+            f"greatest(0.0, median({value})) "
             f"AS {_sql_identifier(alias + '__raw')}",
             "avg(CASE "
             f"WHEN {value} IS NULL THEN NULL "
-            f"WHEN abs({value}) >= 3 THEN 1.0 ELSE 0.0 END) "
+            f"WHEN {value} >= 3 THEN 1.0 ELSE 0.0 END) "
             f"AS {_sql_identifier(alias + '__affected')}",
         ])
     return f"""
@@ -2448,6 +2693,8 @@ def score_topology_file(
     min_peers=7,
     min_group_entities=3,
     min_group_fraction=0.50,
+    min_affected_entities=0,
+    min_affected_fraction=0.0,
 ):
     """Score eligible peer and common-mode evidence from frozen residuals.
 
@@ -2509,9 +2756,12 @@ def score_topology_file(
             reference, "group_common_mode", feature, alias
         )
         group_count = _sql_identifier(alias + "__count")
+        group_affected = _sql_identifier(alias + "__affected")
         group_scores.append(
             f"CASE WHEN {group_count} >= {int(min_group_entities)} "
             f"AND {group_count} * 1.0 / group_size >= {float(min_group_fraction)} "
+            f"AND {group_affected} * {group_count} >= {int(min_affected_entities)} "
+            f"AND {group_affected} >= {float(min_affected_fraction)} "
             f"THEN ({group_score}) ELSE NULL END "
             f"AS {_sql_identifier(alias + '__score')}"
         )
@@ -2969,6 +3219,12 @@ def score_partition_file(
             min_peers=resolved_policy["min_peers"],
             min_group_entities=resolved_policy["min_group_entities"],
             min_group_fraction=resolved_policy["min_group_fraction"],
+            min_affected_entities=resolved_policy.get(
+                "min_affected_entities", 1
+            ),
+            min_affected_fraction=resolved_policy.get(
+                "min_affected_fraction", 0.0
+            ),
         )
         residuals.unlink(missing_ok=True)
         combined = (

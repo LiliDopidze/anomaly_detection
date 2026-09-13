@@ -2,8 +2,8 @@
 
 | Document field | Value |
 |---|---|
-| Revision | 12 September 2026 |
-| Implementation baseline | `SPEC-CORE 1.0.0`, `SPEC-EVAL 1.0.0`, pack interface `1.0.0`, detector core `4.3.3` |
+| Revision | 13 September 2026 |
+| Implementation baseline | `SPEC-CORE 1.0.0`, `SPEC-EVAL 1.0.0`, pack interface `1.0.0`, detector core `4.4.0`, evaluator core `4.1.0` |
 | Primary domain | Fixed-access PON/ONT telemetry |
 | Audience | Data scientists, statisticians, ML engineers, data engineers, Telecom SMEs, and technical reviewers |
 | Status | Research-grade implementation with production-oriented controls; an operator pilot is still required before a production-performance claim |
@@ -271,9 +271,11 @@ The PON registry contains gauges, bounded fractions, interval counts, and
 cumulative counters. All current PON metrics have 900-second cadence, but the
 contract permits metric-specific cadence.
 
-The adapter currently defaults `peer_eligible` to true when the registry omits
-it. That is implementation behaviour, not the ideal governance rule. A future
-registry revision should require explicit opt-in for peer comparison.
+The source adapter may carry broad `peer_eligible` metadata for compatibility,
+but the model does not treat that as sufficient permission. Peer-relative
+scoring uses the explicit metric allow-list in `configs/topology.yml`. A new
+operator must review that list against its own measurement semantics before a
+metric can enter peer or group evidence.
 
 ### 6.1 Why measurement kind matters
 
@@ -397,16 +399,20 @@ No random row split is permitted. Random rows would put adjacent,
 autocorrelated measurements from the same entity on both sides and create an
 optimistic estimate.
 
-Calibration is divided again by elapsed time:
+Calibration is divided by elapsed time. The early 70% fits references and
+models. The remaining 30% is then split equally into threshold-estimation and
+workload-verification slices:
 
 $$
-\mathcal C=\mathcal C_{\mathrm{fit}}\cup\mathcal C_{\mathrm{threshold}},
+\mathcal C=\mathcal C_{\mathrm{fit}}\cup
+\mathcal C_{\mathrm{threshold}}\cup\mathcal C_{\mathrm{verify}},
 \qquad
-\mathcal C_{\mathrm{fit}}\cap\mathcal C_{\mathrm{threshold}}=\varnothing,
+\mathcal C_i\cap\mathcal C_j=\varnothing\quad(i\ne j),
 $$
 
-with the first 70% of calibration time used for fitting and the last 30% for
-thresholds and label-free workload estimation.
+where the slices remain chronological. Threshold values are estimated on
+\(\mathcal C_{\mathrm{threshold}}\); label-free incident workload is checked on
+\(\mathcal C_{\mathrm{verify}}\).
 
 The late slice is disjoint from model-parameter fitting. Notebook 04 EDA,
 however, sees the full calibration interval. The late slice is therefore not a
@@ -426,8 +432,8 @@ primary evaluation.
 | Canonicalisation | `02_CANONICAL_DATA_MODEL` | Adapter may stage labels separately | Truth-unmounted `SPEC-CORE` | Contract and content audit pass |
 | Split/truth lock | `03_SPLITS_AND_TRUTH_LOCK` | Evaluator builder only | Development and locked holdout stores | Invariance and negative controls pass |
 | EDA | `04_CALIBRATION_EDA` | None | Calibration evidence and EDA decisions | Limitations recorded |
-| Features | `05_FEATURE_ENGINEERING` | None | Fit, threshold, and development features | Causality and schema checks pass |
-| Primary fit | `06_PRIMARY_UNSUPERVISED_MODEL` | None | Model bundle, channel scores, thresholds | Calibration artifacts complete |
+| Features | `05_FEATURE_ENGINEERING` | None | Fit, late-calibration, and development features | Causality and schema checks pass |
+| Primary fit | `06_PRIMARY_UNSUPERVISED_MODEL` | None | Model bundle, threshold/workload/development scores, thresholds | Calibration artifacts complete |
 | Development selection | `07_CHALLENGER_MODELS` | Development only | Comparison and deployable/STOP decision | All gates pass or fail closed |
 | Incidents | `08_ALERTS_INCIDENTS_AND_DYING_GASP` | None | Persistent alerts and incidents | Frozen selection required unless diagnostic |
 | Localisation audit | `09_TOPOLOGY_LOCALISATION` | None | Location, alternatives, ambiguity | Physical/equivalence checks pass |
@@ -511,8 +517,9 @@ policy, and EDA decisions.
 **Computes:** quality-masked base transformations, gap-safe differences,
 exact lags, trailing robust histories, activity summaries, and approved
 seasonal differences.
-**Writes:** separate early-fit, late-threshold, and development feature files
-plus schema/provenance metadata.
+**Writes:** separate early-fit, late-calibration, and development feature files
+plus schema/provenance metadata. Phase 06 divides late-calibration scores into
+disjoint threshold-estimation and workload-verification halves.
 **Gate:** prefix-invariance, partition boundaries, and prohibited-field checks
 must pass.
 
@@ -520,7 +527,7 @@ must pass.
 
 **Reads:** feature files, topology, feature/alert policies; no fault truth.
 **Computes:** frozen robust references, self residuals, rapid and CUSUM scores,
-peer and group statistics, dispersion, PCA, three Isolation Forest variants,
+peer and group statistics, dispersion, PCA, four Isolation Forest variants,
 and late-calibration block-max threshold candidates.
 **Writes:** model bundle, score files, threshold provenance, score-availability
 evidence, and run manifest.
@@ -908,9 +915,12 @@ whole-series normalization, and other future leakage.
 
 ## 23. Early-calibration robust reference
 
-The implementation builds a seeded, row-weighted reservoir of at most 150,000
-early-calibration rows for pooled reference and challenger fitting. Candidate
-features have at least 20% availability and more than one distinct value.
+The implementation first retains at most eight seeded observations per
+entity-day, then applies a global cap of 150,000 early-calibration rows for
+pooled reference and challenger fitting. This reduces domination by dense,
+serially correlated regimes while preserving broad entity and day coverage.
+Candidate features have at least 20% availability and more than one distinct
+value.
 
 For feature \(j\):
 
@@ -935,9 +945,10 @@ Unseen entities also fall back to the pooled reference.
 
 The reference API supports excluding unstable entity-feature baselines, but
 Notebook 06 currently passes no EDA-derived exclusions. The current method does
-not claim that instability flags already control fitting. The reservoir is
-row-weighted, so high-coverage entities contribute more; entity-balanced
-fitting is a future sensitivity analysis.
+not claim that instability flags already control fitting. Multivariate model
+training first retains at most eight deterministic observations per entity-day
+and then applies the global row cap. Entity baselines themselves still use the
+complete early-calibration slice.
 
 ## 24. Rapid self deviation
 
@@ -998,12 +1009,15 @@ sum features.
 ## 26. Peer deviation
 
 For entity \(e\), feature \(j\), time \(t\), and contemporaneous eligible peers
-\(\mathcal P(e,t)\) excluding the entity itself:
+\(\mathcal P(e,t)\) excluding the entity itself, let \(a_j(r)\) denote the
+adverse-direction residual defined above. Peer evidence is
 
 $$
-P_{e,t,j}=\left|
-r_{e,t,j}-\operatorname{median}_{u\in\mathcal P(e,t)}r_{u,t,j}
-\right|.
+P_{e,t,j}=\frac{\max\left\{0,
+a_j(r_{e,t,j})-\operatorname{median}_{u\in\mathcal P(e,t)}a_j(r_{u,t,j})
+\right\}}
+{\max\left\{\operatorname{IQR}_{u\in\mathcal P(e,t)}a_j(r_{u,t,j})/1.349,
+0.25\right\}}.
 $$
 
 The peer hierarchy chooses the first configured physical level with at least
@@ -1011,8 +1025,10 @@ seven valid peers and at least 80% entity coverage. Preferred levels are
 splitter L2, PON port, splitter L1, then OLT. Self-standardization first removes
 legitimate entity offsets.
 
-The current peer statistic is two-sided even when a metric has one adverse
-direction.
+The explicit topology allow-list contains like-for-like optical power,
+temperature, bias-current, and voltage measurements. Traffic, error counters,
+uptime, and reboot counters do not enter peer comparison merely because they
+exist in the catalogue.
 
 ## 27. Group common mode
 
@@ -1020,17 +1036,19 @@ Peer deviation can be small when most descendants move together. For physical
 group \(g\), feature \(j\), and available descendants \(\mathcal E_g(t)\):
 
 $$
-G_{g,t,j}=
-\left|\operatorname{median}_{e\in\mathcal E_g(t)}r_{e,t,j}\right|
-\sqrt{n_{g,t}},
+G_{g,t,j}=\max\left\{0,
+\operatorname{median}_{e\in\mathcal E_g(t)}a_j(r_{e,t,j})
+\right\},
 $$
 
 $$
 A_{g,t,j}=\frac{1}{n_{g,t}}
-\sum_{e\in\mathcal E_g(t)}\mathbf1(|r_{e,t,j}|\ge3).
+\sum_{e\in\mathcal E_g(t)}\mathbf1(a_j(r_{e,t,j})\ge3).
 $$
 
-The group is scoreable with at least three available descendants and
+The group is scoreable with at least three available descendants, at least
+three adversely affected descendants, an affected fraction of at least 0.25,
+and
 
 $$
 \frac{n_{g,t}}{N_g}\ge0.50,
@@ -1126,20 +1144,24 @@ Current hyperparameters are:
 - 300 trees;
 - `max_samples = min(2048, n)`;
 - 75% of features per tree;
-- robust scaling and clipping to \([-50,50]\);
+- adverse-direction residuals clipped to \([0,50]\);
+- at most five retained inputs per metric;
+- at most eight deterministic rows per entity-day before the global cap;
 - fixed random seed 42.
 
-Three variants are compared:
+Four variants are compared:
 
 1. **base:** the non-window feature set; current classification still includes
    safe first and seasonal differences, so it is not literally level-only;
-2. **temporal:** all retained causal features;
-3. **contextual:** configured self/topology score context, including rapid,
+2. **temporal:** the metric-balanced current and causal temporal feature set;
+3. **confirmed temporal:** temporal Isolation Forest tail evidence intersected
+   with interpretable rapid-tail evidence using their minimum;
+4. **contextual:** configured self/topology score context, including rapid,
    CUSUM, dispersion, peer, group, and group affected fraction.
 
 At least half of contextual inputs must be available and nonconstant. The
-reported leading feature is the largest absolute standardized residual—a
-human-readable proxy, not tree-level attribution.
+reported leading feature is the largest adverse-direction standardized
+residual—a human-readable proxy, not tree-level attribution.
 
 ### 29.4 Why the interpretable detector remains primary
 
@@ -1174,12 +1196,15 @@ Candidate thresholds are continuous empirical quantiles
 
 $$
 \tau_{c,q}=\widehat Q_q\{M_{c,u,b}\},
-\qquad q\in\{0.95,0.975,0.99,0.995\}.
+\qquad q\in\{0.99,0.995,0.9975,0.999\}.
 $$
 
 At 900-second cadence, a block must contain at least 48 observations. Scope
 channels count distinct timestamps because one scope score may be repeated on
-descendant entity rows.
+descendant entity rows. A selectable threshold must have at least five
+expected calibration blocks beyond its quantile,
+\(B(1-q)\ge5\), where \(B\) is the number of usable block maxima. This is a
+minimum empirical-support rule, not proof that the tail blocks are independent.
 
 Block maxima account for repeated within-day scoring opportunities more
 honestly than a pointwise quantile. They are empirical held-out-calibration
@@ -1187,23 +1212,26 @@ thresholds, not a formal conformal guarantee.
 
 ## 31. Label-free workload operating point
 
-For each portfolio, late-calibration scores are converted to alerts and cases
-at every candidate quantile. The chosen operating point is
+For each portfolio, the independent verification scores are converted to
+alerts and cases at every candidate quantile. Every case is conservatively
+counted as workload because labels are not opened. Let
+\(U_{0.95}(K,E)\) be the exact Garwood upper rate bound. The chosen operating
+point is
 
 $$
 q_p^*=\min\left\{q:
-\frac{K_{\mathcal C_{\mathrm{threshold}}}(p,q)}
-{E_{\mathcal C_{\mathrm{threshold}}}}
-\le0.01\right\}.
+U_{0.95}\left(K_{\mathcal C_{\mathrm{verify}}}(p,q),
+E_{\mathcal C_{\mathrm{verify}}}\right)
+\le0.009\right\}.
 $$
 
 On an ascending grid, the minimum admissible \(q\) is the most sensitive point
 meeting the budget. All late-calibration cases count toward workload because
 truth is not read there; they are not verified false positives.
 
-Threshold estimation and workload checking currently use the same late-
-calibration slice. A stronger production design would split or cross-fit this
-slice so compliance is assessed out of sample.
+The 0.009 limit is the declared 0.01 research budget multiplied by the frozen
+0.90 safety factor. Threshold estimation and workload verification are
+therefore disjoint and use the same uncertainty rule as development selection.
 
 ## 32. Alert state machine
 
@@ -1224,20 +1252,15 @@ consecutive high observations. At the current 15-minute PON cadence:
 | Channel | Persistence | Typical observations |
 |---|---:|---:|
 | rapid self | 1,800 s | 2 |
-| persistent drift | 900 s | 1 |
+| persistent drift | 3,600 s | 4 |
 | peer deviation | 1,800 s | 2 |
 | group common mode | 1,800 s | 2 |
 | challenger channel | 1,800 s | 2 |
 
-Two consecutive normal observations close an alert. A gap beyond 1.5 times the
-episode median cadence resets the alert state.
-
-**Timing limitation.** Persistence is confirmed causally, but stored
-`alert_start` is backdated to the first high score. Matching and delay currently
-use that timestamp, so a two-point alert may appear one cadence earlier than
-the operational decision. Required correction: retain `alert_start` as anomaly
-interval onset, add `alert_fired_ts`, and use the latter for matching, delay,
-and pre-impact metrics.
+Recovery requires 3,600 seconds below 80% of the firing threshold. A missing
+score or a gap beyond 1.5 times declared cadence closes any open alert and
+resets persistence. `alert_start` is the observation at which persistence is
+actually confirmed; it is never backdated to the first breach.
 
 ## 33. Incident consolidation
 
@@ -1636,37 +1659,30 @@ separate in every report.
 3. Some holdout fault families have very small denominators.
 4. Some declared faults are unscoreable because they do not overlap observable
    telemetry.
-5. `alert_start` is backdated; operational firing time is not yet evaluated.
-6. Broad predicted scopes can currently contribute to detection matching.
-7. The localiser is footprint-rule based, not learned or causal.
-8. The decision horizon is one fixed 48-hour value.
-9. Topology is not joined at every event's effective time.
-10. Threshold fitting and workload checking share late calibration.
-11. EDA sees all calibration, including the threshold slice.
-12. Basic confidence intervals do not model temporal/topology clustering.
-13. Exposure does not subtract internal unscoreable gaps.
-14. Dispersion rolling windows can bridge internal gaps.
-15. Peer eligibility defaults on if omitted.
-16. EDA instability exclusions are not passed into reference fitting.
-17. The calibration reservoir is row-weighted rather than entity-balanced.
-18. Public-source feature policies are not yet independently reviewed.
-19. A sensor that never reports needs capability metadata to distinguish
+5. Broad predicted scopes can currently contribute to detection matching.
+6. The localiser is footprint-rule based, not learned or causal.
+7. The decision horizon is one fixed 48-hour value.
+8. Topology is not joined at every event's effective time.
+9. EDA sees all calibration, including the threshold slice.
+10. Basic confidence intervals do not model temporal/topology clustering.
+11. Exposure does not subtract internal unscoreable gaps.
+12. Dispersion rolling windows can bridge internal gaps.
+13. EDA instability exclusions are not passed into reference fitting.
+14. Public-source feature policies are not yet independently reviewed.
+15. A sensor that never reports needs capability metadata to distinguish
    failure from non-installation.
-20. Incident evidence is anomaly strength, not business risk.
+16. Incident evidence is anomaly strength, not business risk.
 
 ## 50. Priority corrections
 
 ### Priority 1 — measurement validity
 
-- add `alert_fired_ts` and use it for matching and delay;
 - require observed alert-member overlap for detection credit;
 - retain predicted-footprint overlap as localisation-only evidence;
 - calculate score-eligible exposure or report both exposure definitions.
 
 ### Priority 2 — selection validity
 
-- split or cross-fit late calibration for threshold fitting versus workload
-  verification;
 - enforce multi-entity localisation sufficiency in Notebook 07;
 - add joint detection-and-localisation recall to the selection gate;
 - consider gating recall on its lower confidence bound when sample size permits;
@@ -1677,7 +1693,8 @@ separate in every report.
 - add time/topology-cluster bootstrap uncertainty;
 - implement effective-time topology joins;
 - recognize entity/single-descendant equivalence;
-- perform an entity-balanced reference sensitivity analysis;
+- compare the bounded entity-day sample with a cluster-weighted sensitivity
+  analysis;
 - reset the dispersion challenger across gaps.
 
 ### Priority 4 — operational evidence
@@ -1707,16 +1724,16 @@ solve the scientific problem.
 | Primary domain | Fixed-access PON/ONT | Topology localisation is the product driver |
 | PON cadence | 900 seconds | Declared schedule for current synthetic source |
 | Main split | Chronological calibration/development/holdout | Prevent adjacent-row leakage |
-| Calibration split | 70% fit, 30% threshold/workload | Separate reference fitting from threshold data |
+| Calibration split | 70% fit, 15% threshold, 15% workload verification | Separate model fit, threshold estimation, and label-free workload evidence |
 | Gap tolerance | 1.5 × cadence | Permit jitter, stop state across longer absence |
-| Fit reservoir | 150,000 seeded rows | Bounded-memory pooled fitting |
+| Fit reservoir | 8 seeded rows per entity-day, then at most 150,000 rows | Limit serial and entity imbalance in multivariate fitting |
 | Minimum entity reference | 30 observations | Avoid very small local estimates |
 | Threshold blocks | Entity/scope UTC-day maxima | Account for repeated scoring opportunities |
-| Threshold grid | 0.95, 0.975, 0.99, 0.995 | Small predeclared operating grid |
+| Threshold grid | 0.99, 0.995, 0.9975, 0.999 | Resolve the low-alert-rate operating region with at least five expected tail blocks |
 | Workload target | 10 incidents per 1,000 entity-days | Research target; pilot must validate |
 | Gate safety factor | 0.90 | Require upper interval below 9 per 1,000 |
 | Rapid persistence | 1,800 seconds | Two observations at current cadence |
-| Drift persistence | 900 seconds | One observation at current cadence |
+| Drift persistence | 3,600 seconds | Require sustained accumulated evidence |
 | Peer/group persistence | 1,800 seconds | Reduce isolated score spikes |
 | Incident quiet period | 3,600 seconds | Consolidate nearby evidence |
 | CUSUM allowance | 0.5 standardized units | Ignore small deviations while accumulating drift |
@@ -1724,6 +1741,8 @@ solve the scientific problem.
 | Peer coverage | 80% | Require meaningful comparison population |
 | Minimum group entities | 3 | Require nontrivial common-mode footprint |
 | Group availability | 50% | Avoid inference from a small observed fraction |
+| Group affected support | At least 3 entities and 25% | Avoid treating one descendant as common mode |
+| Recovery | 3,600 seconds below 80% of firing threshold | Hysteresis without backdated closure |
 | Decision horizon | 172,800 seconds | Current common 48-hour window |
 | Development faults | At least 30 | Avoid selection on a tiny denominator |
 | Recall gate | Point estimate at least 0.20 | Current research floor; should later be strengthened |
@@ -1764,8 +1783,8 @@ voltage, and 1.0 for counter increments.
 | 02 | Prepared pack and truth-unmounted canonical core | 03–06 |
 | 03 | Development truth, locked holdout, split/isolation manifests | 07 and 10 only |
 | 04 | Structural, temporal, seasonal, dependence, sufficiency evidence | Feature review and 05 |
-| 05 | Early-fit, late-threshold, and development features | 06 and 07 |
-| 06 | Frozen reference, primary/challenger scores, thresholds | 07, 08, and 10 |
+| 05 | Early-fit, late-calibration, and development features | 06 and 07 |
+| 06 | Frozen reference, threshold/workload/development scores, thresholds | 07, 08, and 10 |
 | 07 | Workload points, development comparison, selection status | 08 and model freeze |
 | 08 | Persistent alerts, incidents, observable event context | 09 and operator view |
 | 09 | Location, alternatives, equivalence, footprint evidence | 10 and operator view |
@@ -1779,7 +1798,7 @@ voltage, and 1.0 for counter increments.
 |---|---|---|
 | Label leakage | Physical separation, schema guard, invariance, negative control | Deliberate manual access remains possible |
 | Temporal leakage | Chronological split, causal windows, prefix test | EDA sees all calibration |
-| In-sample tail optimism | Early/late calibration split | Threshold and workload check share late slice |
+| In-sample tail optimism | Early fit plus disjoint threshold and workload slices | EDA still sees all calibration |
 | Repeated alert opportunities | Daily maxima and incident consolidation | Block dependence/nonstationarity remain |
 | Duplicate event credit | One-to-one matching | Matching does not optimize delay |
 | Broad location credit | Footprint metrics and ambiguity | Detection matching can use predicted descendants |
