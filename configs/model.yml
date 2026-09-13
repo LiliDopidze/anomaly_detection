@@ -1,0 +1,20 @@
+version: 1
+
+# Model fitting is intentionally separate from feature generation. Changing
+# these choices therefore requires a new model run, not a costly feature run.
+calibration_sample:
+  maximum_rows_per_entity_day: 8
+
+isolation_forest:
+  n_estimators: 300
+  max_samples: 2048
+  max_features: 0.75
+  random_seed: 42
+  maximum_features_per_metric: 5
+  contextual_inputs:
+    - rapid_residual
+    - drift_cusum
+    - dispersion_change
+    - peer_deviation
+    - group_common_mode
+    - group_common_mode__affected_fraction

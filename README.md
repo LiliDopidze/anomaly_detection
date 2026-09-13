@@ -39,8 +39,8 @@ The notebooks run in order:
 03 splits + truth lock
 04 calibration-only EDA
 05 leakage-safe features
-06 primary four-channel detector
-07 challengers + ablations
+06 calibration-only statistical and Isolation Forest detectors
+07 independent workload check + development selection
 08 alerts, incidents + observable events
 09 topology localisation
 10 locked evaluation
@@ -124,9 +124,11 @@ For exact run instructions and the purpose of every notebook, see
   `SPEC-EVAL` and are mounted only by the evaluator.
 - Calibration, development, and holdout are chronological. Development labels
   may compare declared candidates; locked holdout cannot change the model.
-- Score thresholds use a late calibration slice that was not used to fit the
-  detector. Consolidated incident workload and recall are then compared on
-  development truth; holdout remains sealed until one configuration freezes.
+- Score thresholds use one late-calibration half that was not used to fit the
+  detector. The other half verifies consolidated workload without labels.
+  Empirical tail thresholds also require minimum block support. Only then are
+  frozen operating points compared on development truth; holdout remains
+  sealed until one configuration passes every gate.
 - The selected model fails closed if no candidate satisfies the workload and
   evidence gates.
 - Localisation reports the smallest supported observable scope and preserves
