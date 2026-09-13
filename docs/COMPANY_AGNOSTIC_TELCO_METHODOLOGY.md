@@ -3,7 +3,7 @@
 | Document field | Value |
 |---|---|
 | Revision | 13 September 2026 |
-| Implementation baseline | `SPEC-CORE 1.0.0`, `SPEC-EVAL 1.0.0`, pack interface `1.0.0`, detector core `4.4.0`, evaluator core `4.1.0` |
+| Implementation baseline | `SPEC-CORE 1.0.0`, `SPEC-EVAL 1.0.0`, pack interface `1.0.0`, detector core `4.4.0`, evaluator core `4.2.0` |
 | Primary domain | Fixed-access PON/ONT telemetry |
 | Audience | Data scientists, statisticians, ML engineers, data engineers, Telecom SMEs, and technical reviewers |
 | Status | Research-grade implementation with production-oriented controls; an operator pilot is still required before a production-performance claim |
@@ -543,8 +543,14 @@ persistent alerts, consolidated incidents, one-to-one development matching,
 uncertainty, ablations, and selection gates.
 **Writes:** candidate comparison, diagnostics, and either one frozen selection
 or an explicit STOP result.
-**Gate:** no deployable configuration is written unless all workload,
-availability, fault-count, and recall gates pass.
+**Gate:** no research detection configuration is selected unless all workload,
+availability, fault-count, and recall-evidence gates pass.
+
+Every threshold candidate is retained in the label-free calibration workload
+audit. Development truth is evaluated only at the one independently selected
+operating point per portfolio. Evaluating development at thresholds that can
+never be selected would add runtime and create unnecessary label-visible
+diagnostics without improving the decision.
 
 ### Phase 08 — alerts, incidents, and observable event context
 
@@ -1294,16 +1300,28 @@ scores, thresholds, or rank.
 
 ## 34. Exposure denominator
 
-Current entity-day exposure sums observed episode spans plus one cadence:
+Calendar exposure sums observed episode spans plus one cadence:
 
 $$
-E=\sum_e\frac{t_{e,\max}-t_{e,\min}+\Delta_e}{86400}.
+E_{\mathrm{calendar}}
+=\sum_e\frac{t_{e,\max}-t_{e,\min}+\Delta_e}{86400}.
 $$
 
-This does not subtract internal unscoreable collection gaps and can depress
-the reported incident rate when gaps are substantial. Production reporting
-should use score-eligible monitored time or publish both service-time and
-score-eligible exposure.
+For portfolio (P), the implemented scoreable exposure is
+
+$$
+E_{\mathrm{scoreable}}(P)
+=\frac{\Delta}{86400}
+\left|\left\{(e,t):\exists c\in P,\ S_{e,t,c}\text{ is finite}\right\}\right|.
+$$
+
+The union is taken before counting, so a timestamp with two available channels
+is counted once. Internal gaps and rows where every selected channel is null or
+non-finite contribute no scoreable time. Workload rates and Garwood intervals
+use (E_{\mathrm{scoreable}}); Notebook 07 and locked evaluation publish both
+denominators and the availability ratio
+(E_{\mathrm{scoreable}}/E_{\mathrm{calendar}}). This is detector opportunity,
+not an assertion that the entity was contractually obliged to report.
 
 ---
 
@@ -1395,14 +1413,18 @@ The matcher maximizes match count, not temporal plausibility or minimum total
 delay. A delay-aware sensitivity analysis is appropriate when fault windows
 overlap heavily.
 
-**Detection-credit limitation.** Candidate matching can currently expand a
-predicted topology scope to all descendants. A broad OLT prediction can
-therefore receive detection credit for a concurrent fault even if none of the
-actually alerting entities is affected. Required correction:
+Let (M_C) be the entities that actually contributed alerts to incident (C),
+and let (A_f(t)) be the affected entities in fault (f)'s valid matching
+window. A candidate match now requires
 
-- primary detection credit must require overlap between observed alert members
-  and affected entities;
-- predicted-scope overlap remains a separate localisation metric.
+$$
+M_C\cap A_f(t_C)\ne\varnothing.
+$$
+
+The predicted topology scope is never expanded into (M_C). Its descendants
+are used only for localisation precision, recall, Jaccard, equivalence, and
+hierarchy-distance evidence. Thus a broad OLT prediction cannot manufacture
+detection credit for a concurrent fault on a non-alerting ONT.
 
 ## 40. Primary metrics
 
@@ -1475,16 +1497,17 @@ Production evidence needs topology/time-block bootstrap intervals. Current
 delay, footprint averages, hierarchy distance, and domain-level results also
 lack uncertainty intervals.
 
-The configuration exposes a 95% confidence level, but current code uses the
-corresponding constants directly. A future implementation should pass the
-configured level through all interval calculations.
+The configured confidence level is passed through event, localisation, and
+workload interval calculations. The current frozen value is two-sided 95%.
 
 ## 42. Development selection gate
 
-A candidate is deployable only when all implemented gates pass:
+A candidate passes the current **research detection gate** only when all
+implemented gates pass:
 
 1. at least 30 development faults;
-2. event-recall point estimate at least 0.20;
+2. lower endpoint of the two-sided 95% Wilson event-recall interval at least
+   0.20;
 3. missing-score fraction at most 0.20;
 4. upper 95% false-incident-rate bound no greater than
 
@@ -1494,20 +1517,31 @@ $$
 
 per entity-day.
 
-Among candidates within 0.02 recall of the best eligible result, a frozen
+For 64 scoreable faults, the recall rule requires at least 20 detections:
+the observed recall is then 31.25% and its Wilson lower bound is approximately
+21.2%. The 20% value is a conservative research floor, not a production SLA;
+an operator pilot must replace it with a cost- and criticality-based target.
+
+Among candidates within 0.02 point recall of the best eligible result, a frozen
 simplicity preference is applied, followed by lower upper-bound workload and
 higher recall. If no candidate passes, Notebook 07 writes diagnostic evidence
-and **no deployable configuration**.
+and **no selected detection configuration**.
 
 This fail-closed result is scientifically valid. It prevents the least-bad
 experiment from being mislabeled production-ready.
 
-Current gate limitations are:
+Detection selection and localisation qualification are deliberately separate.
+For localisation, Notebook 07 reports the number of faults affecting more than
+one unique entity and the point estimate plus Wilson interval for joint
+detection-and-equivalence-aware-localisation recall. Fewer than 20 such faults
+is insufficient. Even with 20 or more, localisation remains
+`not_established_unregistered_performance_gate` until an explicit minimum joint
+recall lower bound is registered; the code does not silently reuse the
+detection target.
 
-- recall is gated on its point estimate rather than its lower interval bound;
-- the configured minimum of 20 multi-entity faults for a localisation claim is
-  not yet enforced;
-- joint detection-and-localisation recall is not yet a selection gate;
+Remaining gate limitations are:
+
+- no stakeholder-approved localisation performance target is registered;
 - channel pruning can make nominal portfolios operationally identical;
 - matched workload means the same budget constraint, not identical realized
   incident rates.
@@ -1659,36 +1693,37 @@ separate in every report.
 3. Some holdout fault families have very small denominators.
 4. Some declared faults are unscoreable because they do not overlap observable
    telemetry.
-5. Broad predicted scopes can currently contribute to detection matching.
-6. The localiser is footprint-rule based, not learned or causal.
+5. The localiser is footprint-rule based, not learned or causal.
+6. No stakeholder-approved localisation performance gate is registered.
 7. The decision horizon is one fixed 48-hour value.
 8. Topology is not joined at every event's effective time.
 9. EDA sees all calibration, including the threshold slice.
 10. Basic confidence intervals do not model temporal/topology clustering.
-11. Exposure does not subtract internal unscoreable gaps.
-12. Dispersion rolling windows can bridge internal gaps.
-13. EDA instability exclusions are not passed into reference fitting.
-14. Public-source feature policies are not yet independently reviewed.
-15. A sensor that never reports needs capability metadata to distinguish
+11. Dispersion rolling windows can bridge internal gaps.
+12. EDA instability exclusions are not passed into reference fitting.
+13. Public-source feature policies are not yet independently reviewed.
+14. A sensor that never reports needs capability metadata to distinguish
    failure from non-installation.
-16. Incident evidence is anomaly strength, not business risk.
+15. Incident evidence is anomaly strength, not business risk.
 
 ## 50. Priority corrections
 
-### Priority 1 — measurement validity
+### Completed in evaluator/selection revision 4.2/v8
 
-- require observed alert-member overlap for detection credit;
-- retain predicted-footprint overlap as localisation-only evidence;
-- calculate score-eligible exposure or report both exposure definitions.
+- detection credit requires observed alert-member overlap;
+- predicted-footprint overlap is localisation-only evidence;
+- workload uses portfolio-scoreable exposure and reports calendar exposure;
+- event recall is gated on its two-sided 95% Wilson lower bound;
+- localisation sample sufficiency and qualification status are reported
+  separately from detection selection.
 
-### Priority 2 — selection validity
+### Priority 1 — selection validity
 
-- enforce multi-entity localisation sufficiency in Notebook 07;
-- add joint detection-and-localisation recall to the selection gate;
-- consider gating recall on its lower confidence bound when sample size permits;
+- register an operator-meaningful joint-localisation performance target before
+  claiming that capability;
 - pre-register fault-family horizons or justify the common horizon.
 
-### Priority 3 — dependence and topology
+### Priority 2 — dependence and topology
 
 - add time/topology-cluster bootstrap uncertainty;
 - implement effective-time topology joins;
@@ -1697,7 +1732,7 @@ separate in every report.
   analysis;
 - reset the dispersion challenger across gaps.
 
-### Priority 4 — operational evidence
+### Priority 3 — operational evidence
 
 - add the operator's existing threshold/alarm rules as a transparent baseline;
 - run a real PON shadow-mode pilot;
@@ -1801,10 +1836,10 @@ voltage, and 1.0 for counter increments.
 | In-sample tail optimism | Early fit plus disjoint threshold and workload slices | EDA still sees all calibration |
 | Repeated alert opportunities | Daily maxima and incident consolidation | Block dependence/nonstationarity remain |
 | Duplicate event credit | One-to-one matching | Matching does not optimize delay |
-| Broad location credit | Footprint metrics and ambiguity | Detection matching can use predicted descendants |
+| Broad location credit | Alert-member-only detection match; footprint metrics and ambiguity | Broad predictions can still have poor localisation utility |
 | Small samples | Counts, Wilson/Garwood intervals, fault gate | Dependence can make intervals optimistic |
 | Topology changes | Effective-dated contract and ambiguity checks | No event-time join yet |
-| Missing telemetry | Quality, episodes, gaps, availability | Exposure includes internal gaps |
+| Missing telemetry | Quality, episodes, gaps, dual calendar/scoreable exposure | Source capability metadata is still needed for never-seen sensors |
 | Synthetic-to-real shift | Separate public qualification and pilot requirement | No real PON performance evidence yet |
 
 # Appendix E — Glossary
