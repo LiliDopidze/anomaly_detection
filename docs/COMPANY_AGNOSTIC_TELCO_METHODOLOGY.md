@@ -538,19 +538,20 @@ channel without adequate support is disabled rather than imputed into success.
 
 **Reads:** frozen scores and thresholds, late-calibration exposure, and
 development truth only.
-**Computes:** a label-free workload operating point for each portfolio,
-persistent alerts, consolidated incidents, one-to-one development matching,
-uncertainty, ablations, and selection gates.
+**Computes:** a label-free workload audit for every threshold, persistent
+alerts, consolidated incidents, one-to-one development matching, uncertainty,
+ablations, and selection gates across calibration-admissible operating points.
 **Writes:** candidate comparison, diagnostics, and either one frozen selection
 or an explicit STOP result.
 **Gate:** no research detection configuration is selected unless all workload,
 availability, fault-count, and recall-evidence gates pass.
 
 Every threshold candidate is retained in the label-free calibration workload
-audit. Development truth is evaluated only at the one independently selected
-operating point per portfolio. Evaluating development at thresholds that can
-never be selected would add runtime and create unnecessary label-visible
-diagnostics without improving the decision.
+audit. Only thresholds with adequate tail support and a passing independent
+workload bound reach development. Development may select among those operating
+points because it is the validation set; the locked holdout remains the sole
+final performance test. The least strict passing threshold is also retained as
+a separate label-free fallback for an operator with no development labels.
 
 ### Phase 08 — alerts, incidents, and observable event context
 
@@ -1377,7 +1378,7 @@ much of the network.
 
 # Part IX — Evaluation, uncertainty, and selection
 
-## 38. Evaluation window
+## 38. Detection, early-warning, and promptness windows
 
 For fault-entity interval \((f,e)\), matching begins at
 
@@ -1386,20 +1387,42 @@ L_{fe}=\max(t_{\mathrm{observable/onset},f},
 t^{\mathrm{interval\ start}}_{fe}),
 $$
 
-and ends at
+The active-fault detection window ends at
 
 $$
-U_{fe}=\min\left(
+U^{\mathrm{active}}_{fe}=\min\left(
 t^{\mathrm{event\ end}}_f,
-t^{\mathrm{interval\ end}}_{fe},
-L_{fe}+H_f
+t^{\mathrm{interval\ end}}_{fe}
 \right).
 $$
 
-The interval is half-open \([L_{fe},U_{fe})\). Current implementation uses one
-fixed horizon \(H_f=172{,}800\) seconds (48 hours) for all fault types. Per-
-family horizons are not implemented and must be justified and registered
-before comparative results are inspected.
+The interval is half-open \([L_{fe},U^{\mathrm{active}}_{fe})\). This answers
+whether observable anomalous behaviour was detected while the fault was active.
+It is not, by itself, evidence of an early warning.
+
+Early warning is credited only when the first matched incident occurs before
+the recorded impact time:
+
+$$
+L_{fe}\le t^{\mathrm{first\ detection}}_f<t^{\mathrm{impact}}_f.
+$$
+
+Faults without a known impact time are excluded from this estimand rather than
+silently treated as successes or failures. Promptness is a third estimand. Its
+window ends at
+
+$$
+U^{\mathrm{prompt}}_{fe}=\min\left(
+U^{\mathrm{active}}_{fe}, L_{fe}+H
+\right),
+$$
+
+where the registered common horizon is currently
+\(H=172{,}800\) seconds (48 hours). A pre-impact detection can therefore be a
+valid early warning yet miss the 48-hour service objective for a very slow
+fault. Conversely, a prompt detection after impact is not an early warning.
+Prediction would require forecasting before observable fault evidence; that is
+outside the present scope.
 
 ## 39. One-to-one event credit
 
@@ -1428,8 +1451,9 @@ detection credit for a concurrent fault on a non-alerting ONT.
 
 ## 40. Primary metrics
 
-With credited incidents \(K_M\), total incidents \(K\), impact-known faults
-\(N_I\), and pre-impact detections \(D_I\):
+With credited incidents \(K_M\), total incidents \(K\), active-window
+detections \(D_F\), prompt detections \(D_H\), impact-known faults \(N_I\),
+and pre-impact detections \(D_I\):
 
 $$
 \mathrm{event\ recall}=\frac{D_F}{N_F},
@@ -1445,6 +1469,10 @@ $$
 
 $$
 \mathrm{preimpact\ recall}=\frac{D_I}{N_I}.
+$$
+
+$$
+\mathrm{prompt\ recall}_{H}=\frac{D_H}{N_F}.
 $$
 
 The evaluator also reports:
@@ -1695,7 +1723,8 @@ separate in every report.
    telemetry.
 5. The localiser is footprint-rule based, not learned or causal.
 6. No stakeholder-approved localisation performance gate is registered.
-7. The decision horizon is one fixed 48-hour value.
+7. Promptness uses one fixed 48-hour value; operator-specific service objectives
+   have not yet been validated.
 8. Topology is not joined at every event's effective time.
 9. EDA sees all calibration, including the threshold slice.
 10. Basic confidence intervals do not model temporal/topology clustering.
@@ -1708,7 +1737,7 @@ separate in every report.
 
 ## 50. Priority corrections
 
-### Completed in evaluator/selection revision 4.2/v8
+### Completed in evaluator/selection revision 4.3/v9
 
 - detection credit requires observed alert-member overlap;
 - predicted-footprint overlap is localisation-only evidence;
@@ -1716,12 +1745,17 @@ separate in every report.
 - event recall is gated on its two-sided 95% Wilson lower bound;
 - localisation sample sufficiency and qualification status are reported
   separately from detection selection.
+- active-fault detection, pre-impact early warning, and 48-hour prompt recall
+  are distinct estimands;
+- development selects only among operating points that independently passed
+  calibration workload and empirical-tail support checks.
 
 ### Priority 1 — selection validity
 
 - register an operator-meaningful joint-localisation performance target before
   claiming that capability;
-- pre-register fault-family horizons or justify the common horizon.
+- validate the common 48-hour promptness objective with operators before
+  replacing it or registering fault-family objectives.
 
 ### Priority 2 — dependence and topology
 
@@ -1778,9 +1812,11 @@ solve the scientific problem.
 | Group availability | 50% | Avoid inference from a small observed fraction |
 | Group affected support | At least 3 entities and 25% | Avoid treating one descendant as common mode |
 | Recovery | 3,600 seconds below 80% of firing threshold | Hysteresis without backdated closure |
-| Decision horizon | 172,800 seconds | Current common 48-hour window |
+| Detection window | Complete active fault interval | Measures anomaly detection without relabelling late true detections as false incidents |
+| Early-warning window | Observable evidence to recorded impact | Separates warning from post-impact diagnosis |
+| Promptness horizon | 172,800 seconds | Current common 48-hour service objective |
 | Development faults | At least 30 | Avoid selection on a tiny denominator |
-| Recall gate | Point estimate at least 0.20 | Current research floor; should later be strengthened |
+| Recall gate | 95% Wilson lower bound at least 0.20 | Applied to active detection; pre-impact and prompt recall are separately qualified at the same provisional research floor |
 | Missing-score gate | At most 0.20 | Prevent selective availability looking successful |
 
 # Appendix B — Current PON metric policy
@@ -1855,7 +1891,9 @@ voltage, and 1.0 for counter increments.
   episode.
 - **Common mode:** coherent movement among descendants of one physical scope.
 - **Development:** labelled period used to compare predeclared candidates at
-  label-free operating points.
+  calibration-admissible operating points.
+- **Early warning:** detection after fault evidence becomes observable but
+  before recorded impact; it is not pre-evidence prediction.
 - **Entity-day:** one entity observed for one day; the current workload unit.
 - **Episode:** recording context across which stateful calculations may operate.
 - **Evidence score:** anomaly strength under one channel; not necessarily a

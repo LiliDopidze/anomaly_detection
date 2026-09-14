@@ -155,3 +155,74 @@ def qualify_localisation(
     else:
         evidence["status"] = "not_qualified_joint_recall_bound"
     return evidence
+
+
+def qualify_early_warning(
+    row,
+    *,
+    minimum_faults,
+    minimum_preimpact_recall_ci_low,
+    minimum_prompt_recall_ci_low,
+):
+    """Qualify early warning separately from active-fault detection.
+
+    Early warning means detecting observable evidence before recorded impact.
+    Prompt recall adds the registered maximum response horizon. Both are
+    conservative Wilson lower-bound gates; neither changes detector fitting.
+    """
+
+    fields = {
+        "preimpact_scoreable_faults",
+        "preimpact_event_recall",
+        "preimpact_event_recall_ci_low",
+        "prompt_scoreable_faults",
+        "prompt_event_recall",
+        "prompt_event_recall_ci_low",
+    }
+    missing = fields - set(row.index)
+    if missing:
+        return {
+            "status": "not_established_metric_unavailable",
+            "missing_fields": sorted(missing),
+        }
+
+    evidence = {
+        "status": None,
+        "preimpact_scoreable_faults": int(row["preimpact_scoreable_faults"]),
+        "preimpact_event_recall": float(row["preimpact_event_recall"]),
+        "preimpact_event_recall_ci_low": float(
+            row["preimpact_event_recall_ci_low"]
+        ),
+        "prompt_scoreable_faults": int(row["prompt_scoreable_faults"]),
+        "prompt_event_recall": float(row["prompt_event_recall"]),
+        "prompt_event_recall_ci_low": float(
+            row["prompt_event_recall_ci_low"]
+        ),
+        "minimum_faults": int(minimum_faults),
+        "minimum_preimpact_recall_ci_low": float(
+            minimum_preimpact_recall_ci_low
+        ),
+        "minimum_prompt_recall_ci_low": float(
+            minimum_prompt_recall_ci_low
+        ),
+    }
+    if min(
+        evidence["preimpact_scoreable_faults"],
+        evidence["prompt_scoreable_faults"],
+    ) < int(minimum_faults):
+        evidence["status"] = "not_established_insufficient_faults"
+    elif not np.isfinite([
+        evidence["preimpact_event_recall_ci_low"],
+        evidence["prompt_event_recall_ci_low"],
+    ]).all():
+        evidence["status"] = "not_established_metric_unavailable"
+    elif (
+        evidence["preimpact_event_recall_ci_low"]
+        >= float(minimum_preimpact_recall_ci_low)
+        and evidence["prompt_event_recall_ci_low"]
+        >= float(minimum_prompt_recall_ci_low)
+    ):
+        evidence["status"] = "qualified"
+    else:
+        evidence["status"] = "not_qualified_recall_bound"
+    return evidence
