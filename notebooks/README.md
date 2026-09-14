@@ -25,14 +25,17 @@ into several notebooks.
 | `12_INFERENCE_DEMO_AND_MODEL_CARD` | Frozen incidents, localisation and available results | Interactive chronological replay and model card | No |
 
 Notebook 07 deliberately fails closed. Workload uses portfolio-scoreable time
-and reports calendar time beside it. Recall must clear the 20% research floor
-with the lower endpoint of its two-sided 95% Wilson interval. Localisation is a
-separate capability and remains unqualified until both its sample-size rule and
-an explicitly registered performance target are met. If no candidate satisfies
-the detection gates, the notebook writes `best_diagnostic_configuration.json`
-but not a selected configuration. To inspect the product flow without changing that fact,
-set `ALLOW_DIAGNOSTIC_DEMO=1` for Notebook 08. Never use this switch to open
-holdout or claim deployment readiness.
+and reports calendar time beside it. A calibration-verification slice first
+removes operating points that miss the workload budget; development labels may
+then select among the surviving points. Active-fault detection recall must clear
+the 20% research floor with the lower endpoint of its two-sided 95% Wilson
+interval. Early warning is reported separately: it requires detection after
+observable evidence but before impact, plus prompt detection within the frozen
+48-hour horizon. Localisation is also separate. A detection configuration may
+therefore be selected for incident research while early warning or localisation
+remains explicitly unqualified. Holdout stays sealed until the early-warning
+qualification passes. If no detection candidate satisfies the gates, Notebook
+07 writes `best_diagnostic_configuration.json` but no selected configuration.
 
 ## Data location
 
@@ -86,13 +89,15 @@ workload bound to that independent verification slice before development truth
 is consulted. It also refuses an empirical threshold with fewer than five
 expected calibration blocks in its upper tail.
 
-Selection revision v8 reuses the v7 score files; Notebook 06 does not need to
-be rerun. Notebook 07 still audits every threshold on label-free workload data,
-but evaluates development truth only once per portfolio at the independently
-chosen operating point. This removes the previous redundant four-threshold
-development loop. After downloading this revision, interrupt an older running
-Notebook 07 and run the new Notebook 07 from a fresh kernel, followed by 08–12
-only if a detection configuration is selected.
+Selection revision v9 reuses the v7 score files; Notebook 06 does not need to
+be rerun. Notebook 07 audits every threshold on label-free workload data and
+evaluates only the calibration-admissible operating points on development.
+This corrects the earlier premature quantile freeze while preserving a separate
+strictly label-free fallback. It also separates active-fault detection,
+pre-impact early warning, and 48-hour prompt detection. Run Notebook 07 from a
+fresh kernel. If detection passes, run 08 and 09 for incident and localisation
+research. Run development evaluation in 10 as needed; do not open locked
+holdout until Notebook 07 reports `holdout_ready: true`.
 
 ## Public Telecom qualification
 

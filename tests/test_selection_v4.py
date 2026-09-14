@@ -1,6 +1,7 @@
 import pandas as pd
 
 from telco_anomaly.selection import (
+    qualify_early_warning,
     qualify_localisation,
     select_development_candidate,
 )
@@ -101,3 +102,32 @@ def test_localisation_is_separate_and_fail_closed():
     assert insufficient["status"] == "not_established_insufficient_multi_entity_faults"
     assert below["status"] == "not_qualified_joint_recall_bound"
     assert boundary["status"] == "qualified"
+
+
+def _early_warning_row(preimpact_low=0.25, prompt_low=0.22):
+    return pd.Series({
+        "preimpact_scoreable_faults": 50,
+        "preimpact_event_recall": 0.40,
+        "preimpact_event_recall_ci_low": preimpact_low,
+        "prompt_scoreable_faults": 50,
+        "prompt_event_recall": 0.36,
+        "prompt_event_recall_ci_low": prompt_low,
+    })
+
+
+def test_early_warning_requires_preimpact_and_prompt_evidence():
+    qualified = qualify_early_warning(
+        _early_warning_row(),
+        minimum_faults=30,
+        minimum_preimpact_recall_ci_low=0.20,
+        minimum_prompt_recall_ci_low=0.20,
+    )
+    late = qualify_early_warning(
+        _early_warning_row(preimpact_low=0.19),
+        minimum_faults=30,
+        minimum_preimpact_recall_ci_low=0.20,
+        minimum_prompt_recall_ci_low=0.20,
+    )
+
+    assert qualified["status"] == "qualified"
+    assert late["status"] == "not_qualified_recall_bound"

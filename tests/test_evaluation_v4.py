@@ -252,6 +252,76 @@ def test_predicted_scope_cannot_create_detection_credit():
     assert result["case_matches"].loc[0, "match_status"] == "false_case"
 
 
+def test_active_interval_and_prompt_detection_are_distinct_estimands():
+    start = pd.Timestamp("2025-01-02", tz="UTC")
+    end = start + pd.Timedelta(hours=72)
+    events = pd.DataFrame([{
+        "fault_id": "F-1",
+        "fault_type": "slow_degradation",
+        "domain_type": "entity",
+        "domain_id": "ONT-1",
+        "onset_ts": start,
+        "observable_ts": start,
+        "impact_ts": start + pd.Timedelta(hours=68),
+        "end_ts": end,
+        "group_id": pd.NA,
+        "label_source": "fixture",
+        "source_instance_id": "fixture-1",
+    }])
+    intervals = pd.DataFrame([{
+        "fault_id": "F-1",
+        "entity_id": "ONT-1",
+        "start_ts": start,
+        "end_ts": end,
+        "label_source": "fixture",
+        "source_instance_id": "fixture-1",
+    }])
+    case_start = start + pd.Timedelta(hours=60)
+    cases = pd.DataFrame([{
+        "case_id": "C-1",
+        "case_start": case_start,
+        "case_end": case_start + pd.Timedelta(minutes=15),
+        "peak_ts": case_start,
+        "scope_type": "entity",
+        "scope_id": "ONT-1",
+        "affected_entity_count": 1,
+        "scope_type_2": pd.NA,
+        "scope_id_2": pd.NA,
+        "identifiability_status": "entity_only",
+        "footprint_size": 1,
+        "affected_fraction_estimate": 1.0,
+        "anomaly_evidence_score": 4.0,
+        "channels": "detector",
+        "leading_features": "rx_power",
+        "location_explanation": "fixture",
+    }], columns=CASE_COLUMNS)
+    members = pd.DataFrame([{
+        "case_id": "C-1",
+        "alert_id": "A-1",
+        "entity_id": "ONT-1",
+        "model_id": "detector",
+    }])
+
+    prompt = evaluate_cases(
+        cases, members, events, intervals,
+        exposure_value=10,
+        exposure_unit="entity_day",
+        decision_horizon_seconds=48 * 3600,
+    )
+    active = evaluate_cases(
+        cases, members, events, intervals,
+        exposure_value=10,
+        exposure_unit="entity_day",
+        decision_horizon_seconds=None,
+    )
+    prompt_metrics = prompt["metrics"].set_index("metric")["value"]
+    active_metrics = active["metrics"].set_index("metric")["value"]
+
+    assert prompt_metrics["event_recall"] == 0
+    assert active_metrics["event_recall"] == 1
+    assert active_metrics["preimpact_event_recall"] == 1
+
+
 def test_cross_partition_fault_is_audited_and_published_nowhere():
     start = pd.Timestamp("2025-01-01", tz="UTC")
     events = pd.DataFrame([[

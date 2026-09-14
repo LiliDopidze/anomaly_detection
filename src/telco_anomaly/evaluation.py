@@ -17,7 +17,7 @@ import pyarrow.parquet as pq
 from scipy.stats import chi2, norm
 
 
-EVALUATION_CORE_VERSION = "4.2.0"
+EVALUATION_CORE_VERSION = "4.3.0"
 PARTITIONS = ("calibration", "development", "holdout")
 SCORE_COLUMNS = [
     "event_ts", "entity_id", "episode_id", "anomaly_score", "model_id",
@@ -687,6 +687,15 @@ def _horizon_seconds(fault_types, rule):
 
 
 def _fault_windows(events, intervals, decision_horizon_seconds):
+    """Build one scoreable interval per affected entity and fault.
+
+    A numeric ``decision_horizon_seconds`` limits credit to prompt detections
+    after the fault first becomes observable. ``None`` uses the complete
+    active interval. The latter measures anomaly detection; pre-impact status
+    is still calculated separately and is the evidence for an early-warning
+    claim.
+    """
+
     windows = intervals[[
         "fault_id", "entity_id", "start_ts", "end_ts"
     ]].rename(columns={"end_ts": "interval_end"}).merge(
@@ -706,18 +715,20 @@ def _fault_windows(events, intervals, decision_horizon_seconds):
     windows["match_start"] = pd.concat(
         [reference, windows["start_ts"]], axis=1
     ).max(axis=1)
-    horizons = _horizon_seconds(
-        windows["fault_type"], decision_horizon_seconds
-    )
+    end_columns = [windows["event_end"], windows["interval_end"]]
+    if decision_horizon_seconds is None:
+        horizons = pd.Series(np.nan, index=windows.index, dtype=float)
+    else:
+        horizons = _horizon_seconds(
+            windows["fault_type"], decision_horizon_seconds
+        )
+        end_columns.append(
+            windows["match_start"] + pd.to_timedelta(horizons, unit="s")
+        )
     windows["decision_horizon_seconds"] = horizons
-    horizon_end = windows["match_start"] + pd.to_timedelta(
-        horizons, unit="s"
-    )
-    windows["match_end"] = pd.concat(
-        [windows["event_end"], windows["interval_end"], horizon_end], axis=1
-    ).min(axis=1)
+    windows["match_end"] = pd.concat(end_columns, axis=1).min(axis=1)
     invalid_end = windows["match_end"].le(windows["match_start"])
-    zero_horizon = horizons.eq(0)
+    zero_horizon = horizons.fillna(-1).eq(0)
     invalid_end = invalid_end & ~(
         zero_horizon & windows["match_end"].eq(windows["match_start"])
     )
