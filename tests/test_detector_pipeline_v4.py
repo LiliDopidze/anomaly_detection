@@ -227,6 +227,10 @@ def test_contextual_isolation_forest_fits_and_scores(tmp_path):
         "peer_deviation": np.cos(np.arange(rows) / 11),
         "group_common_mode": np.sin(np.arange(rows) / 17),
     })
+    frame.loc[rows - 2, ["peer_deviation", "group_common_mode"]] = np.nan
+    frame.loc[rows - 1, [
+        "rapid_residual", "peer_deviation", "group_common_mode"
+    ]] = np.nan
     frame.to_parquet(source, index=False)
 
     bundle = fit_contextual_isolation_forest(
@@ -240,8 +244,11 @@ def test_contextual_isolation_forest_fits_and_scores(tmp_path):
     scored = pd.read_parquet(destination)
 
     assert len(scored) == rows
-    assert scored["isolation_forest_contextual"].notna().all()
-    assert set(scored["isolation_forest_contextual__leading_feature"]) <= set(
+    assert bundle["minimum_observed_inputs"] == 2
+    assert scored["isolation_forest_contextual"].iloc[:-2].notna().all()
+    assert scored["isolation_forest_contextual"].iloc[-2:].isna().all()
+    assert scored["isolation_forest_contextual__leading_feature"].iloc[-2:].isna().all()
+    assert set(scored["isolation_forest_contextual__leading_feature"].dropna()) <= set(
         bundle["feature_columns"]
     )
 
@@ -330,6 +337,11 @@ def test_isolation_forest_keeps_base_and_temporal_variants(tmp_path):
     assert bundle["isolation_base_features"] == ["a__level", "b__level"]
     assert scored["isolation_forest_base"].notna().all()
     assert scored["isolation_forest_temporal"].notna().all()
+    assert scored["isolation_forest_soft_confirmed"].notna().all()
+    confirmed = scored["isolation_forest_confirmed"]
+    softened = scored["isolation_forest_soft_confirmed"]
+    assert softened.ge(confirmed).all()
+    assert softened.gt(confirmed).any()
     assert scored["isolation_forest_entity_calibrated"].notna().all()
 
     with_gap = frame.copy()
@@ -342,6 +354,30 @@ def test_isolation_forest_keeps_base_and_temporal_variants(tmp_path):
         cusum_allowance=0.5,
     )
     assert gap_scores.loc[100:101, "dispersion_change"].isna().all()
+
+
+def test_dispersion_rewarms_after_one_metric_goes_invalid():
+    frame = pd.DataFrame({
+        "event_ts": pd.date_range(BASE, periods=9, freq="15min"),
+        "entity_id": "ont-1",
+        "episode_id": "episode-1",
+    })
+    residuals = pd.DataFrame({
+        "signal__level": [0.0, 0.0, 0.0, 0.0, np.nan, 10.0, 10.0, 10.0, 10.0]
+    })
+    bundle = {
+        "feature_columns": ["signal__level"],
+        "residual_scale": pd.Series({"signal__level": 1.0}),
+        "pca": None,
+    }
+    scored = score_residual_episode(
+        bundle, frame, residuals=residuals,
+        cadence_seconds=900, dispersion_window_seconds=3600,
+        cusum_allowance=0.5,
+    )
+
+    assert pd.isna(scored.loc[6, "dispersion_change"])
+    assert pd.notna(scored.loc[7, "dispersion_change"])
 
 
 def test_multimetric_tail_mean_requires_two_distinct_metrics():

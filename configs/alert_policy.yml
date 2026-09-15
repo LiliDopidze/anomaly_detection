@@ -42,6 +42,10 @@ channels:
     persistence_seconds: 1800
   isolation_forest_confirmed:
     persistence_seconds: 1800
+  isolation_forest_soft_confirmed:
+    # A calibrated fast-path challenger. Causal one-observation confirmation
+    # still has to pass the independent case-workload verification.
+    persistence_observations: 1
   isolation_forest_entity_calibrated:
     persistence_seconds: 1800
   isolation_forest_contextual:
@@ -56,6 +60,7 @@ portfolios:
   self_history: [rapid_self, persistent_drift]
   temporal_if: [isolation_forest_temporal]
   confirmed_temporal_if: [isolation_forest_confirmed]
+  soft_confirmed_fast_if: [isolation_forest_soft_confirmed]
   entity_calibrated_if: [isolation_forest_entity_calibrated]
   temporal_plus_multimetric: [isolation_forest_temporal, multimetric_residual]
   base_if: [isolation_forest_base]
@@ -91,6 +96,7 @@ selection:
     - self_history
     - temporal_if
     - confirmed_temporal_if
+    - soft_confirmed_fast_if
     - entity_calibrated_if
     - temporal_plus_multimetric
     - base_if

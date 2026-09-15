@@ -25,6 +25,9 @@ VALID_TRANSFORMS = {
     "state_transition",
     "event",
 }
+VALID_RESET_POLICIES = {
+    "reset_to_unknown", "restart_at_zero", "unwrap_known_modulus"
+}
 
 
 def _catalogue(catalogue: pd.DataFrame) -> pd.DataFrame:
@@ -161,7 +164,11 @@ def transform_episode(
                 pd.Series([row.get("counter_modulus")]), errors="coerce"
             ).iloc[0]
             policy = str(_declared(row, "reset_policy", "reset_to_unknown"))
-            if policy == "unwrap_known_modulus" and pd.notna(modulus):
+            if policy not in VALID_RESET_POLICIES:
+                raise ValueError(f"Unsupported reset policy {policy!r} for {metric_id}")
+            if policy == "unwrap_known_modulus" and pd.isna(modulus):
+                raise ValueError(f"Counter modulus is required for {metric_id}")
+            if policy == "unwrap_known_modulus":
                 previous = values.shift()
                 wrapped = float(modulus) - previous + values
                 increment = difference.where(difference.ge(0), wrapped)

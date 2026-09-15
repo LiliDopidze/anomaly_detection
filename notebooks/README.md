@@ -62,13 +62,29 @@ stage run ID—for example:
 
 ```bash
 export TELCO_DATASET=synthetic_pon
-export TELCO_FEATURE_RUN_ID=synthetic_pon_features_v4
-export TELCO_MODEL_RUN_ID=synthetic_pon_models_v8
+export TELCO_FEATURE_RUN_ID=synthetic_pon_features_v5
+export TELCO_MODEL_RUN_ID=synthetic_pon_models_v9
 ```
 
 Keep downstream run IDs aligned with the inputs printed at the top of each
 notebook. Delete an old output only when you intentionally want to discard it;
 normally, retain both runs so their manifests can be compared.
+
+The v5 feature run must be built from the current calibration EDA decisions
+and `configs/features.yml` before running Notebook 06. Notebook 05 and 06 now
+reject any mismatch in their recorded input hashes. The former v4/v8 outputs
+remain historical diagnostics; they are not a clean baseline for the current
+policy. Notebook 07 writes a fresh v11 selection, and holdout stays sealed
+unless every frozen qualification rule passes.
+
+For the current synthetic PON data, reuse Notebooks 00–04 and rerun 05, 06,
+then 07. The new soft-confirmed Isolation Forest and one-observation alert
+path are challengers, not presumed improvements. CUSUM remains the slow path.
+Notebook 06 reports which contextual inputs were actually retained; rows with
+too little contextual evidence now receive no contextual IF score. Case
+consolidation keeps the one-hour policy, does not join known dissimilar same-ONT
+symptoms, and cannot credit later entities or topology evidence at an earlier
+case opening.
 
 Notebook 05 deliberately processes the full calibration and development
 partitions. In Colab it uses `/content` for large temporary wide tables and

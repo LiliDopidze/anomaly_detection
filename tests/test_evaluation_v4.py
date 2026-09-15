@@ -6,8 +6,10 @@ from telco_anomaly.contract import (
     SPLIT_SCHEMAS,
 )
 from telco_anomaly.evaluation import (
+    ALERT_COLUMNS,
     CASE_COLUMNS,
     evaluate_cases,
+    form_cases,
     partition_truth,
     poisson_rate_interval,
     scoreable_exposure,
@@ -42,6 +44,20 @@ def test_persistent_alert_fires_when_confirmation_is_observed():
     )
     assert alerts.loc[0, "alert_end"] == pd.Timestamp(
         "2025-01-01 01:00:00", tz="UTC"
+    )
+
+
+def test_fast_path_confirms_a_single_severe_observation_at_its_timestamp():
+    alerts = scores_to_alerts(
+        score_fixture([0.0, 0.0, 5.0, 0.0, 0.0]),
+        4.0,
+        min_consecutive=1,
+        recovery_consecutive=1,
+        cadence_seconds=900,
+    )
+    assert len(alerts) == 1
+    assert alerts.loc[0, "alert_start"] == pd.Timestamp(
+        "2025-01-01 00:30:00", tz="UTC"
     )
 
 
@@ -164,7 +180,7 @@ def test_zero_case_candidate_is_a_valid_negative_result():
     }])
     cases = pd.DataFrame(columns=CASE_COLUMNS)
     members = pd.DataFrame(
-        columns=["case_id", "alert_id", "entity_id", "model_id"]
+        columns=["case_id", "alert_id", "entity_id", "model_id", "alert_start"]
     )
 
     result = evaluate_cases(
@@ -229,6 +245,7 @@ def test_predicted_scope_cannot_create_detection_credit():
         "alert_id": "A-1",
         "entity_id": "ONT-B",
         "model_id": "group_common_mode",
+        "alert_start": start,
     }])
     topology = pd.DataFrame([
         ("ONT-A", "splitter_l1", "S-1", 1, "physical_topology", start, pd.NaT),
@@ -300,6 +317,7 @@ def test_active_interval_and_prompt_detection_are_distinct_estimands():
         "alert_id": "A-1",
         "entity_id": "ONT-1",
         "model_id": "detector",
+        "alert_start": case_start,
     }])
 
     prompt = evaluate_cases(
@@ -359,3 +377,123 @@ def test_cross_partition_fault_is_audited_and_published_nowhere():
     assert audit.loc[0, "status"] == "cross_partition"
     assert audit.loc[0, "scoreable"] == False  # noqa: E712
     assert all(tables["fault_events"].empty for tables in output.values())
+
+
+def _case_topology():
+    return pd.DataFrame([
+        (entity, "splitter", "splitter-1", 1, "physical_topology")
+        for entity in ("ONT-1", "ONT-2")
+    ], columns=[
+        "entity_id", "group_type", "group_id", "hierarchy_level",
+        "group_family",
+    ])
+
+
+def _case_alert(alert_id, model_id, entity_id, start, feature, scope=None):
+    return (
+        alert_id, model_id, entity_id, f"{entity_id}::episode-1",
+        start, start + pd.Timedelta(minutes=30), start,
+        10.0, 1, feature,
+        scope[0] if scope else None, scope[1] if scope else None,
+        0.5 if scope else None,
+    )
+
+
+def test_later_shared_scope_does_not_backdate_case_localisation():
+    start = pd.Timestamp("2025-01-01", tz="UTC")
+    later = start + pd.Timedelta(minutes=15)
+    alerts = pd.DataFrame([
+        _case_alert("A-1", "rapid", "ONT-1", start, "power__level"),
+        _case_alert("A-2", "group_common_mode", "ONT-1", later,
+                    "power__level", ("splitter", "splitter-1")),
+        _case_alert("A-3", "group_common_mode", "ONT-2", later,
+                    "power__level", ("splitter", "splitter-1")),
+    ], columns=ALERT_COLUMNS)
+
+    cases, members = form_cases(
+        alerts, _case_topology(), gap_seconds=1800,
+        thresholds={"rapid": 5.0, "group_common_mode": 5.0},
+    )
+
+    assert len(cases) == 1 and len(members) == 3
+    assert cases.loc[0, "case_start"] == start
+    assert (cases.loc[0, "scope_type"], cases.loc[0, "scope_id"]) == (
+        "entity", "ONT-1"
+    )
+    assert cases.loc[0, "affected_entity_count"] == 1
+
+
+def test_later_scope_does_not_localise_two_ordinary_onset_alerts():
+    start = pd.Timestamp("2025-01-01", tz="UTC")
+    later = start + pd.Timedelta(minutes=15)
+    alerts = pd.DataFrame([
+        _case_alert("A-1", "rapid", "ONT-1", start, "power__level"),
+        _case_alert("A-2", "rapid", "ONT-2", start, "power__level"),
+        _case_alert("A-3", "group_common_mode", "ONT-1", later,
+                    "power__level", ("splitter", "splitter-1")),
+        _case_alert("A-4", "group_common_mode", "ONT-2", later,
+                    "power__level", ("splitter", "splitter-1")),
+    ], columns=ALERT_COLUMNS)
+
+    cases, members = form_cases(
+        alerts, _case_topology(), gap_seconds=1800,
+        thresholds={"rapid": 5.0, "group_common_mode": 5.0},
+    )
+
+    assert len(cases) == 1 and len(members) == 4
+    assert cases.loc[0, "identifiability_status"] == "unresolved_at_first_alert"
+    assert cases.loc[0, "scope_type"] == "unresolved"
+
+
+def test_same_entity_alerts_with_distinct_known_symptoms_remain_separate():
+    start = pd.Timestamp("2025-01-01", tz="UTC")
+    alerts = pd.DataFrame([
+        _case_alert("A-1", "rapid", "ONT-1", start, "power__level"),
+        _case_alert("A-2", "rapid", "ONT-1",
+                    start + pd.Timedelta(minutes=5), "temperature__level"),
+        _case_alert("A-3", "rapid", "ONT-1",
+                    start + pd.Timedelta(minutes=10), "power__difference"),
+    ], columns=ALERT_COLUMNS)
+
+    cases, members = form_cases(
+        alerts, _case_topology(), gap_seconds=1800,
+        thresholds={"rapid": 5.0},
+    )
+
+    assert len(cases) == 2
+    joined = members.groupby("case_id")["alert_id"].agg(set).tolist()
+    assert {"A-1", "A-3"} in joined
+    assert {"A-2"} in joined
+
+
+def test_later_case_member_does_not_backdate_detection_credit():
+    start = pd.Timestamp("2025-01-01", tz="UTC")
+    later = start + pd.Timedelta(minutes=15)
+    alerts = pd.DataFrame([
+        _case_alert("A-1", "rapid", "ONT-1", start, "power__level"),
+        _case_alert("A-2", "group_common_mode", "ONT-1", later,
+                    "power__level", ("splitter", "splitter-1")),
+        _case_alert("A-3", "group_common_mode", "ONT-2", later,
+                    "power__level", ("splitter", "splitter-1")),
+    ], columns=ALERT_COLUMNS)
+    cases, members = form_cases(
+        alerts, _case_topology(), gap_seconds=1800,
+        thresholds={"rapid": 5.0, "group_common_mode": 5.0},
+    )
+    events = pd.DataFrame([[
+        "F-1", "shared_fault", "entity", "ONT-2", start, start,
+        pd.NaT, start + pd.Timedelta(hours=1),
+        pd.NA, "fixture", "fixture-1",
+    ]], columns=EVAL_SCHEMAS["fault_events"])
+    intervals = pd.DataFrame([[
+        "F-1", "ONT-2", start, start + pd.Timedelta(hours=1),
+        "fixture", "fixture-1",
+    ]], columns=EVAL_SCHEMAS["fault_entity_intervals"])
+
+    result = evaluate_cases(
+        cases, members, events, intervals,
+        exposure_value=1, exposure_unit="entity_day",
+        decision_horizon_seconds=3600,
+    )
+    recall = result["metrics"].set_index("metric").loc["event_recall", "value"]
+    assert recall == 0
