@@ -133,6 +133,21 @@ def test_synthetic_pon_pack_and_canonical_are_valid(tmp_path):
     assert fec["quality_code"].eq("clipped").sum() == 2
 
 
+def test_source_specific_clipping_rule_fails_on_an_unreviewed_run(tmp_path):
+    metrics, topology = _configs()
+    source = _pon_source(tmp_path / "source")
+
+    with pytest.raises(ValueError, match="clipping rule"):
+        build_synthetic_pon_pack(
+            source,
+            tmp_path / "pack",
+            metric_registry=metrics,
+            topology_config=topology,
+            source_instance="unreviewed_generator_run",
+            include_evaluation=False,
+        )
+
+
 def test_eval_mount_does_not_change_core(tmp_path):
     metrics, topology = _configs()
     source = _pon_source(tmp_path / "source")

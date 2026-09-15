@@ -77,7 +77,7 @@ Expected primary source layout:
 
 ```text
 $TELCO_DATA_ROOT/
-├── telco_syntetic_data/       # existing spelling is supported
+├── telco_synthetic_data/      # preferred; legacy telco_syntetic_data is recognised
 │   ├── reference_dataset.parquet
 │   ├── topology.csv
 │   ├── entity_service_windows.csv

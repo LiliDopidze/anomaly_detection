@@ -2,8 +2,8 @@
 
 | Document field | Value |
 |---|---|
-| Revision | 13 September 2026 |
-| Implementation baseline | `SPEC-CORE 1.0.0`, `SPEC-EVAL 1.0.0`, pack interface `1.0.0`, detector core `4.4.0`, evaluator core `4.2.0` |
+| Revision | 14 September 2026 |
+| Implementation baseline | `SPEC-CORE 1.0.0`, `SPEC-EVAL 1.0.0`, pack interface `1.0.0`, detector core `4.5.0`, evaluator core `4.3.0` |
 | Primary domain | Fixed-access PON/ONT telemetry |
 | Audience | Data scientists, statisticians, ML engineers, data engineers, Telecom SMEs, and technical reviewers |
 | Status | Research-grade implementation with production-oriented controls; an operator pilot is still required before a production-performance claim |
@@ -414,10 +414,11 @@ where the slices remain chronological. Threshold values are estimated on
 \(\mathcal C_{\mathrm{threshold}}\); label-free incident workload is checked on
 \(\mathcal C_{\mathrm{verify}}\).
 
-The late slice is disjoint from model-parameter fitting. Notebook 04 EDA,
-however, sees the full calibration interval. The late slice is therefore not a
-completely untouched design-validation set. Production work should restrict
-design EDA to early calibration or pre-register EDA decisions.
+Notebook 04 and Notebook 05 use the same timestamp cutoff, derived from the
+observed calibration span. EDA stops before that cutoff; feature fitting ends
+there, and threshold calibration begins there. The two late-calibration halves
+are therefore unseen by both model fitting and EDA design work before they
+estimate thresholds and verify workload.
 
 A secondary whole-infrastructure split can hold out complete OLT groups. It
 tests transfer across infrastructure but does not replace the chronological
@@ -527,7 +528,7 @@ must pass.
 
 **Reads:** feature files, topology, feature/alert policies; no fault truth.
 **Computes:** frozen robust references, self residuals, rapid and CUSUM scores,
-peer and group statistics, dispersion, PCA, four Isolation Forest variants,
+peer and group statistics, dispersion, PCA, five Isolation Forest variants,
 and late-calibration block-max threshold candidates.
 **Writes:** model bundle, score files, threshold provenance, score-availability
 evidence, and run manifest.
@@ -718,10 +719,11 @@ plot is supporting evidence, not a selection rule.
 ### 16.3 EDA independence qualification
 
 EDA decisions are saved with the canonical fingerprint and never use labels.
-However, current EDA sees the complete calibration period, including the late
-slice subsequently used for thresholds. It is label-free but not independent
-of the threshold-slice distribution. A stricter confirmatory design would
-restrict design EDA to early calibration or pre-register the decisions.
+The current design uses only the early calibration-fit interval and records its
+exact cutoff. Feature engineering reuses that cutoff, so EDA cannot inspect
+the later threshold-estimation or independent workload-verification slices.
+Repeated manual EDA changes after seeing development results remain a residual
+source of selection bias and must be versioned as a new research cycle.
 
 ---
 
@@ -950,12 +952,13 @@ $$
 
 Unseen entities also fall back to the pooled reference.
 
-The reference API supports excluding unstable entity-feature baselines, but
-Notebook 06 currently passes no EDA-derived exclusions. The current method does
-not claim that instability flags already control fitting. Multivariate model
-training first retains at most eight deterministic observations per entity-day
-and then applies the global row cap. Entity baselines themselves still use the
-complete early-calibration slice.
+Notebook 04 flags every observed entity-metric baseline with less than 80% timestamp
+coverage, less than 80% valid values, or more than 20% clipped values. Notebook
+06 passes those reviewed exclusions into reference fitting: the entity remains
+monitored, but the affected metric falls back to its pooled reference.
+Multivariate training first retains at most eight deterministic observations
+per entity-day and then applies the global row cap. Other entity baselines use
+the complete early-calibration slice.
 
 ## 24. Rapid self deviation
 
@@ -993,6 +996,24 @@ $$
 \qquad -\log_{10}(\widehat p)\approx2.30.
 $$
 
+### 24.1 Coherent multi-metric evidence
+
+Features belonging to the same semantic metric are first reduced to their
+largest empirical-tail evidence. If (M_{(1)}(t)\ge M_{(2)}(t)) are the two
+largest values across **distinct** metrics, the implementation compares two
+label-free channels:
+
+$$
+S^{\mathrm{second}}_t=M_{(2)}(t),
+\qquad
+S^{\mathrm{mean2}}_t=\frac{M_{(1)}(t)+M_{(2)}(t)}{2}.
+$$
+
+The first requires the weaker corroborating metric itself to be extreme. The
+second can retain one very strong metric plus one moderate corroborating
+metric. Neither names a PON-specific metric pair, and both receive independent
+late-calibration block-max thresholds and workload verification.
+
 ## 25. Persistent drift
 
 With allowance \(k=0.5\), the two-sided CUSUM recursion is
@@ -1027,10 +1048,12 @@ a_j(r_{e,t,j})-\operatorname{median}_{u\in\mathcal P(e,t)}a_j(r_{u,t,j})
 0.25\right\}}.
 $$
 
-The peer hierarchy chooses the first configured physical level with at least
-seven valid peers and at least 80% entity coverage. Preferred levels are
-splitter L2, PON port, splitter L1, then OLT. Self-standardization first removes
-legitimate entity offsets.
+The peer hierarchy is derived from the canonical numeric hierarchy level,
+deepest to coarsest. Membership coverage first identifies candidate levels;
+the finest level with a stable calibration reference from actual valid
+residuals is chosen, falling back to the next coarser level when necessary.
+This removes the former duplicate manual preference list. Self-standardization
+first removes legitimate entity offsets.
 
 The explicit topology allow-list contains like-for-like optical power,
 temperature, bias-current, and voltage measurements. Traffic, error counters,
@@ -1053,15 +1076,19 @@ A_{g,t,j}=\frac{1}{n_{g,t}}
 \sum_{e\in\mathcal E_g(t)}\mathbf1(a_j(r_{e,t,j})\ge3).
 $$
 
-The group is scoreable with at least three available descendants, at least
-three adversely affected descendants, an affected fraction of at least 0.25,
-and
+The group is scoreable with at least three available descendants and
 
 $$
 \frac{n_{g,t}}{N_g}\ge0.50,
 $$
 
 where \(N_g\) is declared group size.
+
+Instead of a fixed 25% affected rule, the observed affected fraction must
+strictly exceed the 0.99 early-calibration quantile for the same physical group type, feature,
+and available-count band. This empirical null retains within-group dependence
+and group-size effects present in calibration. It is shared-scope anomaly
+evidence, not proof that the corresponding network component caused a fault.
 
 Peer and group raw statistics are calibrated by channel, group type, feature,
 and count band (`<7`, `7–14`, `15–29`, `>=30`). For stratum median \(m\) and
@@ -1106,10 +1133,9 @@ S^{\mathrm{disp}}_t
 \right|.
 $$
 
-This detects volatility change without a mean shift. Current code applies a
-row-count rolling standard deviation across the episode and does not segment
-this challenger at internal gaps. The primary history and CUSUM paths do reset;
-gap-reset dispersion is planned.
+This detects volatility change without a mean shift. The rolling calculation
+is segmented at episode boundaries and internal gaps longer than 1.5 declared
+cadences, matching the reset policy used by history and CUSUM.
 
 ### 29.2 PCA squared prediction error
 
@@ -1156,14 +1182,18 @@ Current hyperparameters are:
 - at most eight deterministic rows per entity-day before the global cap;
 - fixed random seed 42.
 
-Four variants are compared:
+Five variants are compared:
 
 1. **base:** the non-window feature set; current classification still includes
    safe first and seasonal differences, so it is not literally level-only;
 2. **temporal:** the metric-balanced current and causal temporal feature set;
 3. **confirmed temporal:** temporal Isolation Forest tail evidence intersected
    with interpretable rapid-tail evidence using their minimum;
-4. **contextual:** configured self/topology score context, including rapid,
+4. **entity calibrated:** the temporal score is robustly standardized against
+   the entity's frozen early-calibration score median and IQR, with a pooled
+   fallback when fewer than 30 rows exist; adjusted scores are mapped back to
+   finite-sample empirical-tail evidence;
+5. **contextual:** configured self/topology score context, including rapid,
    CUSUM, dispersion, peer, group, and group affected fraction.
 
 At least half of contextual inputs must be available and nonconstant. The
@@ -1259,7 +1289,7 @@ consecutive high observations. At the current 15-minute PON cadence:
 | Channel | Persistence | Typical observations |
 |---|---:|---:|
 | rapid self | 1,800 s | 2 |
-| persistent drift | 3,600 s | 4 |
+| persistent drift | 1 observation | 1 |
 | peer deviation | 1,800 s | 2 |
 | group common mode | 1,800 s | 2 |
 | challenger channel | 1,800 s | 2 |
@@ -1549,6 +1579,8 @@ For 64 scoreable faults, the recall rule requires at least 20 detections:
 the observed recall is then 31.25% and its Wilson lower bound is approximately
 21.2%. The 20% value is a conservative research floor, not a production SLA;
 an operator pilot must replace it with a cost- and criticality-based target.
+At the minimum allowed sample of 30 faults, 11 detections—not six—are needed;
+Notebook 07 prints this power table for the actual denominator on every run.
 
 Among candidates within 0.02 point recall of the best eligible result, a frozen
 simplicity preference is applied, followed by lower upper-bound workload and
@@ -1726,14 +1758,11 @@ separate in every report.
 7. Promptness uses one fixed 48-hour value; operator-specific service objectives
    have not yet been validated.
 8. Topology is not joined at every event's effective time.
-9. EDA sees all calibration, including the threshold slice.
-10. Basic confidence intervals do not model temporal/topology clustering.
-11. Dispersion rolling windows can bridge internal gaps.
-12. EDA instability exclusions are not passed into reference fitting.
-13. Public-source feature policies are not yet independently reviewed.
-14. A sensor that never reports needs capability metadata to distinguish
+9. Basic confidence intervals do not model temporal/topology clustering.
+10. Public-source feature policies are not yet independently reviewed.
+11. A sensor that never reports needs capability metadata to distinguish
    failure from non-installation.
-15. Incident evidence is anomaly strength, not business risk.
+12. Incident evidence is anomaly strength, not business risk.
 
 ## 50. Priority corrections
 
@@ -1750,6 +1779,21 @@ separate in every report.
 - development selects only among operating points that independently passed
   calibration workload and empirical-tail support checks.
 
+### Completed in detector/selection revision 4.5/v10
+
+- EDA is restricted to early calibration and passes population-wide unstable
+  entity-metric exclusions into reference fitting;
+- physical peer fallback order is derived from the canonical hierarchy;
+- common-mode breadth is calibrated by topology-size band instead of fixed
+  affected-count/fraction rules;
+- dispersion resets at internal gaps;
+- entity-calibrated Isolation Forest and coherent two-metric evidence are
+  predeclared candidates;
+- the FEC clipping exception fails loudly when its source-run identity does
+  not match; and
+- the nominal workload budget, safety factor, effective gate, and confidence
+  statistic are published together.
+
 ### Priority 1 — selection validity
 
 - register an operator-meaningful joint-localisation performance target before
@@ -1764,7 +1808,6 @@ separate in every report.
 - recognize entity/single-descendant equivalence;
 - compare the bounded entity-day sample with a cluster-weighted sensitivity
   analysis;
-- reset the dispersion challenger across gaps.
 
 ### Priority 3 — operational evidence
 
@@ -1802,7 +1845,7 @@ solve the scientific problem.
 | Workload target | 10 incidents per 1,000 entity-days | Research target; pilot must validate |
 | Gate safety factor | 0.90 | Require upper interval below 9 per 1,000 |
 | Rapid persistence | 1,800 seconds | Two observations at current cadence |
-| Drift persistence | 3,600 seconds | Require sustained accumulated evidence |
+| Drift persistence | 1 observation | CUSUM already accumulates sustained evidence; avoid a second delay layer |
 | Peer/group persistence | 1,800 seconds | Reduce isolated score spikes |
 | Incident quiet period | 3,600 seconds | Consolidate nearby evidence |
 | CUSUM allowance | 0.5 standardized units | Ignore small deviations while accumulating drift |
@@ -1810,7 +1853,7 @@ solve the scientific problem.
 | Peer coverage | 80% | Require meaningful comparison population |
 | Minimum group entities | 3 | Require nontrivial common-mode footprint |
 | Group availability | 50% | Avoid inference from a small observed fraction |
-| Group affected support | At least 3 entities and 25% | Avoid treating one descendant as common mode |
+| Group affected support | 0.99 early-calibration affected-fraction quantile within topology-size band | Scale shared-scope evidence to group size and observed dependence |
 | Recovery | 3,600 seconds below 80% of firing threshold | Hysteresis without backdated closure |
 | Detection window | Complete active fault interval | Measures anomaly detection without relabelling late true detections as false incidents |
 | Early-warning window | Observable evidence to recorded impact | Separates warning from post-impact diagnosis |
@@ -1868,8 +1911,8 @@ voltage, and 1.0 for counter increments.
 | Threat | Current control | Residual risk |
 |---|---|---|
 | Label leakage | Physical separation, schema guard, invariance, negative control | Deliberate manual access remains possible |
-| Temporal leakage | Chronological split, causal windows, prefix test | EDA sees all calibration |
-| In-sample tail optimism | Early fit plus disjoint threshold and workload slices | EDA still sees all calibration |
+| Temporal leakage | Chronological split, early-calibration EDA, causal windows, prefix test | Manual policy changes can still overfit repeated development cycles |
+| In-sample tail optimism | Early fit/EDA plus disjoint threshold and workload slices | Calibration blocks remain dependent within network events |
 | Repeated alert opportunities | Daily maxima and incident consolidation | Block dependence/nonstationarity remain |
 | Duplicate event credit | One-to-one matching | Matching does not optimize delay |
 | Broad location credit | Alert-member-only detection match; footprint metrics and ambiguity | Broad predictions can still have poor localisation utility |
@@ -1933,6 +1976,18 @@ voltage, and 1.0 for counter increments.
 - scikit-learn `IsolationForest` documentation for the implemented estimator
   convention and parameters:
   <https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.IsolationForest.html>.
+- Soule, A. et al. (2005), “Combining Filtering and Statistical Methods for
+  Anomaly Detection,” for the operational value of residual filtering followed
+  by complementary instantaneous, mean, variance, and multiscale evidence:
+  <https://research.google/pubs/combining-filtering-and-statistical-methods-for-anomaly-detection/>.
+- Lavin, A. and Ahmad, S. (2015), “Evaluating Real-Time Anomaly Detection
+  Algorithms — the Numenta Anomaly Benchmark,” for time-sensitive anomaly
+  scoring and reproducible streaming evaluation:
+  <https://arxiv.org/abs/1510.03336>.
+- Wu, R. and Keogh, E. (2020), “Current Time Series Anomaly Detection Benchmarks
+  are Flawed and are Creating the Illusion of Progress,” for the risks of
+  trivial labels, repeated tuning, and benchmark-specific conclusions:
+  <https://arxiv.org/abs/2009.13807>.
 
 ---
 

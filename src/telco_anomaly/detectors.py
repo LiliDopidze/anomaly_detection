@@ -39,10 +39,11 @@ from .features import (
 )
 
 
-MODEL_CORE_VERSION = "4.4.0"
+MODEL_CORE_VERSION = "4.5.0"
 MODEL_IDS = (
     "rapid_residual",
     "multimetric_residual",
+    "multimetric_tail_mean",
     "drift_cusum",
     "peer_deviation",
     "group_common_mode",
@@ -51,8 +52,10 @@ MODEL_IDS = (
     "isolation_forest_base",
     "isolation_forest_temporal",
     "isolation_forest_confirmed",
+    "isolation_forest_entity_calibrated",
     "isolation_forest_contextual",
 )
+LEGACY_MODEL_IDS = ("statistical", "isolation_forest", "pca", "pca_t2")
 IDENTITY_COLUMNS = ["event_ts", "entity_id", "episode_id"]
 SCALED_FEATURE_CAP = 50.0
 PCA_VARIANCE_TARGET = 0.90
@@ -235,8 +238,13 @@ def split_feature_file_by_time(
     threshold_destination,
     *,
     fit_fraction=0.70,
+    cutoff=None,
 ):
-    """Split calibration features chronologically into fit and threshold slices."""
+    """Split calibration features chronologically into fit and threshold slices.
+
+    ``cutoff`` lets calibration EDA and model fitting share one exact boundary.
+    When it is omitted, the boundary is derived from ``fit_fraction``.
+    """
 
     if not 0 < float(fit_fraction) < 1:
         raise ValueError("fit_fraction must be between zero and one")
@@ -255,7 +263,12 @@ def split_feature_file_by_time(
         start, end = map(lambda value: pd.to_datetime(value, utc=True), bounds)
         if pd.isna(start) or pd.isna(end) or start >= end:
             raise ValueError("Calibration features need a non-empty time span")
-        cutoff = start + (end - start) * float(fit_fraction)
+        if cutoff is None:
+            cutoff = start + (end - start) * float(fit_fraction)
+        else:
+            cutoff = pd.to_datetime(cutoff, utc=True)
+            if not start < cutoff <= end:
+                raise ValueError("cutoff must fall inside the calibration span")
         for destination, operator in (
             (fit_destination, "<"),
             (threshold_destination, ">="),
@@ -277,7 +290,7 @@ def split_feature_file_by_time(
         "cutoff": cutoff,
         "fit_rows": fit_rows,
         "threshold_rows": threshold_rows,
-        "fit_fraction": float(fit_fraction),
+        "fit_fraction": float((cutoff - start) / (end - start)),
     }
 
 
@@ -556,7 +569,7 @@ def fit_model_bundle(
     reference = score_matrix(bundle, sample[usable])
     bundle["score_reference"] = {
         model_id: np.sort(reference[model_id].to_numpy())
-        for model_id in MODEL_IDS
+        for model_id in LEGACY_MODEL_IDS
     }
     # A PCA that retains almost every direction reconstructs everything, so
     # SPE collapses towards zero and the baseline silently stops alarming.
@@ -639,7 +652,7 @@ def score_feature_file(bundle, features_path, destination, batch_rows=100_000):
         for batch in parquet.iter_batches(batch_size=batch_rows, columns=columns):
             frame = batch.to_pandas()
             scores = score_matrix(bundle, frame[bundle["feature_columns"]])
-            if not np.isfinite(scores[list(MODEL_IDS)].to_numpy()).all():
+            if not np.isfinite(scores[list(LEGACY_MODEL_IDS)].to_numpy()).all():
                 raise ValueError("A model produced a non-finite anomaly score")
             output = pd.concat(
                 [frame[IDENTITY_COLUMNS].reset_index(drop=True), scores], axis=1
@@ -1681,8 +1694,8 @@ def _isolation_feature_priority(name):
     markers = (
         "__nonzero", "__positive_log10", "__positive_log1p",
         "__increment", "__reset", "__state", "__level",
-        "__history_24h_z", "__lag_1h", "__history_7d_z",
-        "__rate_6h", "__sum_6h", "__difference", "__lag_6h",
+        "__history_24h_z", "__lag_1h", "__history_7d_z", "__lag_6h",
+        "__rate_6h", "__sum_6h", "__difference",
         "__rate_24h", "__sum_24h", "__seasonal_difference",
     )
     return next(
@@ -1767,6 +1780,104 @@ def _second_metric_evidence(evidence, feature_metric_ids):
     return second
 
 
+def _top_two_metric_mean_evidence(evidence, feature_metric_ids):
+    """Mean the two strongest distinct-metric tail scores.
+
+    This retains the corroboration requirement of ``multimetric_residual``
+    while allowing one very strong and one moderate metric to contribute.
+    It is metric-name agnostic and is calibrated like every other channel.
+    """
+
+    metric_scores = {}
+    for metric_id in sorted(set(feature_metric_ids.values())):
+        columns = [
+            name for name in evidence
+            if feature_metric_ids.get(name) == metric_id
+        ]
+        if columns:
+            metric_scores[metric_id] = evidence[columns].max(
+                axis=1, skipna=True
+            )
+    if len(metric_scores) < 2:
+        return np.full(len(evidence), np.nan)
+    values = pd.DataFrame(metric_scores, index=evidence.index).to_numpy(float)
+    finite_count = np.isfinite(values).sum(axis=1)
+    safe = np.where(np.isfinite(values), values, -np.inf)
+    strongest = np.partition(safe, -2, axis=1)[:, -2:]
+    result = strongest.mean(axis=1)
+    result[finite_count < 2] = np.nan
+    return result
+
+
+def _fit_entity_score_reference(
+    scores,
+    entity_ids,
+    *,
+    minimum_rows=30,
+    scale_floor_fraction_of_global=0.25,
+):
+    """Fit frozen robust references for an entity's Isolation Forest score."""
+
+    frame = pd.DataFrame({
+        "entity_id": pd.Series(entity_ids, dtype="string").to_numpy(),
+        "score": np.asarray(scores, dtype=float),
+    }).replace([np.inf, -np.inf], np.nan).dropna(subset=["score"])
+    if frame.empty:
+        raise ValueError("Isolation Forest produced no finite calibration scores")
+
+    global_centre = float(frame["score"].median())
+    global_scale = float(
+        (frame["score"].quantile(0.75) - frame["score"].quantile(0.25))
+        / 1.349
+    )
+    global_mad = float((frame["score"] - global_centre).abs().median() * 1.4826)
+    global_scale = max(global_scale, global_mad, 1e-9)
+
+    grouped = frame.groupby("entity_id")["score"]
+    summary = grouped.agg(count="count", centre="median")
+    summary["q25"] = grouped.quantile(0.25)
+    summary["q75"] = grouped.quantile(0.75)
+    summary["scale"] = (summary["q75"] - summary["q25"]) / 1.349
+    scale_floor = global_scale * float(scale_floor_fraction_of_global)
+    summary["scale"] = summary["scale"].clip(lower=scale_floor)
+    summary.loc[summary["count"].lt(int(minimum_rows)), ["centre", "scale"]] = np.nan
+
+    centres = frame["entity_id"].map(summary["centre"]).fillna(global_centre)
+    scales = frame["entity_id"].map(summary["scale"]).fillna(global_scale)
+    adjusted = np.maximum(0.0, (frame["score"] - centres) / scales)
+    return {
+        "global_centre": global_centre,
+        "global_scale": global_scale,
+        "entity_centre": summary["centre"],
+        "entity_scale": summary["scale"],
+        "minimum_rows": int(minimum_rows),
+        "scale_floor_fraction_of_global": float(
+            scale_floor_fraction_of_global
+        ),
+        "tail_reference": np.sort(adjusted.to_numpy(float)),
+    }
+
+
+def _entity_adjusted_score_evidence(scores, entity_ids, reference):
+    """Apply a frozen entity score reference, with a pooled fallback."""
+
+    ids = pd.Series(entity_ids, dtype="string")
+    centre = ids.map(reference["entity_centre"]).fillna(
+        reference["global_centre"]
+    )
+    scale = ids.map(reference["entity_scale"]).fillna(
+        reference["global_scale"]
+    )
+    adjusted = np.maximum(
+        0.0,
+        (np.asarray(scores, dtype=float) - centre.to_numpy(float))
+        / scale.to_numpy(float),
+    )
+    return _empirical_vector_evidence(
+        adjusted, reference["tail_reference"]
+    )
+
+
 def _fit_isolation_forest(
     values,
     *,
@@ -1805,6 +1916,9 @@ def fit_residual_bundle(
     isolation_max_samples=1024,
     isolation_max_features=1.0,
     maximum_isolation_features_per_metric=5,
+    entity_reference_minimum_rows=30,
+    isolation_entity_minimum_rows=30,
+    isolation_entity_scale_floor_fraction=0.25,
     fit_multivariate=False,
 ):
     """Fit frozen robust references and optional residual ML models."""
@@ -1911,7 +2025,7 @@ def fit_residual_bundle(
                 calibration_features,
                 usable,
                 scale_floors,
-                minimum_rows=30,
+                minimum_rows=entity_reference_minimum_rows,
             )
         )
 
@@ -1946,6 +2060,15 @@ def fit_residual_bundle(
         "isolation_max_features": isolation_max_features,
         "maximum_isolation_features_per_metric": int(
             maximum_isolation_features_per_metric
+        ),
+        "entity_reference_minimum_rows": int(
+            entity_reference_minimum_rows
+        ),
+        "isolation_entity_minimum_rows": int(
+            isolation_entity_minimum_rows
+        ),
+        "isolation_entity_scale_floor_fraction": float(
+            isolation_entity_scale_floor_fraction
         ),
         "fit_multivariate": bool(fit_multivariate),
         "feature_directions": directions,
@@ -2006,6 +2129,16 @@ def fit_residual_bundle(
         bundle["isolation_temporal_tail_reference"] = np.sort(
             temporal_scores[np.isfinite(temporal_scores)]
         )
+        bundle["isolation_entity_score_reference"] = (
+            _fit_entity_score_reference(
+                temporal_scores,
+                sample["entity_id"],
+                minimum_rows=isolation_entity_minimum_rows,
+                scale_floor_fraction_of_global=(
+                    isolation_entity_scale_floor_fraction
+                ),
+            )
+        )
         # Compatibility for model cards written before the variants were named.
         bundle["isolation_forest"] = bundle["isolation_forest_temporal"]
     else:
@@ -2017,6 +2150,7 @@ def fit_residual_bundle(
         bundle["isolation_forest_base"] = None
         bundle["isolation_forest_temporal"] = None
         bundle["isolation_temporal_tail_reference"] = np.array([])
+        bundle["isolation_entity_score_reference"] = None
         bundle["isolation_forest"] = None
     return bundle
 
@@ -2094,6 +2228,13 @@ def score_residual_episode(
             {name: name.split("__", 1)[0] for name in bundle["feature_columns"]},
         ),
     )
+    multimetric_mean_values = _top_two_metric_mean_evidence(
+        rapid_evidence,
+        bundle.get(
+            "feature_metric_ids",
+            {name: name.split("__", 1)[0] for name in bundle["feature_columns"]},
+        ),
+    )
     level_features = [
         name for name in bundle["feature_columns"]
         if name.endswith((
@@ -2118,7 +2259,15 @@ def score_residual_episode(
     )
 
     window = max(4, round(float(dispersion_window_seconds) / float(cadence_seconds)))
-    spread = residuals[level_features].rolling(window, min_periods=max(3, window // 2)).std()
+    segment_id = pd.Series(reset_before, index=residuals.index).cumsum()
+    spread = (
+        residuals[level_features]
+        .groupby(segment_id)
+        .rolling(window, min_periods=max(3, window // 2))
+        .std()
+        .reset_index(level=0, drop=True)
+        .reindex(residuals.index)
+    )
     reference_spread = bundle["residual_scale"].reindex(level_features).replace(0, 1)
     dispersion = np.abs(np.log(spread.div(reference_spread).clip(lower=0.05)))
     dispersion_values, dispersion_leading = _row_max(dispersion, level_features)
@@ -2128,6 +2277,7 @@ def score_residual_episode(
     isolation_base_values = np.full(len(features), np.nan)
     isolation_temporal_values = np.full(len(features), np.nan)
     isolation_confirmed_values = np.full(len(features), np.nan)
+    isolation_entity_values = np.full(len(features), np.nan)
     pca_leading = np.full(len(features), None, dtype=object)
     isolation_base_leading = rapid_leading.copy()
     isolation_temporal_leading = rapid_leading.copy()
@@ -2159,6 +2309,13 @@ def score_residual_episode(
             isolation_confirmed_values = np.minimum(
                 temporal_evidence, rapid_values
             )
+            entity_reference = bundle.get("isolation_entity_score_reference")
+            if entity_reference is not None:
+                isolation_entity_values = _entity_adjusted_score_evidence(
+                    isolation_temporal_values,
+                    features["entity_id"],
+                    entity_reference,
+                )
         base_model = bundle.get("isolation_forest_base")
         base_features = bundle.get("isolation_base_features", [])
         if base_model is not None and base_features:
@@ -2174,6 +2331,7 @@ def score_residual_episode(
     channels = {
         "rapid_residual": (rapid_values, rapid_leading),
         "multimetric_residual": (multimetric_values, rapid_leading),
+        "multimetric_tail_mean": (multimetric_mean_values, rapid_leading),
         "drift_cusum": (drift_values, drift_leading),
         "dispersion_change": (dispersion_values, dispersion_leading),
         "pca_spe": (pca_values, pca_leading),
@@ -2185,6 +2343,9 @@ def score_residual_episode(
         ),
         "isolation_forest_confirmed": (
             isolation_confirmed_values, isolation_temporal_leading,
+        ),
+        "isolation_forest_entity_calibrated": (
+            isolation_entity_values, isolation_temporal_leading,
         ),
     }
     for channel, (values, leading) in channels.items():
@@ -2316,7 +2477,7 @@ def score_residual_file(
 
 TOPOLOGY_REFERENCE_COLUMNS = [
     "channel", "group_type", "size_band", "leading_feature",
-    "reference_rows", "centre", "upper", "scale",
+    "reference_rows", "centre", "upper", "scale", "affected_upper",
 ]
 
 
@@ -2356,6 +2517,71 @@ def _model_topology(topology):
         ["group_type", "group_id"]
     )["entity_id"].transform("nunique")
     return physical
+
+
+def physical_hierarchy(topology):
+    """Return physical topology levels from deepest to coarsest.
+
+    The hierarchy already belongs to the canonical topology contract. Deriving
+    the order here avoids a second hand-written preference list that can drift.
+    """
+
+    physical = _model_topology(topology)
+    levels = physical.groupby("group_type")["hierarchy_level"].agg(
+        ["nunique", "first"]
+    )
+    if levels["first"].isna().any() or levels["nunique"].ne(1).any():
+        raise ValueError(
+            "Every physical group type needs one numeric hierarchy level"
+        )
+    return levels.sort_values("first", ascending=False).index.tolist()
+
+
+def eligible_peer_levels(
+    topology,
+    *,
+    minimum_valid_peers=7,
+    minimum_entity_coverage=0.80,
+):
+    """Return physical peer levels with adequate membership coverage."""
+
+    physical = _model_topology(topology)
+    total_entities = physical["entity_id"].nunique()
+    minimum_group_size = int(minimum_valid_peers) + 1
+    eligible_levels = []
+    for group_type in physical_hierarchy(physical):
+        level = physical.loc[physical["group_type"].eq(group_type)]
+        sizes = level.groupby("group_id")["entity_id"].nunique()
+        eligible = set(sizes.loc[sizes.ge(minimum_group_size)].index)
+        covered = level.loc[
+            level["group_id"].isin(eligible), "entity_id"
+        ].nunique()
+        if total_entities and covered / total_entities >= float(
+            minimum_entity_coverage
+        ):
+            eligible_levels.append(group_type)
+    return eligible_levels
+
+
+def choose_peer_level(
+    topology,
+    *,
+    minimum_valid_peers=7,
+    minimum_entity_coverage=0.80,
+):
+    """Choose the deepest physical level with adequate membership coverage."""
+
+    eligible = eligible_peer_levels(
+        topology,
+        minimum_valid_peers=minimum_valid_peers,
+        minimum_entity_coverage=minimum_entity_coverage,
+    )
+    if eligible:
+        return eligible[0]
+    raise ValueError(
+        "No physical topology level gives enough peers to the required "
+        "share of entities"
+    )
 
 
 def _topology_feature_specs(feature_columns):
@@ -2432,6 +2658,7 @@ def _reference_summary_sql(
     *,
     minimum_count,
     minimum_fraction=None,
+    affected_quantile=None,
     upper_quantile,
 ):
     """Aggregate a wide topology table into calibration reference rows."""
@@ -2449,13 +2676,20 @@ def _reference_summary_sql(
                 f"{count_column} * 1.0 / group_size >= {float(minimum_fraction)}"
             )
         size_band = _size_band_sql(count_column)
+        affected_upper = (
+            f"quantile_cont({_sql_identifier(alias + '__affected')}, "
+            f"{float(affected_quantile)})"
+            if affected_quantile is not None
+            else "CAST(NULL AS DOUBLE)"
+        )
         queries.append(f"""
             SELECT {_sql_literal(channel)} AS channel, group_type,
                    {size_band} AS size_band,
                    {_sql_literal(feature)} AS leading_feature,
                    count(*) AS reference_rows,
                    median({raw_column}) AS centre,
-                   quantile_cont({raw_column}, {float(upper_quantile)}) AS upper
+                   quantile_cont({raw_column}, {float(upper_quantile)}) AS upper,
+                   {affected_upper} AS affected_upper
             FROM {table_name}
             WHERE {' AND '.join(filters)}
             GROUP BY group_type, {size_band}
@@ -2498,6 +2732,32 @@ def _normalised_topology_score(reference, channel, feature, alias):
     if not cases:
         return "CAST(NULL AS DOUBLE)"
     return "CASE " + " ".join(cases) + " ELSE NULL END"
+
+
+def _calibrated_affected_gate(reference, feature, alias):
+    """Create the group-size-aware affected-fraction calibration gate."""
+
+    rows = reference.loc[
+        reference["channel"].eq("group_common_mode")
+        & reference["leading_feature"].astype(str).eq(str(feature))
+    ].sort_values(["group_type", "size_band"])
+    count_column = _sql_identifier(alias + "__count")
+    affected_column = _sql_identifier(alias + "__affected")
+    cases = []
+    for row in rows.itertuples(index=False):
+        if pd.isna(row.affected_upper):
+            continue
+        condition = (
+            f"group_type = {_sql_literal(row.group_type)} AND "
+            f"{_size_band_condition(count_column, row.size_band)}"
+        )
+        cases.append(
+            f"WHEN {condition} THEN {affected_column} > "
+            f"{float(row.affected_upper)!r}"
+        )
+    if not cases:
+        return "FALSE"
+    return "CASE " + " ".join(cases) + " ELSE FALSE END"
 
 
 def _chosen_value_case(feature_specs, value_suffix, leading_column="score"):
@@ -2600,24 +2860,34 @@ def fit_topology_reference(
     min_group_fraction=0.50,
     minimum_reference_rows=100,
     upper_quantile=0.995,
+    affected_fraction_quantile=0.99,
 ):
     """Fit calibration-only null scales for peer and group evidence.
 
     Features remain in columns while peer and group statistics are calculated.
-    This avoids multiplying a large telemetry table by the feature count.
+    This avoids multiplying a large telemetry table by the feature count. If
+    ``peer_group_type`` is an ordered list, the first level with a stable
+    calibration reference is used.
     """
 
     physical = _model_topology(topology)
     known_types = set(physical["group_type"])
-    if peer_group_type not in known_types:
-        raise ValueError(f"Unknown peer group type: {peer_group_type}")
+    peer_candidates = (
+        [peer_group_type]
+        if isinstance(peer_group_type, str)
+        else list(peer_group_type)
+    )
+    unknown_peer_types = set(peer_candidates) - known_types
+    if unknown_peer_types:
+        raise ValueError(f"Unknown peer group types: {sorted(unknown_peer_types)}")
+    if not peer_candidates:
+        raise ValueError("At least one peer group type is required")
     group_types = [name for name in group_types if name in known_types]
     if not group_types:
         raise ValueError("No requested common-mode topology level is available")
 
     source = _sql_literal(str(Path(calibration_residuals)))
     feature_specs = _topology_feature_specs(feature_columns)
-    peer_sql = _peer_wide_sql(source, feature_specs, peer_group_type)
     group_sql = _group_wide_sql(source, feature_specs, group_types)
     peer_reference_sql = _reference_summary_sql(
         "topology_peer_wide",
@@ -2632,27 +2902,48 @@ def fit_topology_reference(
         "group_common_mode",
         minimum_count=min_group_entities,
         minimum_fraction=min_group_fraction,
+        affected_quantile=affected_fraction_quantile,
         upper_quantile=upper_quantile,
     )
 
     with _model_duckdb(Path(calibration_residuals).parent) as connection:
         connection.register("model_topology", physical)
-        started = time.perf_counter()
-        print(
-            f"    topology reference: peer statistics "
-            f"({len(feature_specs)} features)",
-            flush=True,
-        )
-        connection.execute(
-            f"CREATE TEMP TABLE topology_peer_wide AS {peer_sql}"
-        )
-        peer_reference = connection.execute(peer_reference_sql).df()
-        connection.execute("DROP TABLE topology_peer_wide")
-        print(
-            f"    topology reference: peer complete in "
-            f"{(time.perf_counter() - started) / 60:.1f} minutes",
-            flush=True,
-        )
+        peer_reference = pd.DataFrame()
+        for candidate in peer_candidates:
+            started = time.perf_counter()
+            print(
+                f"    topology reference: peer={candidate} "
+                f"({len(feature_specs)} features)",
+                flush=True,
+            )
+            peer_sql = _peer_wide_sql(source, feature_specs, candidate)
+            connection.execute(
+                f"CREATE TEMP TABLE topology_peer_wide AS {peer_sql}"
+            )
+            candidate_reference = connection.execute(peer_reference_sql).df()
+            connection.execute("DROP TABLE topology_peer_wide")
+            candidate_reference["scale"] = (
+                candidate_reference["upper"] - candidate_reference["centre"]
+            )
+            candidate_reference = candidate_reference.loc[
+                candidate_reference["reference_rows"].ge(
+                    int(minimum_reference_rows)
+                )
+                & candidate_reference["scale"].gt(1e-9)
+            ].reset_index(drop=True)
+            print(
+                f"    topology reference: peer={candidate} complete in "
+                f"{(time.perf_counter() - started) / 60:.1f} minutes",
+                flush=True,
+            )
+            if not candidate_reference.empty:
+                peer_reference = candidate_reference
+                break
+        if peer_reference.empty:
+            raise ValueError(
+                "Calibration contains no stable peer reference at any "
+                "eligible physical level"
+            )
 
         started = time.perf_counter()
         print("    topology reference: group statistics", flush=True)
@@ -2667,18 +2958,18 @@ def fit_topology_reference(
             flush=True,
         )
 
+    group_reference["scale"] = (
+        group_reference["upper"] - group_reference["centre"]
+    )
+    group_reference = group_reference.loc[
+        group_reference["reference_rows"].ge(int(minimum_reference_rows))
+        & group_reference["scale"].gt(1e-9)
+    ]
     reference = pd.concat(
         [peer_reference, group_reference], ignore_index=True
     ).sort_values(
         ["channel", "group_type", "size_band", "leading_feature"]
     ).reset_index(drop=True)
-    reference["scale"] = reference["upper"] - reference["centre"]
-    reference = reference.loc[
-        reference["reference_rows"].ge(int(minimum_reference_rows))
-        & reference["scale"].gt(1e-9)
-    ].reset_index(drop=True)
-    if reference.empty:
-        raise ValueError("Calibration contains no stable topology reference")
     return reference[TOPOLOGY_REFERENCE_COLUMNS]
 
 
@@ -2693,8 +2984,6 @@ def score_topology_file(
     min_peers=7,
     min_group_entities=3,
     min_group_fraction=0.50,
-    min_affected_entities=0,
-    min_affected_fraction=0.0,
 ):
     """Score eligible peer and common-mode evidence from frozen residuals.
 
@@ -2756,12 +3045,11 @@ def score_topology_file(
             reference, "group_common_mode", feature, alias
         )
         group_count = _sql_identifier(alias + "__count")
-        group_affected = _sql_identifier(alias + "__affected")
+        affected_gate = _calibrated_affected_gate(reference, feature, alias)
         group_scores.append(
             f"CASE WHEN {group_count} >= {int(min_group_entities)} "
             f"AND {group_count} * 1.0 / group_size >= {float(min_group_fraction)} "
-            f"AND {group_affected} * {group_count} >= {int(min_affected_entities)} "
-            f"AND {group_affected} >= {float(min_affected_fraction)} "
+            f"AND ({affected_gate}) "
             f"THEN ({group_score}) ELSE NULL END "
             f"AS {_sql_identifier(alias + '__score')}"
         )
@@ -3219,12 +3507,6 @@ def score_partition_file(
             min_peers=resolved_policy["min_peers"],
             min_group_entities=resolved_policy["min_group_entities"],
             min_group_fraction=resolved_policy["min_group_fraction"],
-            min_affected_entities=resolved_policy.get(
-                "min_affected_entities", 1
-            ),
-            min_affected_fraction=resolved_policy.get(
-                "min_affected_fraction", 0.0
-            ),
         )
         residuals.unlink(missing_ok=True)
         combined = (
