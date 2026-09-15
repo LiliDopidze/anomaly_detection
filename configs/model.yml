@@ -5,12 +5,21 @@ version: 1
 calibration_sample:
   maximum_rows_per_entity_day: 8
 
+robust_reference:
+  minimum_entity_rows: 30
+  minimum_timestamp_coverage: 0.80
+  minimum_valid_rate: 0.80
+  maximum_clipped_rate: 0.20
+
 isolation_forest:
   n_estimators: 300
   max_samples: 2048
   max_features: 0.75
   random_seed: 42
   maximum_features_per_metric: 5
+  entity_score_calibration:
+    minimum_rows: 30
+    scale_floor_fraction_of_global: 0.25
   contextual_inputs:
     - rapid_residual
     - drift_cusum

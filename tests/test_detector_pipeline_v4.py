@@ -11,15 +11,20 @@ import telco_anomaly.detectors as detector_helpers
 from telco_anomaly.contract import OPTIONAL_CORE_SCHEMAS
 from telco_anomaly.detectors import (
     _balanced_isolation_features,
+    _calibrated_affected_gate,
     _deduplicate_scope_alerts,
     _directional_model_frame,
     _second_metric_evidence,
+    _top_two_metric_mean_evidence,
     append_contextual_isolation_scores,
     alert_grid_from_score_file,
     calibration_thresholds,
+    choose_peer_level,
+    eligible_peer_levels,
     fit_contextual_isolation_forest,
     fit_residual_bundle,
     merge_score_files,
+    physical_hierarchy,
     split_feature_file_by_time,
     fit_topology_reference,
     score_topology_file,
@@ -86,6 +91,28 @@ def test_calibration_feature_split_is_chronological_and_complete(tmp_path):
     assert fit_frame["event_ts"].max() < threshold_frame["event_ts"].min()
     assert result["fit_rows"] == len(fit_frame)
     assert result["threshold_rows"] == len(threshold_frame)
+
+
+def test_calibration_feature_split_reuses_an_explicit_eda_cutoff(tmp_path):
+    source = tmp_path / "calibration.parquet"
+    fit = tmp_path / "fit.parquet"
+    threshold = tmp_path / "threshold.parquet"
+    frame = pd.DataFrame({
+        "event_ts": pd.date_range(BASE, periods=20, freq="15min"),
+        "entity_id": "ont-1",
+        "episode_id": "episode-1",
+        "signal": np.arange(20, dtype=float),
+    })
+    frame.to_parquet(source, index=False)
+    cutoff = frame.loc[12, "event_ts"]
+
+    result = split_feature_file_by_time(
+        source, fit, threshold, cutoff=cutoff
+    )
+
+    assert pd.to_datetime(result["cutoff"], utc=True) == cutoff
+    assert pd.read_parquet(fit)["event_ts"].max() < cutoff
+    assert pd.read_parquet(threshold)["event_ts"].min() >= cutoff
 
 
 def test_partition_scoring_uses_the_frozen_cusum_policy(tmp_path, monkeypatch):
@@ -303,6 +330,67 @@ def test_isolation_forest_keeps_base_and_temporal_variants(tmp_path):
     assert bundle["isolation_base_features"] == ["a__level", "b__level"]
     assert scored["isolation_forest_base"].notna().all()
     assert scored["isolation_forest_temporal"].notna().all()
+    assert scored["isolation_forest_entity_calibrated"].notna().all()
+
+    with_gap = frame.copy()
+    with_gap.loc[100:, "event_ts"] += pd.Timedelta(days=1)
+    gap_scores = score_residual_episode(
+        bundle,
+        with_gap,
+        cadence_seconds=900,
+        dispersion_window_seconds=3600,
+        cusum_allowance=0.5,
+    )
+    assert gap_scores.loc[100:101, "dispersion_change"].isna().all()
+
+
+def test_multimetric_tail_mean_requires_two_distinct_metrics():
+    evidence = pd.DataFrame({
+        "a__level": [8.0, 2.0],
+        "a__lag": [1.0, 9.0],
+        "b__level": [2.0, 4.0],
+        "c__level": [1.0, np.nan],
+    })
+    metrics = {
+        "a__level": "a", "a__lag": "a",
+        "b__level": "b", "c__level": "c",
+    }
+
+    result = _top_two_metric_mean_evidence(evidence, metrics)
+
+    np.testing.assert_allclose(result, [5.0, 6.5])
+
+
+def test_topology_order_is_derived_from_declared_hierarchy():
+    entities = [f"ont-{number:02d}" for number in range(16)]
+    topology = topology_fixture(entities)
+
+    assert physical_hierarchy(topology) == ["splitter_l1", "pon_port"]
+    assert eligible_peer_levels(
+        topology,
+        minimum_valid_peers=7,
+        minimum_entity_coverage=0.80,
+    ) == ["splitter_l1", "pon_port"]
+    assert choose_peer_level(
+        topology,
+        minimum_valid_peers=7,
+        minimum_entity_coverage=0.80,
+    ) == "splitter_l1"
+
+
+def test_zero_affected_fraction_does_not_pass_a_zero_calibration_quantile():
+    reference = pd.DataFrame([{
+        "channel": "group_common_mode",
+        "group_type": "pon_port",
+        "size_band": "7_14",
+        "leading_feature": "m1__level",
+        "affected_upper": 0.0,
+    }])
+
+    expression = _calibrated_affected_gate(reference, "m1__level", "f00")
+
+    assert '"f00__affected" > 0.0' in expression
+    assert '"f00__affected" >=' not in expression
 
 
 def test_isolation_inputs_respect_declared_harmful_direction():
@@ -513,9 +601,58 @@ def test_peer_and_common_mode_scores_use_calibration_topology(tmp_path):
         "event_ts", "entity_id", "episode_id",
     ]).any()
     assert scores["peer_deviation"].notna().all()
-    assert scores["group_common_mode"].notna().all()
+    # No entity in this fixture reaches the residual >= 3 affected criterion.
+    # A zero q99 breadth reference must not promote zero-breadth groups.
+    assert scores["group_common_mode"].isna().all()
     assert set(scores["peer_valid_peers"]) == {7}
     assert not list(tmp_path.glob("topology-evidence-*"))
+
+
+def test_peer_reference_falls_back_when_deepest_level_has_too_few_valid_peers(
+    tmp_path,
+):
+    entities = [f"ont-{number:02d}" for number in range(16)]
+    topology_rows = []
+    residual_rows = []
+    for number, entity in enumerate(entities):
+        topology_rows.extend([
+            (entity, "pon_port", "pon-0", 1, "physical_topology", BASE, pd.NaT),
+            (
+                entity, "splitter_l1", f"splitter-{number // 8}", 2,
+                "physical_topology", BASE, pd.NaT,
+            ),
+        ])
+        for step in range(40):
+            residual_rows.append((
+                BASE + pd.Timedelta(minutes=15 * step),
+                entity,
+                f"{entity}::episode-1",
+                np.sin(step / 5) + number / 100 if number % 8 < 6 else np.nan,
+            ))
+    topology = pd.DataFrame(
+        topology_rows,
+        columns=OPTIONAL_CORE_SCHEMAS["topology_memberships"],
+    )
+    residual_path = tmp_path / "residuals.parquet"
+    pd.DataFrame(residual_rows, columns=[
+        "event_ts", "entity_id", "episode_id", "m1__level",
+    ]).to_parquet(residual_path, index=False)
+
+    reference = fit_topology_reference(
+        residual_path,
+        topology,
+        ["m1__level"],
+        peer_group_type=["splitter_l1", "pon_port"],
+        group_types=["splitter_l1", "pon_port"],
+        min_peers=7,
+        minimum_reference_rows=10,
+        upper_quantile=0.95,
+    )
+
+    peer_levels = reference.loc[
+        reference["channel"].eq("peer_deviation"), "group_type"
+    ].unique()
+    assert peer_levels.tolist() == ["pon_port"]
 
 
 def test_score_merge_is_low_memory_ordered_and_one_to_one(tmp_path, monkeypatch):

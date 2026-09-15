@@ -21,7 +21,8 @@ memberships:
     hierarchy_level: null
     family: geographic_context
 peer_policy:
-  preferred_levels: [splitter_l2, pon_port, splitter_l1, olt]
+  # Peer order is derived from memberships.hierarchy_level, deepest first.
+  # Keeping a second hand-written order here previously allowed it to drift.
   minimum_valid_peers: 7
   minimum_entity_coverage: 0.80
   # Only like-for-like physical measurements enter peer scoring. Traffic,
@@ -37,5 +38,7 @@ peer_policy:
 group_policy:
   minimum_entities: 3
   minimum_available_fraction: 0.50
-  minimum_affected_entities: 3
-  minimum_affected_fraction: 0.25
+  # Common-mode breadth is compared with the early-calibration null within
+  # topology-size bands. This is safer than a fixed 25% rule when group sizes
+  # and within-group correlation differ between operators.
+  affected_fraction_quantile: 0.99

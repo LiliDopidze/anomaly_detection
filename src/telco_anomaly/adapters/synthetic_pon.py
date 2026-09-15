@@ -431,11 +431,19 @@ def build_synthetic_pon_pack(
     inventory = inspect_synthetic_pon(source, metric_registry)
     panel = inventory["panel"]
     catalogue, mapping = inventory["catalogue"], inventory["mapping"]
-    clip_limits = {
-        item["metric_id"]: item["source_quality"]["clipped_at"]
-        for item in metric_registry["metrics"]
-        if item.get("source_quality", {}).get("clipped_at") is not None
-    }
+    clip_limits = {}
+    for item in metric_registry["metrics"]:
+        quality = item.get("source_quality", {})
+        if quality.get("clipped_at") is None:
+            continue
+        applies_to = quality.get("applies_to")
+        if applies_to != source_instance:
+            raise ValueError(
+                f"The clipping rule for {item['metric_id']} applies to "
+                f"{applies_to!r}, not source instance {source_instance!r}. "
+                "Add a reviewed source-specific rule before building this pack."
+            )
+        clip_limits[item["metric_id"]] = quality["clipped_at"]
     pairs = _available_pairs(panel, mapping)
     entities = sorted(pairs["entity_id"].astype(str).unique())
     panel_sql = str(panel).replace("'", "''")

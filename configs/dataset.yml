@@ -4,8 +4,8 @@ datasets:
   synthetic_pon:
     role: primary_engineering_and_labelled_development_fixture
     source_candidates:
-      - telco_syntetic_data
       - telco_synthetic_data
+      - telco_syntetic_data  # legacy Drive spelling, retained for compatibility
     cadence_seconds: 900
     labelled: true
     topology: true

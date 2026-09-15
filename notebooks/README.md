@@ -14,7 +14,7 @@ into several notebooks.
 | `01_DATA_QUALITY_AUDIT` | Native synthetic PON files | Source audit tables | No |
 | `02_CANONICAL_DATA_MODEL` | Native telemetry, topology, service windows and separately staged truth | A vendor-neutral pack and truth-unmounted `SPEC-CORE` | Stages them, but the canonical detector run does not mount them |
 | `03_SPLITS_AND_TRUTH_LOCK` | Pack plus split definitions | Physical calibration, development and locked-holdout truth directories | Yes, evaluator setup only |
-| `04_CALIBRATION_EDA` | Calibration `SPEC-CORE` | Time-series plots, robust profiles and frozen EDA decisions | No |
+| `04_CALIBRATION_EDA` | Early-calibration `SPEC-CORE` | Time-series plots, robust profiles, reference exclusions and frozen EDA decisions | No |
 | `05_FEATURE_ENGINEERING` | Calibration/development `SPEC-CORE` plus EDA decisions | Reusable causal fit, late-calibration, and development features | No |
 | `06_PRIMARY_UNSUPERVISED_MODEL` | Calibration/development features and topology | Direction-aware models, separate threshold/workload score slices, and a frozen scoring policy | No |
 | `07_CHALLENGER_MODELS` | Independent late-calibration workload plus development truth | Label-free operating points, detection selection and separate localisation qualification | Development only |
@@ -36,6 +36,9 @@ therefore be selected for incident research while early warning or localisation
 remains explicitly unqualified. Holdout stays sealed until the early-warning
 qualification passes. If no detection candidate satisfies the gates, Notebook
 07 writes `best_diagnostic_configuration.json` but no selected configuration.
+Notebook 12 also refuses that diagnostic fallback unless
+`ALLOW_DIAGNOSTIC_DEMO=1` is explicitly set; the resulting model card remains
+marked non-deployable.
 
 ## Data location
 
@@ -60,7 +63,7 @@ stage run ID—for example:
 ```bash
 export TELCO_DATASET=synthetic_pon
 export TELCO_FEATURE_RUN_ID=synthetic_pon_features_v4
-export TELCO_MODEL_RUN_ID=synthetic_pon_models_v7
+export TELCO_MODEL_RUN_ID=synthetic_pon_models_v8
 ```
 
 Keep downstream run IDs aligned with the inputs printed at the top of each
@@ -72,6 +75,10 @@ partitions. In Colab it uses `/content` for large temporary wide tables and
 copies only final feature files to Drive. It prints progress after each major
 step and every 25 entity episodes. Set `TELCO_WORK_ROOT` only when a different
 local scratch disk is required; do not point it at Google Drive.
+Notebook 04 profiles every early-calibration entity-metric series, while only
+the detailed plots use a deterministic small entity sample. Notebook 05 reuses
+the exact EDA timestamp cutoff for its fit/late-calibration split; it does not
+estimate a second boundary from a separately materialised table.
 
 Notebook 06 reuses the immutable v4 feature run. It needs at least 4 GB of
 local scratch space by default, keeps DuckDB spill files under that scratch
@@ -81,16 +88,18 @@ intermediate files are deleted immediately after use. If a previous Colab
 attempt filled `/content`, restart the runtime before rerunning Notebook 06;
 Notebook 05 does not need to be rerun.
 
-The v7 model run fits Isolation Forest on adverse-direction residuals with a
+The v8 model run fits Isolation Forest on adverse-direction residuals with a
 bounded number of features per metric and an entity-day-balanced calibration
-sample. It uses the first half of late calibration to estimate thresholds and
+sample. It adds a frozen entity-calibrated Isolation Forest score and coherent
+two-metric tail evidence; labels do not construct either score. It uses the
+first half of late calibration to estimate thresholds and
 the second half to verify workload. Notebook 07 applies the exact Poisson upper
 workload bound to that independent verification slice before development truth
 is consulted. It also refuses an empirical threshold with fewer than five
 expected calibration blocks in its upper tail.
 
-Selection revision v9 reuses the v7 score files; Notebook 06 does not need to
-be rerun. Notebook 07 audits every threshold on label-free workload data and
+Selection revision v10 uses the v8 score files. Notebook 07 audits every
+threshold on label-free workload data and
 evaluates only the calibration-admissible operating points on development.
 This corrects the earlier premature quantile freeze while preserving a separate
 strictly label-free fallback. It also separates active-fault detection,

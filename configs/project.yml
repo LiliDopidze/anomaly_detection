@@ -16,7 +16,7 @@ company_agnostic_means:
   - shared_detection_and_incident_algorithms
 claim_levels:
   synthetic: validates software and injected mechanisms
-  public_real: validates behaviour on real Telecom telemetry
+  public_real: validates portability and alert stability on real non-PON telecom telemetry; it does not validate PON fault effectiveness
   testbed_fault: validates response to controlled physical failures
   operator: required for production performance claims
 prohibited_model_fields:
