@@ -1,6 +1,6 @@
 # Company-agnostic Telecom anomaly detection
 
-This repository builds an explainable Telecom telemetry detector for anomaly
+This repository builds a Telecom telemetry detector for anomaly
 detection, incident consolidation, and topology-aware localisation. The
 primary product path is PON/ONT. Company independence means that operators map
 their native fields into shared semantic metrics and calibrate locally; it
