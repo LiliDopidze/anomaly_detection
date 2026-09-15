@@ -20,6 +20,9 @@ isolation_forest:
   entity_score_calibration:
     minimum_rows: 30
     scale_floor_fraction_of_global: 0.25
+  # Candidates, not guaranteed model inputs. Calibration retains only
+  # non-constant channels with enough observed scores, and scoring requires
+  # at least half of the retained inputs to be present in each row.
   contextual_inputs:
     - rapid_residual
     - drift_cusum

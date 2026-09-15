@@ -1357,7 +1357,9 @@ def form_cases(
     if alerts.empty:
         return (
             pd.DataFrame(columns=CASE_COLUMNS),
-            pd.DataFrame(columns=["case_id", "alert_id", "entity_id", "model_id"]),
+            pd.DataFrame(columns=[
+                "case_id", "alert_id", "entity_id", "model_id", "alert_start"
+            ]),
         )
     thresholds = {str(key): float(value) for key, value in thresholds.items()}
     missing = set(alerts["model_id"].astype(str)) - set(thresholds)
@@ -1373,6 +1375,10 @@ def form_cases(
     ordered = alerts.sort_values(["alert_start", "alert_end", "alert_id"])
     for alert in ordered.itertuples(index=False):
         entity = str(alert.entity_id)
+        symptom = (
+            str(alert.leading_feature).split("__", 1)[0]
+            if pd.notna(alert.leading_feature) else None
+        )
         alert_groups = memberships.get(entity, set())
         if (
             str(alert.model_id) in shared_scope_models
@@ -1396,11 +1402,17 @@ def form_cases(
             case = open_cases[number]
             shared = case["common_groups"] & alert_groups
             same_entity = entity in case["entities"]
+            same_symptom = (
+                symptom is None or not case["symptoms"]
+                or symptom in case["symptoms"]
+            )
             common_mode_evidence = (
                 str(alert.model_id) in shared_scope_models
                 or case["has_shared_scope_evidence"]
             )
-            if same_entity or (shared and common_mode_evidence):
+            if (same_entity and same_symptom) or (
+                not same_entity and shared and common_mode_evidence
+            ):
                 compatible.append((case["end"], number, shared))
         if compatible:
             selected = [max(compatible)]
@@ -1426,6 +1438,7 @@ def form_cases(
                 other = open_cases[other_number]
                 case["alerts"].extend(other["alerts"])
                 case["entities"].update(other["entities"])
+                case["symptoms"].update(other["symptoms"])
                 case["start"] = min(case["start"], other["start"])
                 case["end"] = max(case["end"], other["end"])
                 case["common_groups"] &= other["common_groups"]
@@ -1437,6 +1450,8 @@ def form_cases(
                     active_cases.remove(other_number)
             case["alerts"].append(alert)
             case["entities"].add(entity)
+            if symptom is not None:
+                case["symptoms"].add(symptom)
             case["end"] = max(case["end"], alert.alert_end)
             case["has_shared_scope_evidence"] |= (
                 str(alert.model_id) in shared_scope_models
@@ -1447,6 +1462,7 @@ def form_cases(
             open_cases.append({
                 "alerts": [alert],
                 "entities": {entity},
+                "symptoms": {symptom} if symptom is not None else set(),
                 "start": alert.alert_start,
                 "end": alert.alert_end,
                 "common_groups": set(alert_groups),
@@ -1470,6 +1486,17 @@ def form_cases(
         number = output_number
         case_id = f"C-{number:06d}"
         members = case["alerts"]
+        # Localisation is evaluated at case_start. Later alerts can enrich an
+        # open case, but cannot retrospectively identify its initial scope.
+        onset_members = [
+            row for row in members if row.alert_start == case["start"]
+        ]
+        onset_entities = {str(row.entity_id) for row in onset_members}
+        onset_groups = None
+        for entity in onset_entities:
+            groups = memberships.get(entity, set())
+            onset_groups = set(groups) if onset_groups is None else onset_groups & groups
+        onset_groups = onset_groups or set()
         peak = max(
             members,
             key=exceedance,
@@ -1477,7 +1504,7 @@ def form_cases(
         evidence = max(exceedance(row) for row in members)
         second_type = second_id = pd.NA
         scope_evidence = [
-            row for row in members
+            row for row in onset_members
             if str(row.model_id) in shared_scope_models
             and pd.notna(row.evidence_scope_type)
             and pd.notna(row.evidence_scope_id)
@@ -1506,14 +1533,16 @@ def form_cases(
             else:
                 status = "common_mode_scope"
                 explanation = "Common-mode residual evidence identifies this physical scope."
-        elif len(case["entities"]) == 1:
-            scope_type, scope_id = "entity", next(iter(case["entities"]))
+        elif len(onset_entities) == 1:
+            scope_type, scope_id = "entity", next(iter(onset_entities))
             footprint = {scope_id}
             status = "entity_exact"
-            explanation = "One entity carries the incident evidence."
-        elif case["common_groups"]:
+            explanation = "One entity carries the evidence at the first alert."
+        elif onset_groups and any(
+            str(row.model_id) in shared_scope_models for row in onset_members
+        ):
             candidates = sorted(
-                case["common_groups"],
+                onset_groups,
                 key=lambda group: (
                     len(descendants.get(group, ())),
                     -levels.get(group, -1), group[0], group[1],
@@ -1536,8 +1565,11 @@ def form_cases(
                     second_type, second_id = alternatives[0]
                 status = "hierarchical_candidate"
                 explanation = "Most specific common physical scope of the affected entities."
-        else:  # guarded by the merge rule; kept as an explicit invariant
-            raise AssertionError("A multi-entity case has no common topology scope")
+        else:
+            scope_type, scope_id = "unresolved", pd.NA
+            footprint = onset_entities
+            status = "unresolved_at_first_alert"
+            explanation = "No physical scope was identified at the first alert."
         affected_fraction = np.nan
         if selected_scope_evidence is not None:
             affected_fraction = pd.to_numeric(
@@ -1546,15 +1578,15 @@ def form_cases(
             )
         if pd.isna(affected_fraction):
             affected_fraction = (
-                len(case["entities"]) / len(footprint) if footprint else np.nan
+                len(onset_entities) / len(footprint) if footprint else np.nan
             )
         affected_count = (
             max(
-                len(case["entities"]),
+                len(onset_entities),
                 round(float(affected_fraction) * len(footprint)),
             )
             if footprint and pd.notna(affected_fraction)
-            else len(case["entities"])
+            else len(onset_entities)
         )
         case_rows.append({
             "case_id": case_id,
@@ -1582,6 +1614,7 @@ def form_cases(
             "alert_id": str(row.alert_id),
             "entity_id": str(row.entity_id),
             "model_id": str(row.model_id),
+            "alert_start": row.alert_start,
         } for row in members)
     return (
         pd.DataFrame(case_rows, columns=CASE_COLUMNS),
@@ -1618,7 +1651,21 @@ def evaluate_cases(
     # Detection credit comes only from entities that actually raised an alert.
     # A predicted topology footprint is evaluated below as localisation output;
     # it must never manufacture detection overlap with an affected entity.
-    case_entities = case_members[["case_id", "entity_id"]].drop_duplicates().copy()
+    if "alert_start" not in case_members:
+        raise ValueError("Case members must include alert_start for causal evaluation")
+    case_members = case_members.copy()
+    case_members["alert_start"] = pd.to_datetime(
+        case_members["alert_start"], utc=True, errors="raise"
+    )
+    openings = case_members.merge(
+        cases[["case_id", "case_start"]], on="case_id", how="inner"
+    )
+    # A later member cannot make an earlier case opening a detection on that
+    # member's entity. Only entities that alerted at case_start get credit.
+    case_entities = openings.loc[
+        openings["alert_start"].eq(openings["case_start"]),
+        ["case_id", "entity_id"],
+    ].drop_duplicates()
     candidates = case_entities.merge(
         windows, on="entity_id", how="inner"
     ).merge(cases[["case_id", "case_start"]], on="case_id", how="inner")

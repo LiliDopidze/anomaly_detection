@@ -58,6 +58,17 @@ def panel(times, **metrics):
 
 
 class TransformTests(unittest.TestCase):
+    def test_counter_reset_policy_is_validated(self):
+        metrics = catalogue((
+            "equipment.uptime", "cumulative_counter", 1, "contextual",
+            "reset_safe_increment", 1.0, 0.0, None, "restart_at_zreo", None,
+        ))
+        with self.assertRaisesRegex(ValueError, "Unsupported reset policy"):
+            transform_episode(
+                panel([0, 1, 2], **{"equipment.uptime": [0, 1, 0]}),
+                metrics,
+            )
+
     def test_seasonal_difference_uses_only_the_exact_past_phase(self):
         metrics = catalogue(
             (

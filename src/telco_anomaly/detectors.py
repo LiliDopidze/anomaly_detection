@@ -52,6 +52,7 @@ MODEL_IDS = (
     "isolation_forest_base",
     "isolation_forest_temporal",
     "isolation_forest_confirmed",
+    "isolation_forest_soft_confirmed",
     "isolation_forest_entity_calibrated",
     "isolation_forest_contextual",
 )
@@ -2259,15 +2260,22 @@ def score_residual_episode(
     )
 
     window = max(4, round(float(dispersion_window_seconds) / float(cadence_seconds)))
-    segment_id = pd.Series(reset_before, index=residuals.index).cumsum()
-    spread = (
-        residuals[level_features]
-        .groupby(segment_id)
-        .rolling(window, min_periods=max(3, window // 2))
-        .std()
-        .reset_index(level=0, drop=True)
-        .reindex(residuals.index)
-    )
+    spread = pd.DataFrame(index=residuals.index, dtype=float)
+    entity_restart = pd.Series(reset_before, index=residuals.index)
+    for name in level_features:
+        valid = residuals[name].notna()
+        # A later valid reading starts a new volatility window after this
+        # metric went invalid, even if other metrics kept the entity grid full.
+        metric_restart = valid & ~valid.shift(fill_value=False)
+        segment_id = (entity_restart | metric_restart).cumsum()
+        spread[name] = (
+            residuals[name]
+            .groupby(segment_id)
+            .rolling(window, min_periods=max(3, window // 2))
+            .std()
+            .reset_index(level=0, drop=True)
+            .reindex(residuals.index)
+        )
     reference_spread = bundle["residual_scale"].reindex(level_features).replace(0, 1)
     dispersion = np.abs(np.log(spread.div(reference_spread).clip(lower=0.05)))
     dispersion_values, dispersion_leading = _row_max(dispersion, level_features)
@@ -2277,6 +2285,7 @@ def score_residual_episode(
     isolation_base_values = np.full(len(features), np.nan)
     isolation_temporal_values = np.full(len(features), np.nan)
     isolation_confirmed_values = np.full(len(features), np.nan)
+    isolation_soft_confirmed_values = np.full(len(features), np.nan)
     isolation_entity_values = np.full(len(features), np.nan)
     pca_leading = np.full(len(features), None, dtype=object)
     isolation_base_leading = rapid_leading.copy()
@@ -2308,6 +2317,14 @@ def score_residual_episode(
             )
             isolation_confirmed_values = np.minimum(
                 temporal_evidence, rapid_values
+            )
+            # Both inputs are empirical tail evidence, so their equal-weight
+            # mean is on the same scale. Unlike the strict minimum, moderate
+            # self-history evidence does not erase a strong temporal signal.
+            isolation_soft_confirmed_values = np.where(
+                np.isfinite(temporal_evidence) & np.isfinite(rapid_values),
+                (temporal_evidence + rapid_values) / 2,
+                np.nan,
             )
             entity_reference = bundle.get("isolation_entity_score_reference")
             if entity_reference is not None:
@@ -2343,6 +2360,9 @@ def score_residual_episode(
         ),
         "isolation_forest_confirmed": (
             isolation_confirmed_values, isolation_temporal_leading,
+        ),
+        "isolation_forest_soft_confirmed": (
+            isolation_soft_confirmed_values, isolation_temporal_leading,
         ),
         "isolation_forest_entity_calibrated": (
             isolation_entity_values, isolation_temporal_leading,
@@ -3263,6 +3283,7 @@ def fit_contextual_isolation_forest(
     return {
         "feature_columns": retained,
         "feature_audit": audit,
+        "minimum_observed_inputs": max(2, math.ceil(len(retained) / 2)),
         "imputer": imputer,
         "scaler": scaler,
         "model": model,
@@ -3299,6 +3320,8 @@ def append_contextual_isolation_scores(
                 clean = frame[bundle["feature_columns"]].replace(
                     [np.inf, -np.inf], np.nan
                 )
+                observed = clean.notna().sum(axis=1).to_numpy()
+                ready = observed >= int(bundle["minimum_observed_inputs"])
                 values = bundle["imputer"].transform(clean)
                 scaled = bundle["scaler"].transform(values)
                 scaled = np.clip(
@@ -3315,11 +3338,11 @@ def append_contextual_isolation_scores(
                 table = pa.Table.from_batches([batch])
                 table = table.append_column(
                     "isolation_forest_contextual",
-                    pa.array(scores, type=pa.float64()),
+                    pa.array(scores, mask=~ready, type=pa.float64()),
                 )
                 table = table.append_column(
                     "isolation_forest_contextual__leading_feature",
-                    pa.array(leading, type=pa.string()),
+                    pa.array(np.where(ready, leading, None), type=pa.string()),
                 )
                 if writer is None:
                     writer = pq.ParquetWriter(
