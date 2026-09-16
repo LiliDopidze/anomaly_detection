@@ -113,5 +113,3 @@ artefacts, and full run outputs remain outside Git because they are large and
 may be restricted. Their manifests and hashes provide reproducibility without
 committing the data itself.
 
-For exact run instructions and the purpose of every notebook, see
-[notebooks/README.md](notebooks/README.md).
