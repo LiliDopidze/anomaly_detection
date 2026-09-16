@@ -46,11 +46,8 @@ The notebooks run in order:
 09 topology localisation
 10 locked evaluation
 11 public-data qualification
-12 inference demo + model card
 ```
 
-Notebooks explain choices and inspect outputs. Reusable calculations live in
-`src/telco_anomaly` so a silent fix cannot diverge between notebooks.
 
 ## Set up
 
