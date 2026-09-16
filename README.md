@@ -26,6 +26,9 @@ incident policy, and evaluation definitions remain shared.
 configs/                  Scientific and operational policy
 notebooks/                Numbered, restart-and-run orchestration
 src/telco_anomaly/        Tested reusable calculations
+├── pipeline/             Partition and causal feature materialisation
+├── scoring/              References, detectors, topology and thresholds
+└── detectors.py          Backward-compatible public facade
 tests/                    Contract, leakage, causality, and adapter tests
 data/                     Git-ignored raw and generated data (optional local root)
 ```
@@ -39,6 +42,7 @@ The notebooks run in order:
 03 splits + truth lock
 04 calibration-only EDA
 05 leakage-safe features
+06A optional calibration-sampling sensitivity
 06 calibration-only statistical and Isolation Forest detectors
 07 independent workload check + development selection
 08 alerts, incidents + observable events
@@ -124,6 +128,9 @@ For exact run instructions and the purpose of every notebook, see
   `SPEC-EVAL` and are mounted only by the evaluator.
 - Calibration, development, and holdout are chronological. Development labels
   may compare declared candidates; locked holdout cannot change the model.
+- Global model rows are selected deterministically across time-of-day strata.
+  The optional 06A diagnostic compares sampling density and seed stability
+  using score rankings and label-free incident workload.
 - Score thresholds use one late-calibration half that was not used to fit the
   detector. The other half verifies consolidated workload without labels.
   Empirical tail thresholds also require minimum block support. Only then are

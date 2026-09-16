@@ -25,6 +25,7 @@ from telco_anomaly.io import (
     require_same,
     resolve_data_root,
     resolve_dataset_source,
+    source_tree_sha256,
     write_json,
 )
 
@@ -234,6 +235,15 @@ def test_file_sha256_streams_exact_bytes(tmp_path):
     assert file_sha256(path, chunk_size=7) == hashlib.sha256(payload).hexdigest()
     with pytest.raises(ValueError, match="positive"):
         file_sha256(path, chunk_size=0)
+
+
+def test_source_tree_hash_records_paths_and_contents(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.py").write_text("value = 1\n")
+    first = source_tree_sha256(source)
+    (source / "a.py").rename(source / "b.py")
+    assert source_tree_sha256(source) != first
 
 
 def test_require_same_rejects_stale_lineage():
