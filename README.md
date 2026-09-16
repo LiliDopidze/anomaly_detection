@@ -115,31 +115,3 @@ committing the data itself.
 
 For exact run instructions and the purpose of every notebook, see
 [notebooks/README.md](notebooks/README.md).
-
-## Scientific guardrails
-
-- Models read `SPEC-CORE` only. Faults, tickets, and labels live in
-  `SPEC-EVAL` and are mounted only by the evaluator.
-- Calibration, development, and holdout are chronological. Development labels
-  may compare declared candidates; locked holdout cannot change the model.
-- Global model rows are selected deterministically across time-of-day strata.
-  The optional 06A diagnostic compares sampling density and seed stability
-  using score rankings and label-free incident workload.
-- Score thresholds use one late-calibration half that was not used to fit the
-  detector. The other half verifies consolidated workload without labels.
-  Empirical tail thresholds also require minimum block support. Only then are
-  frozen operating points compared on development truth; holdout remains
-  sealed until one configuration passes every gate.
-- Detection credit requires an actually alerting entity to overlap an affected
-  entity; a predicted topology footprint is localisation evidence only.
-- False-incident workload uses scoreable portfolio exposure and reports the
-  calendar denominator beside it.
-- Detection selection fails closed unless the 95% Wilson lower recall bound,
-  Garwood workload upper bound, sample-size, and availability gates all pass.
-- Localisation reports the smallest supported observable scope and preserves
-  topology ambiguity. It is qualified separately from detection and remains a
-  probable location, not causal root cause.
-- Synthetic results do not establish real-fleet effectiveness. Operator data
-  is required before production claims.
-
-
