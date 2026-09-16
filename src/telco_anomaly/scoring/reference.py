@@ -53,42 +53,92 @@ def _reference_sample(
     if int(maximum_rows) < 1:
         raise ValueError("maximum_rows must be positive")
     source = _sql_literal(str(Path(path)))
+    hash_sql = (
+        "hash(CAST(entity_id AS VARCHAR), "
+        "CAST(episode_id AS VARCHAR), event_ts, "
+        f"{int(random_seed)})"
+    )
     with _model_duckdb() as connection:
         if rows_per_block is None:
-            return connection.execute(f"""
-                SELECT *
-                FROM read_parquet({source})
-                ORDER BY hash(CAST(entity_id AS VARCHAR),
-                              CAST(episode_id AS VARCHAR), event_ts,
-                              {int(random_seed)}),
-                         entity_id, episode_id, event_ts
-                LIMIT {int(maximum_rows)}
-            """).df()
-        return connection.execute(f"""
-            WITH candidates AS (
-                SELECT *,
-                    CAST(event_ts AT TIME ZONE 'UTC' AS DATE) AS sample_day,
-                    floor((extract(hour FROM event_ts AT TIME ZONE 'UTC') * 60
-                        + extract(minute FROM event_ts AT TIME ZONE 'UTC'))
-                        / (1440.0 / {rows_per_block})) AS time_bin,
-                    hash(CAST(entity_id AS VARCHAR),
-                         CAST(episode_id AS VARCHAR), event_ts,
-                         {int(random_seed)}) AS sample_hash
-                FROM read_parquet({source})
-            ), balanced AS (
-                SELECT * EXCLUDE (sample_day, time_bin, sample_hash)
-                FROM candidates
-                QUALIFY row_number() OVER (
-                    PARTITION BY entity_id, sample_day, time_bin
-                    ORDER BY sample_hash, event_ts, episode_id
-                ) = 1
-            )
-            SELECT * FROM balanced
-            ORDER BY hash(CAST(entity_id AS VARCHAR),
-                          CAST(episode_id AS VARCHAR), event_ts,
-                          {int(random_seed)}), entity_id, episode_id, event_ts
-            LIMIT {int(maximum_rows)}
+            # Rank only the narrow identity key. Sorting every wide feature
+            # column for the uncapped sensitivity case can exceed Colab's
+            # memory even though the final sample is small.
+            connection.execute(f"""
+                CREATE TEMP TABLE selected_reference_rows AS
+                WITH candidates AS (
+                    SELECT file_row_number AS sample_row_number,
+                           CAST(entity_id AS VARCHAR) AS entity_id,
+                           CAST(episode_id AS VARCHAR) AS episode_id,
+                           event_ts,
+                           {hash_sql} AS sample_hash
+                    FROM read_parquet({source}, file_row_number=true)
+                ), selected AS (
+                    SELECT *
+                    FROM candidates
+                    ORDER BY sample_hash, entity_id, episode_id, event_ts,
+                             sample_row_number
+                    LIMIT {int(maximum_rows)}
+                )
+                SELECT sample_row_number,
+                       row_number() OVER (
+                           ORDER BY sample_hash, entity_id, episode_id,
+                                    event_ts, sample_row_number
+                       ) AS sample_rank
+                FROM selected
+            """)
+        else:
+            connection.execute(f"""
+                CREATE TEMP TABLE selected_reference_rows AS
+                WITH candidates AS (
+                    SELECT file_row_number AS sample_row_number,
+                           CAST(entity_id AS VARCHAR) AS entity_id,
+                           CAST(episode_id AS VARCHAR) AS episode_id,
+                           event_ts,
+                           CAST(event_ts AT TIME ZONE 'UTC' AS DATE) AS sample_day,
+                           floor((extract(hour FROM event_ts AT TIME ZONE 'UTC') * 60
+                               + extract(minute FROM event_ts AT TIME ZONE 'UTC'))
+                               / (1440.0 / {rows_per_block})) AS time_bin,
+                           {hash_sql} AS sample_hash
+                    FROM read_parquet({source}, file_row_number=true)
+                ), balanced AS (
+                    SELECT sample_row_number, entity_id, episode_id,
+                           event_ts, sample_hash
+                    FROM candidates
+                    QUALIFY row_number() OVER (
+                        PARTITION BY entity_id, sample_day, time_bin
+                        ORDER BY sample_hash, event_ts, episode_id,
+                                 sample_row_number
+                    ) = 1
+                ), selected AS (
+                    SELECT *
+                    FROM balanced
+                    ORDER BY sample_hash, entity_id, episode_id, event_ts,
+                             sample_row_number
+                    LIMIT {int(maximum_rows)}
+                )
+                SELECT sample_row_number,
+                       row_number() OVER (
+                           ORDER BY sample_hash, entity_id, episode_id,
+                                    event_ts, sample_row_number
+                       ) AS sample_rank
+                FROM selected
+            """)
+
+        # Joining the selected keys back to the wide file avoids a wide
+        # full-source sort. The bounded result is ordered in Pandas so model
+        # fitting remains deterministic even with insertion-order disabled.
+        sample = connection.execute(f"""
+            SELECT keys.sample_rank AS __sample_rank,
+                   source.* EXCLUDE (file_row_number)
+            FROM read_parquet({source}, file_row_number=true) AS source
+            JOIN selected_reference_rows AS keys
+              ON source.file_row_number = keys.sample_row_number
         """).df()
+    sample = sample.sort_values(
+        "__sample_rank",
+        kind="mergesort",
+    ).drop(columns="__sample_rank").reset_index(drop=True)
+    return sample
 
 def _full_entity_reference(
     path, features, scale_floors, minimum_rows=30, minimum_days=2,

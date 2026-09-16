@@ -59,6 +59,45 @@ def test_fit_sample_spreads_across_day_and_is_reproducible(tmp_path):
     pd.testing.assert_frame_equal(first, second)
 
 
+def test_uncapped_fit_sample_is_bounded_reproducible_and_keeps_schema(tmp_path):
+    path = tmp_path / "wide_calibration.parquet"
+    rows = pd.DataFrame({
+        "event_ts": pd.date_range(BASE, periods=500, freq="15min"),
+        "entity_id": [f"ont-{value % 20}" for value in range(500)],
+        "episode_id": [f"episode-{value % 20}" for value in range(500)],
+        **{
+            f"signal_{column}__level": np.arange(500, dtype=float) + column
+            for column in range(40)
+        },
+    })
+    rows.to_parquet(path, index=False)
+
+    first = detector_helpers._reference_sample(path, 73, 42, None)
+    second = detector_helpers._reference_sample(path, 73, 42, None)
+
+    assert len(first) == 73
+    assert first.columns.tolist() == rows.columns.tolist()
+    assert "__sample_rank" not in first
+    pd.testing.assert_frame_equal(first, second)
+
+
+def test_reference_sample_does_not_multiply_duplicate_logical_keys(tmp_path):
+    path = tmp_path / "duplicate_keys.parquet"
+    rows = pd.DataFrame({
+        "event_ts": [BASE, BASE, BASE + pd.Timedelta(hours=4)],
+        "entity_id": ["ont-1", "ont-1", "ont-1"],
+        "episode_id": ["episode-1", "episode-1", "episode-1"],
+        "signal__level": [1.0, 2.0, 3.0],
+    })
+    rows.to_parquet(path, index=False)
+
+    uncapped = detector_helpers._reference_sample(path, 2, 42, None)
+    stratified = detector_helpers._reference_sample(path, 10, 42, 8)
+
+    assert len(uncapped) == 2
+    assert len(stratified) == 2
+
+
 def test_short_entity_history_falls_back_and_long_history_is_shrunk(tmp_path):
     path = tmp_path / "calibration.parquet"
     short = pd.DataFrame({
