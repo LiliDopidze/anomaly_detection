@@ -529,3 +529,30 @@ def file_sha256(
         while chunk := handle.read(chunk_size):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def source_tree_sha256(root, patterns=("*.py",)):
+    """Hash source filenames and bytes in a deterministic directory tree.
+
+    The relative path is part of the digest, so moving an implementation file
+    is a recorded lineage change even when its bytes are unchanged.
+    """
+
+    root = Path(root).resolve()
+    files = sorted({
+        path.resolve()
+        for pattern in patterns
+        for path in root.rglob(pattern)
+        if path.is_file()
+    })
+    if not files:
+        raise FileNotFoundError(f"No source files found below {root}")
+    digest = hashlib.sha256()
+    for path in files:
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        with path.open("rb") as handle:
+            while chunk := handle.read(1 << 20):
+                digest.update(chunk)
+    return digest.hexdigest()

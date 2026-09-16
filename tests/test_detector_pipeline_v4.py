@@ -8,6 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 import telco_anomaly.detectors as detector_helpers
+import telco_anomaly.scoring.orchestration as scoring_orchestration
 from telco_anomaly.contract import OPTIONAL_CORE_SCHEMAS
 from telco_anomaly.detectors import (
     _balanced_isolation_features,
@@ -31,6 +32,7 @@ from telco_anomaly.detectors import (
     score_partition_file,
     score_residual_file,
     score_residual_episode,
+    run_sampling_sensitivity,
 )
 from telco_anomaly.evaluation import ALERT_COLUMNS, form_cases
 
@@ -83,6 +85,59 @@ def test_short_entity_history_falls_back_and_long_history_is_shrunk(tmp_path):
     assert bundle["entity_reference_days"].loc["short", "signal__level"] < 2
     assert pooled < bundle["entity_centre"].loc["long", "signal__level"] < 20.4
     assert len(bundle["selected_row_hash"]) == 64
+
+
+def test_sampling_sensitivity_compares_rows_seeds_and_workload(tmp_path):
+    fit_path = tmp_path / "fit.parquet"
+    late_path = tmp_path / "late.parquet"
+    rows = []
+    for entity_number in range(2):
+        entity = f"ont-{entity_number}"
+        for step in range(8 * 24 * 4):
+            rows.append({
+                "event_ts": BASE + pd.Timedelta(minutes=15 * step),
+                "entity_id": entity,
+                "episode_id": f"{entity}::episode-1",
+                "a__level": np.sin(step / 11) + entity_number,
+                "b__level": np.cos(step / 13),
+                "a__level__lag_1h": np.sin((step - 4) / 11),
+            })
+    frame = pd.DataFrame(rows)
+    frame.loc[frame["event_ts"].lt(BASE + pd.Timedelta(days=4))].to_parquet(
+        fit_path, index=False
+    )
+    frame.loc[frame["event_ts"].ge(BASE + pd.Timedelta(days=4))].to_parquet(
+        late_path, index=False
+    )
+
+    result, summary = run_sampling_sensitivity(
+        fit_path,
+        late_path,
+        tmp_path / "sensitivity",
+        fit_kwargs={
+            "use_entity_reference": False,
+            "isolation_max_samples": 32,
+        },
+        cadence_seconds=900,
+        dispersion_window_seconds=3600,
+        cusum_allowance=0.5,
+        rows_per_entity_day=(4, 8, None),
+        random_seeds=(17, 42),
+        maximum_training_rows=200,
+        maximum_scoring_rows=500,
+        isolation_trees=5,
+        minimum_block_rows=1,
+        persistence_observations=1,
+        recovery_observations=1,
+    )
+
+    assert len(result) == 6
+    assert result["selected_row_hash"].nunique() > 1
+    assert result["score_rank_spearman_vs_baseline"].notna().all()
+    assert result["incidents_per_entity_day"].notna().all()
+    assert summary["labels_or_holdout_read"] is False
+    assert summary["pairwise_rank_comparisons"] == 21
+    assert (tmp_path / "sensitivity" / "sampling_rank_stability.parquet").is_file()
 
 
 def topology_fixture(entities):
@@ -176,7 +231,7 @@ def test_partition_scoring_uses_the_frozen_cusum_policy(tmp_path, monkeypatch):
                 settings["residual_destination"], index=False
             )
 
-    monkeypatch.setattr(detector_helpers, "score_residual_file", fake_residual_score)
+    monkeypatch.setattr(scoring_orchestration, "score_residual_file", fake_residual_score)
     score_partition_file(
         {}, feature_path, destination, tmp_path / "work",
         cadence_seconds=900,
@@ -207,9 +262,9 @@ def test_partition_scoring_removes_topology_intermediates(tmp_path, monkeypatch)
     def fake_merge(self_scores, topology_scores, target):
         pd.DataFrame({"combined": [4.0]}).to_parquet(target, index=False)
 
-    monkeypatch.setattr(detector_helpers, "score_residual_file", fake_residual_score)
-    monkeypatch.setattr(detector_helpers, "score_topology_file", fake_topology_score)
-    monkeypatch.setattr(detector_helpers, "merge_score_files", fake_merge)
+    monkeypatch.setattr(scoring_orchestration, "score_residual_file", fake_residual_score)
+    monkeypatch.setattr(scoring_orchestration, "score_topology_file", fake_topology_score)
+    monkeypatch.setattr(scoring_orchestration, "merge_score_files", fake_merge)
 
     score_partition_file(
         {"feature_columns": ["signal__level"]},

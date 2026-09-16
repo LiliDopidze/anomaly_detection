@@ -6,6 +6,19 @@ calibration_sample:
   maximum_rows_per_entity_day: 8
   # At most one row per time-of-day bin, selected deterministically.
 
+# Run through the optional 06A diagnostic when sampling policy changes. It
+# never reads fault labels or holdout data. "all" removes the entity-day cap,
+# while the global row guard remains explicit in the report.
+sampling_sensitivity:
+  rows_per_entity_day: [4, 8, 16, all]
+  random_seeds: [17, 42, 73]
+  baseline_rows_per_entity_day: 8
+  baseline_seed: 42
+  maximum_training_rows: 50000
+  maximum_scoring_rows: 100000
+  n_estimators: 100
+  threshold_quantile: 0.995
+
 robust_reference:
   minimum_entity_rows: 30
   minimum_entity_days: 2

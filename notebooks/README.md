@@ -16,6 +16,7 @@ into several notebooks.
 | `03_SPLITS_AND_TRUTH_LOCK` | Pack plus split definitions | Physical calibration, development and locked-holdout truth directories | Yes, evaluator setup only |
 | `04_CALIBRATION_EDA` | Early-calibration `SPEC-CORE` | Time-series plots, robust profiles, reference exclusions and frozen EDA decisions | No |
 | `05_FEATURE_ENGINEERING` | Calibration/development `SPEC-CORE` plus EDA decisions | Reusable causal fit, late-calibration, and development features | No |
+| `06A_CALIBRATION_SAMPLING_SENSITIVITY` | Calibration features only | Optional 4/8/16/all-per-day × seed stability report for score ranks and incident workload | No |
 | `06_PRIMARY_UNSUPERVISED_MODEL` | Calibration/development features and topology | Direction-aware models, separate threshold/workload score slices, and a frozen scoring policy | No |
 | `07_CHALLENGER_MODELS` | Independent late-calibration workload plus development truth | Label-free operating points, detection selection and separate localisation qualification | Development only |
 | `08_ALERTS_INCIDENTS_AND_DYING_GASP` | Frozen selection, scores and observable operational events | Persistent alerts and consolidated incidents | No |
@@ -63,7 +64,7 @@ stage run ID—for example:
 ```bash
 export TELCO_DATASET=synthetic_pon
 export TELCO_FEATURE_RUN_ID=synthetic_pon_features_v5
-export TELCO_MODEL_RUN_ID=synthetic_pon_models_v10
+export TELCO_MODEL_RUN_ID=synthetic_pon_models_v11
 ```
 
 Keep downstream run IDs aligned with the inputs printed at the top of each
@@ -74,7 +75,7 @@ The v5 feature run must be built from the current calibration EDA decisions
 and `configs/features.yml` before running Notebook 06. Notebook 05 and 06 now
 reject any mismatch in their recorded input hashes. The former v4/v8 outputs
 remain historical diagnostics; they are not a clean baseline for the current
-policy. Notebook 07 writes a fresh v12 selection, and holdout stays sealed
+policy. Notebook 07 writes a fresh v13 selection, and holdout stays sealed
 unless every frozen qualification rule passes.
 
 For the current synthetic PON data, reuse Notebooks 00–05 when their lineage
