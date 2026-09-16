@@ -4,9 +4,12 @@ version: 1
 # these choices therefore requires a new model run, not a costly feature run.
 calibration_sample:
   maximum_rows_per_entity_day: 8
+  # At most one row per time-of-day bin, selected deterministically.
 
 robust_reference:
   minimum_entity_rows: 30
+  minimum_entity_days: 2
+  shrinkage_days: 7
   minimum_timestamp_coverage: 0.80
   minimum_valid_rate: 0.80
   maximum_clipped_rate: 0.20

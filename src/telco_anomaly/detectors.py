@@ -8,6 +8,7 @@ application.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import shutil
@@ -39,7 +40,7 @@ from .features import (
 )
 
 
-MODEL_CORE_VERSION = "4.5.0"
+MODEL_CORE_VERSION = "4.6.0"
 MODEL_IDS = (
     "rapid_residual",
     "multimetric_residual",
@@ -1566,7 +1567,7 @@ def _reference_sample(
     random_seed,
     maximum_rows_per_entity_day=8,
 ):
-    """Sample calibration across entity-days, then apply the global cap.
+    """Spread fit rows across each entity-day, then apply the global cap.
 
     Adjacent telemetry rows are strongly correlated. Taking a small,
     deterministic sample from every entity-day gives the multivariate models
@@ -1576,36 +1577,49 @@ def _reference_sample(
     rows_per_block = int(maximum_rows_per_entity_day)
     if rows_per_block < 1:
         raise ValueError("maximum_rows_per_entity_day must be positive")
+    if int(maximum_rows) < 1:
+        raise ValueError("maximum_rows must be positive")
     source = _sql_literal(str(Path(path)))
     with _model_duckdb() as connection:
         return connection.execute(f"""
-            WITH ranked AS (
-                SELECT *, row_number() OVER (
-                    PARTITION BY CAST(entity_id AS VARCHAR),
-                                 CAST(event_ts AT TIME ZONE 'UTC' AS DATE)
-                    ORDER BY hash(
-                        CAST(entity_id AS VARCHAR), event_ts, {int(random_seed)}
-                    )
-                ) AS sample_rank
+            WITH candidates AS (
+                SELECT *,
+                    CAST(event_ts AT TIME ZONE 'UTC' AS DATE) AS sample_day,
+                    floor((extract(hour FROM event_ts AT TIME ZONE 'UTC') * 60
+                        + extract(minute FROM event_ts AT TIME ZONE 'UTC'))
+                        / (1440.0 / {rows_per_block})) AS time_bin,
+                    hash(CAST(entity_id AS VARCHAR),
+                         CAST(episode_id AS VARCHAR), event_ts,
+                         {int(random_seed)}) AS sample_hash
                 FROM read_parquet({source})
             ), balanced AS (
-                SELECT * EXCLUDE (sample_rank)
-                FROM ranked
-                WHERE sample_rank <= {rows_per_block}
+                SELECT * EXCLUDE (sample_day, time_bin, sample_hash)
+                FROM candidates
+                QUALIFY row_number() OVER (
+                    PARTITION BY entity_id, sample_day, time_bin
+                    ORDER BY sample_hash, event_ts, episode_id
+                ) = 1
             )
             SELECT * FROM balanced
-            USING SAMPLE reservoir({int(maximum_rows)} ROWS)
-            REPEATABLE ({int(random_seed)})
+            ORDER BY hash(CAST(entity_id AS VARCHAR),
+                          CAST(episode_id AS VARCHAR), event_ts,
+                          {int(random_seed)}), entity_id, episode_id, event_ts
+            LIMIT {int(maximum_rows)}
         """).df()
 
 
-def _full_entity_reference(path, features, scale_floors, minimum_rows=30):
+def _full_entity_reference(
+    path, features, scale_floors, minimum_rows=30, minimum_days=2,
+):
     """Robust entity references from the full calibration-fit slice.
 
     The training-row cap is for pooled PCA and Isolation Forest only. Entity
     baselines are small group summaries, so DuckDB can calculate them over the
     complete early-calibration file without materialising all rows in Python.
     """
+
+    if int(minimum_rows) < 1 or float(minimum_days) < 0:
+        raise ValueError("Entity reference row and duration limits are invalid")
 
     expressions = []
     for feature in features:
@@ -1615,6 +1629,10 @@ def _full_entity_reference(path, features, scale_floors, minimum_rows=30):
             f"approx_quantile({column}, 0.50) AS {_sql_identifier(feature + '__centre')}",
             f"approx_quantile({column}, 0.25) AS {_sql_identifier(feature + '__q25')}",
             f"approx_quantile({column}, 0.75) AS {_sql_identifier(feature + '__q75')}",
+            f"min(event_ts) FILTER (WHERE {column} IS NOT NULL) "
+            f"AS {_sql_identifier(feature + '__first_ts')}",
+            f"max(event_ts) FILTER (WHERE {column} IS NOT NULL) "
+            f"AS {_sql_identifier(feature + '__last_ts')}",
         ])
     source = _sql_literal(str(Path(path)))
     with _model_duckdb() as connection:
@@ -1639,14 +1657,21 @@ def _full_entity_reference(path, features, scale_floors, minimum_rows=30):
         {name: summary[f"{name}__q75"] for name in features}
     ).astype(float)
 
-    valid = counts.ge(int(minimum_rows))
+    days = pd.DataFrame({
+        name: (
+            pd.to_datetime(summary[f"{name}__last_ts"], utc=True)
+            - pd.to_datetime(summary[f"{name}__first_ts"], utc=True)
+        ).dt.total_seconds() / 86400
+        for name in features
+    }).fillna(0.0)
+    valid = counts.ge(int(minimum_rows)) & days.ge(float(minimum_days))
     centre = centre.where(valid)
     scale = (q75 - q25) / 1.349
     floors = centre.abs() * 1e-6
     for name in features:
         floors[name] = floors[name].clip(lower=float(scale_floors[name]))
     scale = scale.where(valid).where(scale.gt(floors), floors.where(valid))
-    return centre, scale, counts
+    return centre, scale, counts, days
 
 
 def _reference_components(bundle, frame):
@@ -1918,11 +1943,16 @@ def fit_residual_bundle(
     isolation_max_features=1.0,
     maximum_isolation_features_per_metric=5,
     entity_reference_minimum_rows=30,
+    entity_reference_minimum_days=2,
+    entity_reference_shrinkage_days=7,
     isolation_entity_minimum_rows=30,
     isolation_entity_scale_floor_fraction=0.25,
     fit_multivariate=False,
 ):
     """Fit frozen robust references and optional residual ML models."""
+
+    if float(entity_reference_shrinkage_days) <= 0:
+        raise ValueError("entity_reference_shrinkage_days must be positive")
 
     sample = _reference_sample(
         calibration_features,
@@ -1931,6 +1961,12 @@ def fit_residual_bundle(
         maximum_rows_per_entity_day=maximum_rows_per_entity_day,
     )
     sample["entity_id"] = sample["entity_id"].astype(str)
+    sample_keys = sample[["entity_id", "episode_id", "event_ts"]].sort_values(
+        ["entity_id", "episode_id", "event_ts"]
+    )
+    selected_row_hash = hashlib.sha256(
+        pd.util.hash_pandas_object(sample_keys, index=False).to_numpy().tobytes()
+    ).hexdigest()
     candidates = [
         column for column in sample
         if column not in IDENTITY_COLUMNS and not column.endswith("__clipped")
@@ -2020,15 +2056,29 @@ def fit_residual_bundle(
     global_scale = global_scale.combine_first(fallback_scale)
     entity_centre = entity_scale = None
     entity_reference_counts = None
+    entity_reference_days = None
     if use_entity_reference:
-        entity_centre, entity_scale, entity_reference_counts = (
+        entity_centre, entity_scale, entity_reference_counts, entity_reference_days = (
             _full_entity_reference(
                 calibration_features,
                 usable,
                 scale_floors,
                 minimum_rows=entity_reference_minimum_rows,
+                minimum_days=entity_reference_minimum_days,
             )
         )
+
+        # A short local history should influence the pooled reference, not
+        # replace it abruptly. Count and elapsed span both control the weight.
+        row_weight = entity_reference_counts / (
+            entity_reference_counts + float(entity_reference_minimum_rows)
+        )
+        day_weight = entity_reference_days / (
+            entity_reference_days + float(entity_reference_shrinkage_days)
+        )
+        weight = (row_weight * day_weight).where(entity_centre.notna())
+        entity_centre = global_centre + weight * (entity_centre - global_centre)
+        entity_scale = global_scale + weight * (entity_scale - global_scale)
 
         # EDA may flag an entity-metric calibration baseline as atypical or
         # unstable. Keep the entity monitored, but use the pooled reference
@@ -2050,10 +2100,12 @@ def fit_residual_bundle(
         "entity_centre": entity_centre,
         "entity_scale": entity_scale,
         "entity_reference_counts": entity_reference_counts,
+        "entity_reference_days": entity_reference_days,
         "use_entity_reference": bool(use_entity_reference),
         "reference_exclusions": exclusions.to_dict("records"),
         "training_rows": len(sample),
-        "training_sample_strategy": "bounded_entity_day_then_global_reservoir",
+        "training_sample_strategy": "time_stratified_entity_day_then_hash_cap",
+        "selected_row_hash": selected_row_hash,
         "maximum_rows_per_entity_day": int(maximum_rows_per_entity_day),
         "random_seed": int(random_seed),
         "isolation_trees": int(isolation_trees),
@@ -2064,6 +2116,12 @@ def fit_residual_bundle(
         ),
         "entity_reference_minimum_rows": int(
             entity_reference_minimum_rows
+        ),
+        "entity_reference_minimum_days": float(
+            entity_reference_minimum_days
+        ),
+        "entity_reference_shrinkage_days": float(
+            entity_reference_shrinkage_days
         ),
         "isolation_entity_minimum_rows": int(
             isolation_entity_minimum_rows

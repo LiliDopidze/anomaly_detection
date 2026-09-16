@@ -38,6 +38,53 @@ from telco_anomaly.evaluation import ALERT_COLUMNS, form_cases
 BASE = pd.Timestamp("2025-01-01", tz="UTC")
 
 
+def test_fit_sample_spreads_across_day_and_is_reproducible(tmp_path):
+    path = tmp_path / "calibration.parquet"
+    rows = pd.DataFrame({
+        "event_ts": [BASE + pd.Timedelta(minutes=15 * step) for step in range(96)],
+        "entity_id": "ont-1",
+        "episode_id": "ont-1::episode-1",
+        "signal__level": np.arange(96, dtype=float),
+    })
+    rows.to_parquet(path, index=False)
+
+    first = detector_helpers._reference_sample(path, 100, 42, 8)
+    second = detector_helpers._reference_sample(path, 100, 42, 8)
+    bins = (first["event_ts"].dt.hour // 3).tolist()
+
+    assert len(first) == 8
+    assert sorted(bins) == list(range(8))
+    pd.testing.assert_frame_equal(first, second)
+
+
+def test_short_entity_history_falls_back_and_long_history_is_shrunk(tmp_path):
+    path = tmp_path / "calibration.parquet"
+    short = pd.DataFrame({
+        "event_ts": [BASE + pd.Timedelta(minutes=15 * step) for step in range(40)],
+        "entity_id": "short",
+        "episode_id": "short::episode-1",
+        "signal__level": 10.0 + np.arange(40) / 100,
+    })
+    long = pd.DataFrame({
+        "event_ts": [BASE + pd.Timedelta(days=step // 4, hours=step % 4)
+                     for step in range(40)],
+        "entity_id": "long",
+        "episode_id": "long::episode-1",
+        "signal__level": 20.0 + np.arange(40) / 100,
+    })
+    pd.concat([short, long], ignore_index=True).to_parquet(path, index=False)
+
+    bundle = fit_residual_bundle(
+        path, use_entity_reference=True, maximum_training_rows=100,
+        fit_multivariate=False,
+    )
+    pooled = bundle["global_centre"]["signal__level"]
+    assert pd.isna(bundle["entity_centre"].loc["short", "signal__level"])
+    assert bundle["entity_reference_days"].loc["short", "signal__level"] < 2
+    assert pooled < bundle["entity_centre"].loc["long", "signal__level"] < 20.4
+    assert len(bundle["selected_row_hash"]) == 64
+
+
 def topology_fixture(entities):
     rows = []
     for number, entity in enumerate(entities):
