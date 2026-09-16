@@ -2,10 +2,7 @@
 
 This repository builds a Telecom telemetry detector for anomaly
 detection, incident consolidation, and topology-aware localisation. The
-primary product path is PON/ONT. Company independence means that operators map
-their native fields into shared semantic metrics and calibrate locally; it
-does **not** mean fitting one model across incompatible PON, RAN, and backbone
-optical measurements.
+primary product path is PON/ONT. 
 
 ## Evidence strategy
 
@@ -148,5 +145,4 @@ For exact run instructions and the purpose of every notebook, see
 - Synthetic results do not establish real-fleet effectiveness. Operator data
   is required before production claims.
 
-See [the methodology](docs/COMPANY_AGNOSTIC_TELCO_METHODOLOGY.md) for the
-statistical design and the evidence each dataset is allowed to support.
+
