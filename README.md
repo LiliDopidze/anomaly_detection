@@ -4,7 +4,7 @@ This repository builds a Telecom telemetry detector for anomaly
 detection, incident consolidation, and topology-aware localisation. The
 primary product path is PON/ONT. 
 
-## Evidence strategy
+## Data
 
 | Dataset | Role | Claim it can support |
 |---|---|---|
