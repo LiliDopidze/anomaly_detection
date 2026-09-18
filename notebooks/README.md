@@ -1,152 +1,119 @@
-# Notebook run guide
+# Run the pipeline
 
-Use the `Python (telco-anomaly)` kernel and run the notebooks in numerical
-order. Restart the kernel before each notebook and choose **Run All**. The
-notebooks contain orchestration, visible checks, tables, and plots; tested
-calculations live in `src/telco_anomaly` so the same calculation is not copied
-into several notebooks.
+Open notebooks from this repository. Restart the kernel before each notebook
+and choose **Run All**. Calculations live in `src/telco_anomaly`; notebooks
+configure stages and display their results.
 
-## Primary PON workflow
+## Main workflow
 
-| Notebook | Reads | Produces | Opens labels? |
-|---|---|---|---|
-| `00_PROJECT_CONTRACT` | YAML configuration | Printed, versioned product contract | No |
-| `01_DATA_QUALITY_AUDIT` | Native synthetic PON files | Source audit tables | No |
-| `02_CANONICAL_DATA_MODEL` | Native telemetry, topology, service windows and separately staged truth | A vendor-neutral pack and truth-unmounted `SPEC-CORE` | Stages them, but the canonical detector run does not mount them |
-| `03_SPLITS_AND_TRUTH_LOCK` | Pack plus split definitions | Physical calibration, development and locked-holdout truth directories | Yes, evaluator setup only |
-| `04_CALIBRATION_EDA` | Early-calibration `SPEC-CORE` | Time-series plots, robust profiles, reference exclusions and frozen EDA decisions | No |
-| `05_FEATURE_ENGINEERING` | Calibration/development `SPEC-CORE` plus EDA decisions | Reusable causal fit, late-calibration, and development features | No |
-| `06A_CALIBRATION_SAMPLING_SENSITIVITY` | Calibration features only | Optional 4/8/16/all-per-day × seed stability report for score ranks and incident workload | No |
-| `06_PRIMARY_UNSUPERVISED_MODEL` | Calibration/development features and topology | Direction-aware models, separate threshold/workload score slices, and a frozen scoring policy | No |
-| `07_CHALLENGER_MODELS` | Independent late-calibration workload plus development truth | Label-free operating points, detection selection and separate localisation qualification | Development only |
-| `08_ALERTS_INCIDENTS_AND_DYING_GASP` | Frozen selection, scores and observable operational events | Persistent alerts and consolidated incidents | No |
-| `09_TOPOLOGY_LOCALISATION` | Incidents and observable topology | Ranked location candidates with ambiguity | No |
-| `10_LOCKED_EVALUATION` | Frozen model plus requested truth partition | Detection, workload and localisation metrics with uncertainty | Yes, after freeze |
-| `10A_DEVELOPMENT_DIAGNOSTICS` | Frozen development results, scores, truth and optional raw/features | Replay-verified fault/incident dossier, score evidence, latency curve and trace exports | Development only; never holdout |
-| `11_PUBLIC_DATASET_VALIDATION` | Optional public Telecom sources | Reviewed adapter drafts and separate qualification packs | Only for the controlled failure benchmark |
-| `12_INFERENCE_DEMO_AND_MODEL_CARD` | Frozen incidents, localisation and available results | Interactive chronological replay and model card | No |
+| Order | Notebook | Purpose |
+|---|---|---|
+| 00 | `00_PROJECT_CONTRACT.ipynb` | Review dataset and evaluation policy |
+| 01 | `01_DATA_QUALITY_AUDIT.ipynb` | Audit the source data |
+| 02 | `02_CANONICAL_DATA_MODEL.ipynb` | Build canonical telemetry and topology |
+| 03 | `03_SPLITS_AND_TRUTH_LOCK.ipynb` | Freeze chronological splits and truth |
+| 04 | `04_CALIBRATION_EDA.ipynb` | Review calibration data and references |
+| 05 | `05_FEATURE_ENGINEERING.ipynb` | Build causal features |
+| 06 | `06_PRIMARY_UNSUPERVISED_MODEL.ipynb` | Fit detectors and calibration thresholds |
+| 07 | `07_CHALLENGER_MODELS.ipynb` | Compare eligible candidates on development |
+| 08 | `08_ALERTS_INCIDENTS_AND_DYING_GASP.ipynb` | Produce alerts and incidents |
+| 09 | `09_TOPOLOGY_LOCALISATION.ipynb` | Estimate affected topology scopes |
+| 10 | `10_LOCKED_EVALUATION.ipynb` | Evaluate development; holdout is sealed by default |
+| 10A | `10A_DEVELOPMENT_DIAGNOSTICS.ipynb` | Investigate misses, latency and nuisance incidents |
 
-Notebook 07 deliberately fails closed. Workload uses portfolio-scoreable time
-and reports calendar time beside it. A calibration-verification slice first
-removes operating points that miss the workload budget; development labels may
-then select among the surviving points. Active-fault detection recall must clear
-the 20% research floor with the lower endpoint of its two-sided 95% Wilson
-interval. Early warning is reported separately: it requires detection after
-observable evidence but before impact, plus prompt detection within the frozen
-48-hour horizon. Localisation is also separate. A detection configuration may
-therefore be selected for incident research while early warning or localisation
-remains explicitly unqualified. Holdout stays sealed until the early-warning
-qualification passes. If no detection candidate satisfies the gates, Notebook
-07 writes `best_diagnostic_configuration.json` but no selected configuration.
-Notebook 12 also refuses that diagnostic fallback unless
-`ALLOW_DIAGNOSTIC_DEMO=1` is explicitly set; the resulting model card remains
-marked non-deployable.
+Optional notebooks are not required for each run:
 
-## Data location
+- `06A_CALIBRATION_SAMPLING_SENSITIVITY.ipynb`: compare calibration sampling
+  policies before fitting Notebook 06; never reads fault labels.
+- `11_PUBLIC_DATASET_VALIDATION.ipynb`: acquire and map a separate public source.
+- `12_INFERENCE_DEMO_AND_MODEL_CARD.ipynb`: present a frozen run and its limits.
 
-Set one environment variable before starting Jupyter:
+## Current modelling run
+
+For the September update, reuse stages 00–04 if their lineage checks pass.
+Run **05 → 06 → 07 → 08 → 09 → 10 (development) → 10A**.
+A run already using these defaults does not need restarting for repository
+cleanup: runtime source, configuration and notebook code are unchanged by it.
+
+| Stage | Default run ID |
+|---|---|
+| Core | `synthetic_pon_core_v2` |
+| Truth | `synthetic_pon_truth_v3` |
+| Features | `synthetic_pon_features_v6` |
+| Model | `synthetic_pon_models_v12` |
+| Selection | `synthetic_pon_selection_v14` |
+| Incidents | `synthetic_pon_incidents_v14` |
+| Localisation | `synthetic_pon_localisation_v14` |
+| Development evaluation | `synthetic_pon_development_v14` |
+
+Clear old `TELCO_*_RUN_ID` and `PON_*_RUN_ID` environment overrides or explicitly
+set them to the intended IDs. The paths printed by each notebook are the
+resolved inputs. Completed outputs are never overwritten; use fresh run IDs
+for subsequent experiments. A lineage mismatch means the inputs need fixing,
+not bypassing the check.
+
+The current model retains historical baselines across gaps of at most six
+hours, subject to observed coverage. Exact lags, differences, counter totals
+and alert persistence remain strict. Isolation Forest uses frozen calibration
+medians and missing-input indicators, requiring at least half its selected
+measurements. Old fitted bundles require the earlier code revision.
+
+Selection ranks eligible candidates by 48-hour recall. Workload, coverage and
+recall-confidence gates remain mandatory. Shared-network portfolios are
+candidates, not presumed improvements. If no candidate passes, Notebook 07
+writes diagnostics without a selected configuration. Do not relax gates or
+open holdout to rescue a development experiment. Early warning and
+localisation require their own evidence; detection qualification alone does
+not establish either.
+
+## Development diagnostics
+
+Notebook 10A has two modes:
+
+- `FULL_MODE=True`: verify frozen lineage and replay alerts/evaluation, then
+  inspect per-fault scores, availability, incident matches and candidate results.
+- `FULL_MODE=False`: summarise an extracted results directory without model data.
+
+`DEEP_DATA=True` also scans raw quality, collection gaps and feature shift.
+Use `TRACE_FAULT` for one fault, or set it to `None` and use `TRACE_CASE` for
+one incident. `TRACE_LIMIT` bounds exports; check the trace manifest for
+truncation. Outputs include `report.md`, CSV/Parquet tables and input hashes.
+
+The same diagnostic is available from the repository root:
 
 ```bash
-export TELCO_DATA_ROOT="$HOME/telco_anomaly_data"
-jupyter lab
+PYTHONPATH=src python -m telco_anomaly.diagnostics --help
 ```
 
-In Colab, the default is
-`/content/drive/MyDrive/telco_anomaly_data`; the existing
-`/content/drive/MyDrive/anomaly_detection` location is also recognised. To use
-a different repository checkout, set `TELCO_PROJECT_ROOT` explicitly.
+These outputs identify pipeline evidence, not physical causes. Missing history
+and an observed neutral measurement are different. Unmatched incidents can
+include unlabelled anomalies; duplicates are counted separately. Latency
+statistics among detections exclude misses, so read them beside event recall.
 
-## Re-running a completed stage
+## Runtime and data location
 
-Outputs are immutable. A completed run is validated and reused; it is never
-silently overwritten. After changing data, configuration, or code, set a new
-stage run ID—for example:
+Set `TELCO_DATA_ROOT` for data and final artifacts. In Colab the existing
+`MyDrive/anomaly_detection` folder is recognised automatically. Large stages
+use local scratch space under `/content`; do not use Drive for DuckDB spill.
+Set `TELCO_WORK_ROOT` if a different local scratch directory is needed.
+Notebook 06 expects at least 4 GB of free scratch space. If the runtime fills
+up, restart it and reuse completed immutable feature outputs.
 
-```bash
-export TELCO_DATASET=synthetic_pon
-export TELCO_FEATURE_RUN_ID=synthetic_pon_features_v6
-export TELCO_MODEL_RUN_ID=synthetic_pon_models_v12
-```
+## Optional public-data qualification
 
-Keep downstream run IDs aligned with the inputs printed at the top of each
-notebook. Delete an old output only when you intentionally want to discard it;
-normally, retain both runs so their manifests can be compared.
-
-The v6 feature run must be built from the current calibration EDA decisions
-and `configs/features.yml` before running Notebook 06. Notebook 05 and 06 now
-reject any mismatch in their recorded input hashes. The former v4/v8 outputs
-remain historical diagnostics; they are not a clean baseline for the current
-policy. Notebook 07 writes a fresh v14 selection, and holdout stays sealed
-unless every frozen qualification rule passes.
-
-For the current synthetic PON data, reuse Notebooks 00–04 when their lineage
-checks pass, then rerun 05 onward with the new feature and model run IDs.
-See [the modelling update](../docs/MODELLING_UPDATE.md) for the exact sequence.
-The new soft-confirmed Isolation Forest and one-observation alert
-path are challengers, not presumed improvements. CUSUM remains the slow path.
-Notebook 06 reports which contextual inputs were actually retained; rows with
-too little contextual evidence now receive no contextual IF score. Case
-consolidation keeps the one-hour policy, does not join known dissimilar same-ONT
-symptoms, and cannot credit later entities or topology evidence at an earlier
-case opening.
-
-Notebook 05 deliberately processes the full calibration and development
-partitions. In Colab it uses `/content` for large temporary wide tables and
-copies only final feature files to Drive. It prints progress after each major
-step and every 25 entity episodes. Set `TELCO_WORK_ROOT` only when a different
-local scratch disk is required; do not point it at Google Drive.
-Notebook 04 profiles every early-calibration entity-metric series, while only
-the detailed plots use a deterministic small entity sample. Notebook 05 reuses
-the exact EDA timestamp cutoff for its fit/late-calibration split; it does not
-estimate a second boundary from a separately materialised table.
-
-Notebook 06 reuses the immutable v4 feature run. It needs at least 4 GB of
-local scratch space by default, keeps DuckDB spill files under that scratch
-directory, and uses a conservative 1 GB / one-thread DuckDB default for Colab.
-Topology calculation and final joins run as separate bounded stages, and their
-intermediate files are deleted immediately after use. If a previous Colab
-attempt filled `/content`, restart the runtime before rerunning Notebook 06;
-Notebook 05 does not need to be rerun.
-
-The v8 model run fits Isolation Forest on adverse-direction residuals with a
-bounded number of features per metric and an entity-day-balanced calibration
-sample. It adds a frozen entity-calibrated Isolation Forest score and coherent
-two-metric tail evidence; labels do not construct either score. It uses the
-first half of late calibration to estimate thresholds and
-the second half to verify workload. Notebook 07 applies the exact Poisson upper
-workload bound to that independent verification slice before development truth
-is consulted. It also refuses an empirical threshold with fewer than five
-expected calibration blocks in its upper tail.
-
-Selection revision v10 uses the v8 score files. Notebook 07 audits every
-threshold on label-free workload data and
-evaluates only the calibration-admissible operating points on development.
-This corrects the earlier premature quantile freeze while preserving a separate
-strictly label-free fallback. It also separates active-fault detection,
-pre-impact early warning, and 48-hour prompt detection. Run Notebook 07 from a
-fresh kernel. If detection passes, run 08 and 09 for incident and localisation
-research. Run development evaluation in 10 as needed; do not open locked
-holdout until Notebook 07 reports `holdout_ready: true`.
-
-## Public Telecom qualification
-
-Notebook 11 can acquire one selected public source directly from its publisher
-and cache the extracted files outside Git:
+In Notebook 11, choose one source and enable acquisition:
 
 ```python
 %env PUBLIC_DATASET=ran_pm
 %env DOWNLOAD_PUBLIC_DATA=1
 ```
 
-Do not combine `PUBLIC_DATASET=all` with downloading: select one source so the
-size and terms are explicit. Microsoft Optical additionally requires
-`ACKNOWLEDGE_MICROSOFT_DATA_TERMS=1`; the optical-failure testbed requires
-`ACKNOWLEDGE_OPTICAL_FAILURE_TERMS=1`.
+Microsoft Optical also requires `ACKNOWLEDGE_MICROSOFT_DATA_TERMS=1`; the
+optical-failure testbed requires `ACKNOWLEDGE_OPTICAL_FAILURE_TERMS=1` after
+reviewing the applicable terms. Acquisition does not grant additional rights.
 
-Notebook 11 then creates a mapping draft and stops. A human must verify native
-timestamp, entity, topology, metric meaning, units, cadence, and source terms,
-then set `mapping_review_status: approved`. After a RAN or Microsoft optical
-pack is ready, run Notebooks 04–06 with `TELCO_DATASET=ran_pm` or
-`TELCO_DATASET=microsoft_optical`. Each dataset receives its own fitted
-reference and thresholds. Do not run the label-based selection notebook on
-these unlabelled sources and do not pool their raw metrics with PON.
+Review the mapping draft's timestamps, entities, units, cadence and topology
+before setting `mapping_review_status: approved`. RAN and Microsoft optical
+packs can then use stages 04–06 with their own `TELCO_DATASET`. Do not run
+label-based selection on unlabelled sources or combine their raw metrics with
+PON telemetry.
