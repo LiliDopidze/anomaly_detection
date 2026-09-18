@@ -58,6 +58,42 @@ def panel(times, **metrics):
 
 
 class TransformTests(unittest.TestCase):
+    def test_history_bridges_short_gap_but_lags_remain_strict(self):
+        metrics = catalogue((
+            "signal", "gauge", 1, "high_bad", "identity", 0.1,
+            None, None, None, None,
+        ))
+        source = panel([0, 1, 2, 3, 5, 6, 30, 31], signal=range(8))
+        kwargs = dict(
+            history_windows_seconds={"6s": 6},
+            lag_windows_seconds={"2s": 2},
+            history_max_gap_seconds=3,
+        )
+        result = add_causal_temporal_features(
+            transform_episode(source, metrics), metrics, **kwargs
+        )
+        history = "signal__level__history_6s_z"
+        self.assertTrue(pd.notna(result.loc[4, history]))
+        self.assertTrue(pd.isna(result.loc[4, "signal__level__lag_2s"]))
+        self.assertTrue(result.loc[6:, history].isna().all())
+        prefix = add_causal_temporal_features(
+            transform_episode(source.iloc[:5], metrics), metrics, **kwargs
+        )
+        pd.testing.assert_frame_equal(result.iloc[:5], prefix)
+
+    def test_history_restarts_after_long_run_of_invalid_values(self):
+        metrics = catalogue((
+            "signal", "gauge", 1, "high_bad", "identity", 0.1,
+            None, None, None, None,
+        ))
+        values = [1., 2., 3., 4., np.nan, np.nan, np.nan, 10.]
+        result = add_causal_temporal_features(
+            transform_episode(panel(range(8), signal=values), metrics),
+            metrics, history_windows_seconds={"6s": 6},
+            history_max_gap_seconds=2,
+        )
+        self.assertTrue(pd.isna(result.iloc[-1]["signal__level__history_6s_z"]))
+
     def test_counter_reset_policy_is_validated(self):
         metrics = catalogue((
             "equipment.uptime", "cumulative_counter", 1, "contextual",

@@ -108,6 +108,20 @@ def _fit_isolation_forest(
         n_jobs=-1,
     ).fit(values)
 
+def _isolation_inputs(values, fill_values):
+    """Use frozen calibration medians and explicit missing-input indicators."""
+
+    values = values.replace([np.inf, -np.inf], np.nan)
+    missing = values.isna().astype(float).add_suffix("__missing_input")
+    filled = values.fillna(fill_values.reindex(values.columns)).fillna(0.0)
+    return pd.concat([filled, missing], axis=1)
+
+
+def _isolation_ready(values):
+    minimum = max(2, math.ceil(len(values.columns) / 2))
+    return np.isfinite(values).sum(axis=1).ge(minimum)
+
+
 def fit_residual_bundle(
     calibration_features,
     *,
@@ -355,16 +369,22 @@ def fit_residual_bundle(
         bundle["isolation_temporal_features"] = isolation_features
         bundle["isolation_feature_audit"] = isolation_audit
         bundle["feature_metric_ids"] = policy["metric_id"].astype(str).to_dict()
-        oriented = _directional_model_frame(residuals, directions).fillna(0)
+        oriented = _directional_model_frame(residuals, directions)
+        fill_values = oriented.median().fillna(0.0)
+        bundle["isolation_fill_values"] = fill_values
+        base_ready = _isolation_ready(oriented[base_features])
+        temporal_ready = _isolation_ready(oriented[isolation_features])
         bundle["isolation_forest_base"] = _fit_isolation_forest(
-            oriented[base_features],
+            _isolation_inputs(oriented[base_features], fill_values).loc[base_ready],
             trees=isolation_trees,
             maximum_samples=isolation_max_samples,
             maximum_features=isolation_max_features,
             random_seed=random_seed,
         )
         bundle["isolation_forest_temporal"] = _fit_isolation_forest(
-            oriented[isolation_features],
+            _isolation_inputs(
+                oriented[isolation_features], fill_values
+            ).loc[temporal_ready],
             trees=isolation_trees,
             maximum_samples=isolation_max_samples,
             maximum_features=isolation_max_features,
@@ -372,7 +392,10 @@ def fit_residual_bundle(
         )
         temporal_scores = -bundle[
             "isolation_forest_temporal"
-        ].decision_function(oriented[isolation_features])
+        ].decision_function(_isolation_inputs(
+            oriented[isolation_features], fill_values
+        ))
+        temporal_scores[~temporal_ready.to_numpy()] = np.nan
         bundle["isolation_temporal_tail_reference"] = np.sort(
             temporal_scores[np.isfinite(temporal_scores)]
         )
@@ -542,18 +565,25 @@ def score_residual_episode(
         temporal_model = bundle.get(
             "isolation_forest_temporal", bundle.get("isolation_forest")
         )
-        directional = _directional_model_frame(residuals, directions).fillna(0)
+        directional = _directional_model_frame(residuals, directions)
+        fill_values = bundle.get("isolation_fill_values")
+        if fill_values is None:
+            raise ValueError(
+                "This model predates missing-input handling; refit Notebook 06."
+            )
         if temporal_model is not None:
             temporal_features = bundle.get(
                 "isolation_temporal_features", bundle["feature_columns"]
             )
             temporal_values = directional[temporal_features]
             isolation_temporal_values = -temporal_model.decision_function(
-                temporal_values
+                _isolation_inputs(temporal_values, fill_values)
             )
+            temporal_ready = _isolation_ready(temporal_values)
+            isolation_temporal_values[~temporal_ready.to_numpy()] = np.nan
             isolation_temporal_leading = np.asarray(
                 temporal_features, dtype=object
-            )[temporal_values.to_numpy().argmax(axis=1)]
+            )[temporal_values.fillna(-np.inf).to_numpy().argmax(axis=1)]
             temporal_evidence = _empirical_vector_evidence(
                 isolation_temporal_values,
                 bundle.get("isolation_temporal_tail_reference", []),
@@ -580,9 +610,13 @@ def score_residual_episode(
         base_features = bundle.get("isolation_base_features", [])
         if base_model is not None and base_features:
             base_values = directional[base_features]
-            isolation_base_values = -base_model.decision_function(base_values)
+            isolation_base_values = -base_model.decision_function(
+                _isolation_inputs(base_values, fill_values)
+            )
+            base_ready = _isolation_ready(base_values)
+            isolation_base_values[~base_ready.to_numpy()] = np.nan
             isolation_base_leading = np.asarray(base_features, dtype=object)[
-                base_values.to_numpy().argmax(axis=1)
+                base_values.fillna(-np.inf).to_numpy().argmax(axis=1)
             ]
 
     output = features[IDENTITY_COLUMNS].copy()

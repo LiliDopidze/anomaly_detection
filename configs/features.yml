@@ -13,6 +13,9 @@ temporal:
     6h: 21600
     24h: 86400
   minimum_window_fraction: 0.50
+  # Preserve causal history across brief collection interruptions. Long gaps
+  # reset history; exact lags, differences and counter totals remain strict.
+  history_max_gap_seconds: 21600
   history_metric_ids:
     - optical.rx_power
     - optical.olt_rx_power

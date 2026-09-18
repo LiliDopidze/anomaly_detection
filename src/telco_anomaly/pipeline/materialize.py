@@ -383,6 +383,7 @@ def measurement_features(
     lag_metric_ids=None,
     activity_metric_ids=None,
     minimum_window_fraction=0.50,
+    history_max_gap_seconds=None,
 ):
     """Apply metric transforms and optional causal temporal features."""
 
@@ -408,6 +409,7 @@ def measurement_features(
             activity_metric_ids=activity_metric_ids,
             minimum_window_fraction=float(minimum_window_fraction),
             gap_tolerance=float(gap_tolerance),
+            history_max_gap_seconds=history_max_gap_seconds,
         )
     if history_window_seconds is None:
         return output
@@ -485,6 +487,7 @@ def materialize_measurement_features(
     lag_metric_ids=None,
     activity_metric_ids=None,
     minimum_window_fraction=0.50,
+    history_max_gap_seconds=None,
     score_start=None,
     score_end=None,
     progress_every=25,
@@ -522,6 +525,7 @@ def materialize_measurement_features(
                 lag_metric_ids=lag_metric_ids,
                 activity_metric_ids=activity_metric_ids,
                 minimum_window_fraction=minimum_window_fraction,
+                history_max_gap_seconds=history_max_gap_seconds,
             )
             times = pd.to_datetime(features["event_ts"], utc=True)
             if score_start is not None:

@@ -465,13 +465,16 @@ def add_causal_temporal_features(
     activity_metric_ids=None,
     minimum_window_fraction=0.50,
     gap_tolerance=1.5,
+    history_max_gap_seconds=None,
 ) -> pd.DataFrame:
     """Add a small, causal multi-timescale representation of each metric.
 
     Continuous transformed levels receive robust trailing deviations and
     exact-lag changes. Zero/error indicators receive trailing occurrence
     rates. Counter resets and high-bad counter increments receive trailing
-    totals. Every calculation restarts after a collection gap.
+    totals. Differences and totals restart after collection gaps. Historical
+    baselines and occurrence rates may bridge short gaps when explicitly
+    configured; they still require observed coverage and never impute time.
     """
 
     history_windows = _validated_windows(
@@ -485,6 +488,11 @@ def add_causal_temporal_features(
         raise ValueError("minimum_window_fraction must be in (0, 1]")
     if float(gap_tolerance) < 1:
         raise ValueError("gap_tolerance must be at least 1")
+    if history_max_gap_seconds is not None and (
+        not np.isfinite(history_max_gap_seconds)
+        or history_max_gap_seconds <= 0
+    ):
+        raise ValueError("history_max_gap_seconds must be finite and positive")
 
     output = features.copy()
     timestamps = pd.Series(
@@ -541,6 +549,13 @@ def add_causal_temporal_features(
         gap = timestamps.diff().dt.total_seconds().gt(cadence * gap_tolerance)
         segments = gap.cumsum()
 
+        history_segments = segments
+        if history_max_gap_seconds is not None:
+            values = pd.to_numeric(output[name], errors="coerce")
+            previous_valid = timestamps.where(values.notna()).ffill().shift()
+            elapsed = (timestamps - previous_valid).dt.total_seconds()
+            history_segments = elapsed.gt(history_max_gap_seconds).cumsum()
+
         if name in continuous:
             floor = float(policies.at[name, "minimum_scale"])
             selected_history = (
@@ -551,7 +566,8 @@ def add_causal_temporal_features(
                 minimum_rows = max(
                     3, math.ceil(seconds * minimum_window_fraction / cadence)
                 )
-                for _, indices in output.groupby(segments, sort=False).groups.items():
+                groups = output.groupby(history_segments, sort=False).groups
+                for indices in groups.values():
                     values = pd.Series(
                         pd.to_numeric(output.loc[indices, name], errors="coerce")
                         .to_numpy(),
@@ -589,12 +605,14 @@ def add_causal_temporal_features(
 
         if name in activity and metric_id in activity_metric_ids:
             aggregation = "rate" if name.endswith("__nonzero") else "sum"
+            rate_segments = history_segments if aggregation == "rate" else segments
             for label, seconds in activity_windows.items():
                 result = pd.Series(np.nan, index=output.index, dtype=float)
                 minimum_rows = max(
                     2, math.ceil(seconds * minimum_window_fraction / cadence)
                 )
-                for _, indices in output.groupby(segments, sort=False).groups.items():
+                groups = output.groupby(rate_segments, sort=False).groups
+                for indices in groups.values():
                     values = pd.Series(
                         pd.to_numeric(output.loc[indices, name], errors="coerce")
                         .to_numpy(),

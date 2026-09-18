@@ -22,6 +22,7 @@ into several notebooks.
 | `08_ALERTS_INCIDENTS_AND_DYING_GASP` | Frozen selection, scores and observable operational events | Persistent alerts and consolidated incidents | No |
 | `09_TOPOLOGY_LOCALISATION` | Incidents and observable topology | Ranked location candidates with ambiguity | No |
 | `10_LOCKED_EVALUATION` | Frozen model plus requested truth partition | Detection, workload and localisation metrics with uncertainty | Yes, after freeze |
+| `10A_DEVELOPMENT_DIAGNOSTICS` | Frozen development results, scores, truth and optional raw/features | Replay-verified fault/incident dossier, score evidence, latency curve and trace exports | Development only; never holdout |
 | `11_PUBLIC_DATASET_VALIDATION` | Optional public Telecom sources | Reviewed adapter drafts and separate qualification packs | Only for the controlled failure benchmark |
 | `12_INFERENCE_DEMO_AND_MODEL_CARD` | Frozen incidents, localisation and available results | Interactive chronological replay and model card | No |
 
@@ -63,23 +64,24 @@ stage run ID—for example:
 
 ```bash
 export TELCO_DATASET=synthetic_pon
-export TELCO_FEATURE_RUN_ID=synthetic_pon_features_v5
-export TELCO_MODEL_RUN_ID=synthetic_pon_models_v11
+export TELCO_FEATURE_RUN_ID=synthetic_pon_features_v6
+export TELCO_MODEL_RUN_ID=synthetic_pon_models_v12
 ```
 
 Keep downstream run IDs aligned with the inputs printed at the top of each
 notebook. Delete an old output only when you intentionally want to discard it;
 normally, retain both runs so their manifests can be compared.
 
-The v5 feature run must be built from the current calibration EDA decisions
+The v6 feature run must be built from the current calibration EDA decisions
 and `configs/features.yml` before running Notebook 06. Notebook 05 and 06 now
 reject any mismatch in their recorded input hashes. The former v4/v8 outputs
 remain historical diagnostics; they are not a clean baseline for the current
-policy. Notebook 07 writes a fresh v13 selection, and holdout stays sealed
+policy. Notebook 07 writes a fresh v14 selection, and holdout stays sealed
 unless every frozen qualification rule passes.
 
-For the current synthetic PON data, reuse Notebooks 00–05 when their lineage
-checks pass, then rerun 06 and 07 with the new model and selection run IDs.
+For the current synthetic PON data, reuse Notebooks 00–04 when their lineage
+checks pass, then rerun 05 onward with the new feature and model run IDs.
+See [the modelling update](../docs/MODELLING_UPDATE.md) for the exact sequence.
 The new soft-confirmed Isolation Forest and one-observation alert
 path are challengers, not presumed improvements. CUSUM remains the slow path.
 Notebook 06 reports which contextual inputs were actually retained; rows with

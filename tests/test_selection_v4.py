@@ -17,7 +17,7 @@ def _comparison():
     ])
 
 
-def _select(frame, faults=50):
+def _select(frame, faults=50, ranking_metric="event_recall"):
     return select_development_candidate(
         frame,
         development_faults=faults,
@@ -27,6 +27,7 @@ def _select(frame, faults=50):
         minimum_recall_ci_low=0.20,
         maximum_missing_score_fraction=0.20,
         portfolio_preference=["rapid_only", "full_topology"],
+        ranking_metric=ranking_metric,
     )
 
 
@@ -34,6 +35,18 @@ def test_prefers_simpler_statistically_equivalent_candidate():
     selected, decision = _select(_comparison())
     assert selected["candidate_key"] == "simple"
     assert decision["status"] == "selected_within_all_gates"
+
+
+def test_prompt_objective_prefers_timely_detection_without_relaxing_budget():
+    frame = _comparison()
+    frame["prompt_event_recall"] = [0.10, 0.25]
+    selected, decision = _select(frame, ranking_metric="prompt_event_recall")
+    assert selected.candidate_key == "rich"
+    assert decision["ranking_metric"] == "prompt_event_recall"
+    frame.loc[1, "false_incidents_per_entity_day_ci_high"] = 0.02
+    selected, _ = _select(frame, ranking_metric="prompt_event_recall")
+    assert selected.candidate_key == "simple"
+
 
 
 def test_fails_closed_when_budget_is_missed():

@@ -865,11 +865,20 @@ windows are 24 hours and 7 days for a reviewed metric subset. The active path
 uses the declared minimum scale; it does **not** currently apply an additional
 fraction of long-window variability as a floor.
 
+The current history policy permits gaps of at most six hours between valid
+observations without discarding earlier history. Longer gaps restart the
+baseline. No missing measurements are filled, and the observed-support rule
+still applies. Exact lags and differences retain strict gap boundaries.
+
 ### 20.3 Activity summaries
 
 For a trailing window, zero-inflated error occurrence is summarized by a mean,
 while non-negative counter/error increments are summarized by a sum. Current
 durations are 6 hours and 24 hours.
+
+Occurrence rates use the same bounded gap tolerance as historical baselines.
+Counter totals retain strict gap boundaries because missing increments are
+not observed events.
 
 ### 20.4 Seasonal difference
 
@@ -1181,6 +1190,12 @@ Current hyperparameters are:
 - at most five retained inputs per metric;
 - at most eight deterministic rows per entity-day before the global cap;
 - fixed random seed 42.
+
+For base and temporal IF, each retained residual has a missing-input indicator.
+Missing residual values use medians frozen on calibration data. Training and
+scoring require at least half the selected residuals (minimum two) to be
+finite; rows below this threshold receive no IF score. These changes require
+refitting old bundles. Indicator columns do not count as observed telemetry.
 
 Five variants are compared:
 
@@ -1582,7 +1597,8 @@ an operator pilot must replace it with a cost- and criticality-based target.
 At the minimum allowed sample of 30 faults, 11 detections—not six—are needed;
 Notebook 07 prints this power table for the actual denominator on every run.
 
-Among candidates within 0.02 point recall of the best eligible result, a frozen
+The ranking objective is now prompt recall at the frozen 48-hour horizon.
+Among candidates within 0.02 of the best eligible prompt recall, a frozen
 simplicity preference is applied, followed by lower upper-bound workload and
 higher recall. If no candidate passes, Notebook 07 writes diagnostic evidence
 and **no selected detection configuration**.

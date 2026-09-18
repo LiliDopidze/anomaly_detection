@@ -12,7 +12,7 @@ import duckdb
 import pandas as pd
 import pyarrow.parquet as pq
 
-MODEL_CORE_VERSION = "4.6.0"
+MODEL_CORE_VERSION = "4.7.0"
 MODEL_IDS = (
     "rapid_residual", "multimetric_residual", "multimetric_tail_mean",
     "drift_cusum", "peer_deviation", "group_common_mode",

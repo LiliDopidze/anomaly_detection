@@ -28,6 +28,8 @@ robust_reference:
   maximum_clipped_rate: 0.20
 
 isolation_forest:
+  # Inputs use calibration medians plus per-feature missingness indicators.
+  # A row needs at least half its selected measurements (minimum two).
   n_estimators: 300
   max_samples: 2048
   max_features: 0.75

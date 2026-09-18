@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telco-anomaly-detection"
-version = "4.0.0"
+version = "4.1.0"
 description = "Company-neutral Telecom telemetry anomaly detection and topology localisation"
 requires-python = ">=3.10"
 dependencies = [
