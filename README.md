@@ -1,118 +1,74 @@
-# Company-agnostic Telecom anomaly detection
+# Telecom anomaly detection
 
-This repository builds a Telecom telemetry detector for anomaly
-detection, incident consolidation, and topology-aware localisation. The
-primary product path is PON/ONT. 
+Detect abnormal PON/ONT telemetry, consolidate alerts into incidents, and
+estimate the affected network scope. Models are calibrated separately for
+each dataset or operator. Synthetic results validate injected mechanisms;
+they do not establish production performance.
 
-## Data
+## Start here
 
-| Dataset | Role | Claim it can support |
-|---|---|---|
-| Synthetic PON/ONT fixture | Primary engineering and labelled development data | Software, leakage controls, injected-fault detection, and localisation mechanics |
-| Commercial RAN PM counters | Open real-operator qualification | Portability, seasonality, heterogeneity, gaps, peer behaviour, and alert workload |
-| Microsoft optical telemetry | Optional restricted research qualification | Real optical drift and alert stability; not recall |
-| Optical failure testbed | Optional labelled testbed evaluation | Response to controlled physical failures; not production prevalence |
+- **Run the pipeline:** follow the [notebook guide](notebooks/README.md).
+- **Change settings:** edit the YAML files in `configs/` and use new run IDs.
+- **Change calculations:** edit `src/telco_anomaly/`, then run `pytest`.
 
-Raw datasets are never pooled into one fitted model. Each dataset has its own
-adapter and label-free calibration; the detector, evidence calibration,
-incident policy, and evaluation definitions remain shared.
+## Repository layout
 
-## Project layout
+| Folder | Purpose |
+|---|---|
+| `notebooks/` | Ordered workflow, results inspection and optional experiments |
+| `configs/` | Dataset mappings, feature settings, model and alert policies |
+| `src/telco_anomaly/` | Reusable implementation imported by notebooks |
+| `tests/` | Checks for leakage, causality, scoring and evaluation correctness |
 
-```text
-configs/                  Scientific and operational policy
-notebooks/                Numbered, restart-and-run orchestration
-src/telco_anomaly/        Tested reusable calculations
-├── pipeline/             Partition and causal feature materialisation
-├── scoring/              References, detectors, topology and thresholds
-└── detectors.py          Backward-compatible public facade
-tests/                    Contract, leakage, causality, and adapter tests
-data/                     Git-ignored raw and generated data (optional local root)
-```
+Keep calculations in `src`, not copied into notebooks. Keep tests with the
+implementation: a change to time windows or event matching can silently
+change the reported performance.
 
-The notebooks run in order:
-
-```text
-00 contract
-01 source audit
-02 canonical data
-03 splits + truth lock
-04 calibration-only EDA
-05 leakage-safe features
-06A optional calibration-sampling sensitivity
-06 calibration-only statistical and Isolation Forest detectors
-07 independent workload check + development selection
-08 alerts, incidents + observable events
-09 topology localisation
-10 locked evaluation
-10A development diagnostics
-11 public-data qualification
-```
-
-
-## Set up
-
-For the September modelling update, start again at Notebook 05 using fresh
-feature/model/output run IDs. See [the rerun guide](docs/MODELLING_UPDATE.md).
+## Local setup
 
 ```bash
 git clone https://github.com/LiliDopidze/anomaly_detection.git
 cd anomaly_detection
 python -m venv .venv
-source .venv/bin/activate       # Windows PowerShell: .venv\Scripts\Activate.ps1
+source .venv/bin/activate
 python -m pip install -e ".[dev]"
-python -m ipykernel install --user --name telco-anomaly --display-name "Python (telco-anomaly)"
-pytest
-```
-
-Put data outside Git and select it with one environment variable:
-
-```bash
 export TELCO_DATA_ROOT="$HOME/telco_anomaly_data"
+pytest
+jupyter lab
 ```
 
-The same notebooks also work in Colab. They resolve
-`/content/drive/MyDrive/telco_anomaly_data` first and support the existing
-`/content/drive/MyDrive/anomaly_detection` folder as a legacy fallback.
+On Windows, activate the environment with `.venv\Scripts\Activate.ps1`.
+In Colab, use a repository checkout with its dependencies installed. The
+notebooks mount Drive and recognise `MyDrive/telco_anomaly_data` and the
+existing `MyDrive/anomaly_detection` data folder. Set `TELCO_PROJECT_ROOT`
+if the repository is separate from the notebook working directory.
 
-Expected primary source layout:
+## Data and outputs
+
+Keep data and generated artifacts outside Git. The primary source directory is:
 
 ```text
-$TELCO_DATA_ROOT/
-├── telco_synthetic_data/      # preferred; legacy telco_syntetic_data is recognised
-│   ├── reference_dataset.parquet
-│   ├── topology.csv
-│   ├── entity_service_windows.csv
-│   ├── gt_fault_registry.csv          # evaluation only
-│   └── fault_entity_intervals.csv     # evaluation only
-└── sources/
-    ├── ran_pm/17815388/raw/
-    ├── microsoft_optical/raw/
-    └── optical_failure/raw/
+$TELCO_DATA_ROOT/telco_synthetic_data/
+    reference_dataset.parquet
+    topology.csv
+    entity_service_windows.csv
+    gt_fault_registry.csv
+    fault_entity_intervals.csv
 ```
 
-Public sources do not need to be downloaded and uploaded by hand. In Notebook
-11, choose exactly one source and enable its one-time acquisition:
+The legacy spelling `telco_syntetic_data` is also supported. Ground truth is
+reserved for evaluation; detectors do not use fault labels. Generated stage
+outputs are immutable and stay under `TELCO_DATA_ROOT`, with hashes linking
+their inputs. Change a run ID to create a new result rather than overwrite one.
 
-```python
-%env PUBLIC_DATASET=ran_pm
-%env DOWNLOAD_PUBLIC_DATA=1
-```
+## Evaluation rules
 
-The notebook downloads from the publisher link, verifies publisher checksums
-when available, extracts the files under `TELCO_DATA_ROOT`, and writes a source
-manifest. Microsoft Optical additionally requires
-`ACKNOWLEDGE_MICROSOFT_DATA_TERMS=1`; the optical-failure testbed requires
-`ACKNOWLEDGE_OPTICAL_FAILURE_TERMS=1`. These acknowledgements confirm that the
-user reviewed the applicable terms; they do not grant additional rights.
+Calibration, development and holdout are chronological. Thresholds and
+workload verification use separate calibration slices. Development compares
+eligible candidates; holdout stays sealed until the frozen configuration is
+qualified. Report timely detection, incident workload and localisation
+separately. Shared-network localisation is not causal root-cause proof.
 
-Generated outputs are immutable, stage-named directories beneath
-`$TELCO_DATA_ROOT` (`audits/`, `prepared/`, `core/`, `eda/`, `features/`,
-`models/`, `selection/`, `incidents/`, `localisation/`, and `results/`). Change
-a run ID to create another run; completed runs are never overwritten.
-
-GitHub stores code, configuration, tests, documentation, and optionally a few
-curated small reports. Raw data, canonical telemetry, feature tables, fitted
-artefacts, and full run outputs remain outside Git because they are large and
-may be restricted. Their manifests and hashes provide reproducibility without
-committing the data itself.
+Public Telecom adapters are optional. They qualify portability or controlled
+failures according to their source; they do not replace real PON validation.
+Never pool incompatible datasets into a single fitted model.

@@ -9,7 +9,6 @@ htmlcov/
 venv/
 build/
 dist/
-*.egg-info/
 
 # Jupyter and editors
 .ipynb_checkpoints/
@@ -35,6 +34,8 @@ week1_outputs/
 *.parquet
 *.csv
 
-# Local supplied references are preserved on the workstation, not published
+# Local reference documents and one-off tooling are not team deliverables.
+# Team instructions live in README.md and notebooks/README.md.
+/docs/
+/scripts/
 legacy/attachments/
-docs/reference/
