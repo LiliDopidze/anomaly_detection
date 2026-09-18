@@ -40,6 +40,23 @@ from telco_anomaly.evaluation import ALERT_COLUMNS, form_cases
 BASE = pd.Timestamp("2025-01-01", tz="UTC")
 
 
+def test_missing_input_is_distinct_from_an_observed_neutral_residual():
+    from telco_anomaly.scoring.isolation_forest import (
+        _isolation_inputs, _isolation_ready,
+    )
+
+    values = pd.DataFrame({"a": [0., np.nan], "b": [1., 1.]})
+    medians = pd.Series({"a": 0., "b": 1.})
+    inputs = _isolation_inputs(values, medians)
+    assert inputs.a.tolist() == [0., 0.]
+    assert inputs.a__missing_input.tolist() == [0., 1.]
+    assert _isolation_ready(values).tolist() == [True, False]
+    # A scoring batch must never change the frozen fill values.
+    changed = values.copy()
+    changed.loc[0, "a"] = 1000.
+    assert _isolation_inputs(changed, medians).loc[1, "a"] == 0.
+
+
 def test_fit_sample_spreads_across_day_and_is_reproducible(tmp_path):
     path = tmp_path / "calibration.parquet"
     rows = pd.DataFrame({
@@ -484,6 +501,19 @@ def test_isolation_forest_keeps_base_and_temporal_variants(tmp_path):
     assert softened.ge(confirmed).all()
     assert softened.gt(confirmed).any()
     assert scored["isolation_forest_entity_calibrated"].notna().all()
+
+    sparse = frame.copy()
+    sparse.loc[0, ["a__level", "b__level"]] = np.nan
+    sparse_scores = score_residual_episode(
+        bundle, sparse, cadence_seconds=900,
+        dispersion_window_seconds=3600, cusum_allowance=0.5,
+    )
+    for channel in (
+        "isolation_forest_base", "isolation_forest_temporal",
+        "isolation_forest_confirmed", "isolation_forest_soft_confirmed",
+        "isolation_forest_entity_calibrated",
+    ):
+        assert pd.isna(sparse_scores.loc[0, channel])
 
     with_gap = frame.copy()
     with_gap.loc[100:, "event_ts"] += pd.Timedelta(days=1)

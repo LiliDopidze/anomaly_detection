@@ -64,6 +64,8 @@ portfolios:
   entity_calibrated_if: [isolation_forest_entity_calibrated]
   temporal_plus_multimetric: [isolation_forest_temporal, multimetric_residual]
   base_if: [isolation_forest_base]
+  temporal_with_group: [isolation_forest_temporal, group_common_mode]
+  fast_with_group: [isolation_forest_soft_confirmed, group_common_mode]
 diagnostic_portfolios:
   drift_only: [persistent_drift]
   peer_only: [peer_deviation]
@@ -87,6 +89,7 @@ evaluation:
     - median_detection_delay_seconds
     - joint_detection_and_localisation_recall
 selection:
+  ranking_metric: prompt_event_recall
   fail_closed_when_no_candidate_meets_budget: true
   holdout_must_remain_sealed: true
   eligible_portfolios:
@@ -100,6 +103,8 @@ selection:
     - entity_calibrated_if
     - temporal_plus_multimetric
     - base_if
+    - temporal_with_group
+    - fast_with_group
   # Thirty development faults is the minimum for attempting a research
   # qualification. The notebook also prints confidence intervals and the
   # number of detections required; this is not enough for an operator SLA.

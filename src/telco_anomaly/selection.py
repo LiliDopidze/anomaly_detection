@@ -27,6 +27,7 @@ def select_development_candidate(
     maximum_missing_score_fraction: float,
     portfolio_preference: list[str],
     equivalence_margin: float = 0.02,
+    ranking_metric: str = "event_recall",
 ):
     """Select one declared candidate, or return a reason to stop.
 
@@ -37,7 +38,9 @@ def select_development_candidate(
     model.
     """
 
-    missing = REQUIRED_COLUMNS - set(comparison.columns)
+    if ranking_metric not in {"event_recall", "prompt_event_recall"}:
+        raise ValueError("Unsupported selection ranking metric")
+    missing = (REQUIRED_COLUMNS | {ranking_metric}) - set(comparison.columns)
     if missing:
         raise ValueError(f"Comparison is missing columns: {sorted(missing)}")
     if development_faults < int(minimum_faults):
@@ -54,6 +57,7 @@ def select_development_candidate(
         & comparison["missing_score_fraction"].le(
             float(maximum_missing_score_fraction)
         )
+        & np.isfinite(comparison[ranking_metric])
     ].copy()
     if eligible.empty:
         return None, {
@@ -67,9 +71,9 @@ def select_development_candidate(
             ),
         }
 
-    best_recall = eligible["event_recall"].max()
+    best_recall = eligible[ranking_metric].max()
     equivalent = eligible.loc[
-        eligible["event_recall"].ge(best_recall - float(equivalence_margin))
+        eligible[ranking_metric].ge(best_recall - float(equivalence_margin))
     ].copy()
     preference = {name: rank for rank, name in enumerate(portfolio_preference)}
     equivalent["simplicity_rank"] = equivalent["portfolio"].map(
@@ -93,6 +97,7 @@ def select_development_candidate(
         "minimum_recall_ci_low": float(minimum_recall_ci_low),
         "selected_recall_ci_low": float(selected["event_recall_ci_low"]),
         "candidate_key": str(selected["candidate_key"]),
+        "ranking_metric": ranking_metric,
     }
 
 

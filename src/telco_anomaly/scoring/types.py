@@ -29,6 +29,7 @@ class ResidualBundle(TypedDict, total=False):
     pca: Any
     isolation_base_features: list[str]
     isolation_temporal_features: list[str]
+    isolation_fill_values: Any
     isolation_forest_base: Any
     isolation_forest_temporal: Any
     isolation_temporal_tail_reference: Any

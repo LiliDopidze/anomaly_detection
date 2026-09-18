@@ -45,11 +45,15 @@ The notebooks run in order:
 08 alerts, incidents + observable events
 09 topology localisation
 10 locked evaluation
+10A development diagnostics
 11 public-data qualification
 ```
 
 
 ## Set up
+
+For the September modelling update, start again at Notebook 05 using fresh
+feature/model/output run IDs. See [the rerun guide](docs/MODELLING_UPDATE.md).
 
 ```bash
 git clone https://github.com/LiliDopidze/anomaly_detection.git
@@ -112,4 +116,3 @@ curated small reports. Raw data, canonical telemetry, feature tables, fitted
 artefacts, and full run outputs remain outside Git because they are large and
 may be restricted. Their manifests and hashes provide reproducibility without
 committing the data itself.
-
