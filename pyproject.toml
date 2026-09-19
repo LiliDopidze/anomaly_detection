@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "telco-anomaly-detection"
 version = "5.0.0"
-description = "Company-neutral Telecom telemetry anomaly detection and topology localisation"
+description = "Synthetic PON data generation, validation and anomaly detection baselines"
 requires-python = ">=3.10"
 dependencies = [
   "duckdb>=1.0",
@@ -13,14 +13,10 @@ dependencies = [
   "matplotlib>=3.8",
   "numpy>=1.26",
   "pandas>=2.1",
-  "plotly>=5.20",
   "pyarrow>=15",
-  "pytz>=2024.1",
   "PyYAML>=6.0",
   "scikit-learn>=1.4",
   "scipy>=1.11",
-  "seaborn>=0.13",
-  "statsmodels>=0.14",
 ]
 
 [project.optional-dependencies]

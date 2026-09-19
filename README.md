@@ -39,23 +39,35 @@ saved outputs; change paths to run a revised experiment.
 It is not a cumulative counter and is not interchangeable with the old v4 field
 without confirming semantics. Model input excludes truth and latent parameters.
 
-## Small active workflow
+## Repository structure
 
-- `notebooks/`: five readable entry points; calculations live in Python modules.
-- `src/telco_anomaly/synthetic*.py`: generation, validation and baseline workflow.
-- `configs/synthetic*.yml`: scenario and experiment settings.
-- `tests/test_synthetic_stage.py`: statistical and temporal correctness checks.
-- `reference/`: the original submitted generator, preserved unchanged.
-- `data/` and `outputs/`: generated locally, never committed.
+```text
+configs/                    # Generator and experiment settings (two files)
+notebooks/                  # Five numbered notebooks
+src/telco_anomaly/
+    synthetic.py            # Generate measurements and separate truth
+    synthetic_validation.py # Validate and audit generated data
+    synthetic_pipeline.py   # Features, baselines and evaluation workflow
+    evaluation.py           # Required matching and uncertainty helpers
+    __init__.py
+tests/                      # Tests for this workflow only
+README.md                   # Setup and running instructions
+SYNTHETIC_REVIEW.md          # Methodology, evidence, assumptions and results
+pyproject.toml              # Installation and required dependencies
+```
 
-The earlier code/configuration and `notebooks/legacy/` remain for reproducibility.
-They are not prerequisites for the new workflow. `METHODOLOGY.md` is the broader
-proposed roadmap; `SYNTHETIC_REVIEW.md` identifies what this stage implements.
-Public-data integration and advanced localisation are deferred.
+`data/` and `outputs/` are created locally and excluded from Git. They contain
+simulation data and run results, not source code. Tests remain because they
+protect causality, physical invariants and final-evaluation safeguards.
+
+The earlier implementation remains on `main`. The original submitted generator
+and broader design are preserved in the [pre-cleanup commit](https://github.com/LiliDopidze/anomaly_detection/tree/a4f37dd0e5d5702e863ca6ae9883c4173a72bcaa).
+They are not needed to run this pipeline. Public-data integration and advanced
+localisation are deferred.
 
 ## Current result
 
-All 18 default dataset invariants and 130 project tests pass. On the development
+All 18 default dataset invariants and 15 focused tests pass. On the development
 period, robust detection finds 27/40 eligible events and Isolation Forest 30/40.
 Both fail the configured alert-burden gates. No model is selected; final test
 performance has not been examined. These are assumption-dependent development
