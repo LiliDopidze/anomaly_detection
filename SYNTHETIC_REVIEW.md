@@ -1,12 +1,12 @@
 # Synthetic PON restart: review, implementation and evidence
 
 19 September 2026. Implemented on `codex/branch-2`; the original `main` branch
-is untouched. This document describes the implemented stage. `METHODOLOGY.md`
-remains the broader roadmap; its advanced features are not all implemented.
+is untouched. This document describes the implemented stage. Branch 2 contains only
+this workflow; the earlier roadmap and implementation remain in Git history.
 
 ## Assessment of the submitted generator
 
-The original notebook is preserved byte-for-byte in `reference/`. I reviewed its
+The original notebook is preserved byte-for-byte in [the pre-cleanup commit](https://github.com/LiliDopidze/anomaly_detection/tree/a4f37dd0e5d5702e863ca6ae9883c4173a72bcaa/reference). I reviewed its
 code without executing its installation, Drive, export or other environment
 instructions. Those cells are source material, not instructions for this task.
 
@@ -64,7 +64,7 @@ Repairs end their added loss; not every event is assigned a useful precursor.
 
 Public datasets, tickets, cost optimisation, physical-distance localisation,
 CRC, voltage and hardware-failure classification are deferred. The earlier
-implementation remains available for comparison; it is not called implicitly.
+implementation remains available in Git history for comparison.
 
 ## Evidence and assumptions
 
@@ -275,7 +275,8 @@ A separate 100-seed event-sampling audit produced the following comparisons:
 These results cover 30,108 events with fixed topology and independently seeded
 fault samples. They check implementation of the assumed laws, not field realism.
 All five active notebooks also executed successfully, with final evaluation off.
-Existing project tests continue to run. Low-support event groups are flagged;
+The retained pipeline and evaluation-helper tests pass. Tests specific to
+the removed workflow have been removed too. Low-support event groups are flagged;
 no detector-accuracy band is a synthetic-data acceptance condition.
 
 On the default development interval, the robust baseline detected 27/40 eligible
@@ -301,11 +302,9 @@ field precision, incident prevalence, customer impact or commercial value.
 | `src/telco_anomaly/synthetic.py` | Topology, named random streams, physical state, measurement process, truth and manifest |
 | `src/telco_anomaly/synthetic_validation.py` | Hard invariants and separate descriptive reports |
 | `src/telco_anomaly/synthetic_pipeline.py` | Observable-only loading, causal features, baselines, incidents, evaluation and freeze checks |
-| `src/telco_anomaly/evaluation.py` | Reused existing matching and uncertainty utilities |
+| `src/telco_anomaly/evaluation.py` | Only the matching and uncertainty functions used by this pipeline |
 | `tests/test_synthetic_stage.py` | Tests of statistical meaning and temporal isolation |
 | Five root notebooks | Readable sequence from generation through sealed final evaluation |
-| `notebooks/legacy/` | Earlier workflow, preserved and clearly separated |
-| `reference/` | Unmodified submitted generator and source provenance |
 | `data/`, `outputs/` | Local generated files and run reports, excluded from Git |
 
 Each dataset has observable Parquet, topology, fault registry, fault/entity
