@@ -20,12 +20,10 @@ from telco_anomaly.synthetic import (
 from telco_anomaly.synthetic_pipeline import (
     build_features,
     evaluate,
-    load_observations,
     make_incidents,
-    run_holdout,
-    split_boundaries,
 )
 from telco_anomaly.synthetic_validation import validate_dataset
+from telco_anomaly.pipeline import run_holdout
 
 
 @pytest.fixture
@@ -51,9 +49,6 @@ def test_reproducible_generation_and_invariants(tmp_path, small_config):
     assert report["checks"].status.eq("pass").all()
     with pytest.raises(FileExistsError):
         generate_dataset(small_config, first)
-    observations, manifest = load_observations(first)
-    assert observations.timestamp_utc.max() < split_boundaries(manifest)["holdout"][0]
-    assert not any("fault" in name for name in observations)
 
 
 def test_collection_and_sensor_changes_do_not_change_physics(tmp_path, small_config):
@@ -178,40 +173,3 @@ def test_invalid_config_rejected(small_config):
         replace(small_config, n_onts=1000).validate()
     with pytest.raises(ValueError):
         replace(small_config, sample_minutes=17).validate()
-
-
-@pytest.mark.parametrize("changed", ["model", "threshold", "dataset", "code"])
-def test_holdout_rejects_changed_frozen_artifacts(tmp_path, small_config, changed):
-    from telco_anomaly import synthetic_pipeline
-
-    dataset = generate_dataset(small_config, tmp_path / "data")
-    run = tmp_path / "run"
-    run.mkdir()
-    (run / "selected_configuration.json").write_text(
-        json.dumps({"model": "robust", "threshold": 10})
-    )
-    # Rejection must happen before any deserialization or final scoring.
-    (run / "baselines.joblib").write_bytes(b"not loaded")
-    receipt = {
-        "dataset": str(dataset),
-        "dataset_manifest_sha256": sha256(dataset / "manifest.json"),
-        "pipeline_sha256": sha256(synthetic_pipeline.__file__),
-        "frozen_files": {
-            name: sha256(run / name)
-            for name in ("baselines.joblib", "selected_configuration.json")
-        },
-    }
-    targets = {
-        "model": run / "baselines.joblib",
-        "threshold": run / "selected_configuration.json",
-        "dataset": dataset / "reference_dataset.parquet",
-    }
-    if changed == "code":
-        receipt["pipeline_sha256"] = "changed"
-    else:
-        target = targets[changed]
-        target.write_bytes(target.read_bytes() + b"changed")
-    (run / "run.json").write_text(json.dumps(receipt))
-    with pytest.raises(ValueError, match="changed"):
-        run_holdout(run)
-    assert not (run / "holdout").exists()

@@ -1,18 +1,14 @@
 """Causal baselines for the v5 synthetic stage, with a sealed final partition.
 
 This bounded workflow intentionally excludes learned root-cause classification.
-The earlier canonical pipeline remains available for separately versioned work.
+The pipeline module orchestrates these functions for every partition.
 """
 
 from pathlib import Path
-import json
-
-import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import IsolationForest
 
-from telco_anomaly.synthetic import sha256
 from telco_anomaly.evaluation import (
     _maximum_event_matches,
     poisson_rate_interval,
@@ -35,23 +31,6 @@ def split_boundaries(manifest):
     edges = [start + span * f for f in (0, 0.4, 0.55, 0.7, 0.85, 1)]
     names = ("train", "calibration", "verification", "development", "holdout")
     return {name: (edges[i], edges[i + 1]) for i, name in enumerate(names)}
-
-
-def load_observations(dataset, include_holdout=False):
-    import duckdb
-
-    dataset = Path(dataset)
-    manifest = json.loads((dataset / "manifest.json").read_text())
-    cutoff = split_boundaries(manifest)["holdout"][0]
-    with duckdb.connect() as connection:
-        query = "SELECT * FROM read_parquet(?)"
-        args = [str(dataset / "reference_dataset.parquet")]
-        if not include_holdout:
-            query += " WHERE timestamp_utc < ?"
-            args.append(cutoff)
-        query += " ORDER BY ont_id, timestamp_utc"
-        data = connection.execute(query, args).df()
-    return data, manifest
 
 
 def build_features(data, cadence_seconds=900, minimum_coverage=0.5):
@@ -94,7 +73,7 @@ def feature_columns(features):
 
 
 def fit_baselines(features, seed=42):
-    columns = feature_columns(features)
+    columns = [c for c in feature_columns(features) if not c.endswith("__level")]
     ready = features.feature_coverage.ge(0.8)
     train = features.loc[ready, columns]
     if len(train) < 100 or train.notna().sum().eq(0).any():
@@ -200,10 +179,18 @@ def evaluate(dataset, incidents, start, end, prompt_hours=24):
     eligible = (faults.onset_ts >= start) & (faults.repair_ts <= end)
     targets = faults.loc[eligible].sort_values("onset_ts")
     members = intervals.groupby("fault_id").entity_id.agg(set).to_dict()
+
+    def belongs(entity_members):
+        if "entity_ids" in incidents:
+            return incidents.entity_ids.map(
+                lambda values: bool(set(values) & entity_members)
+            )
+        return incidents.entity_id.isin(entity_members)
+
     candidates = []
     for fault in targets.itertuples(index=False):
         mask = (
-            incidents.entity_id.isin(members.get(fault.gt_fault_id, set()))
+            belongs(members.get(fault.gt_fault_id, set()))
             & (incidents.start_ts >= fault.onset_ts)
             & (incidents.start_ts < fault.repair_ts)
         )
@@ -234,6 +221,11 @@ def evaluate(dataset, incidents, start, end, prompt_hours=24):
                 "fault_id": fault.gt_fault_id,
                 "type": fault.gt_fault_type,
                 "detected": hit is not None,
+                "delay_from_onset_hours": (
+                    (hit.start_ts - fault.onset_ts).total_seconds() / 3600
+                    if hit is not None
+                    else None
+                ),
                 "delay_from_visibility_proxy_hours": delay,
                 "prompt": delay is not None and 0 <= delay <= prompt_hours,
                 "visible": pd.notna(fault.first_observable_ts),
@@ -245,6 +237,7 @@ def evaluate(dataset, incidents, start, end, prompt_hours=24):
             "fault_id",
             "type",
             "detected",
+            "delay_from_onset_hours",
             "delay_from_visibility_proxy_hours",
             "prompt",
             "visible",
@@ -255,7 +248,7 @@ def evaluate(dataset, incidents, start, end, prompt_hours=24):
     boundary_ids = set()
     for fault in excluded.itertuples(index=False):
         mask = (
-            incidents.entity_id.isin(members.get(fault.gt_fault_id, set()))
+            belongs(members.get(fault.gt_fault_id, set()))
             & (incidents.start_ts < fault.repair_ts)
             & (incidents.end_ts >= fault.onset_ts)
         )
@@ -275,6 +268,11 @@ def evaluate(dataset, incidents, start, end, prompt_hours=24):
         "unobservable_proxy_faults": int((~outcomes.visible.astype(bool)).sum()),
         "boundary_faults_excluded": len(excluded),
         "boundary_incidents_excluded": len(boundary_ids - used),
+        "incident_precision": (
+            detected / (len(incidents) - len(boundary_ids - used))
+            if len(incidents) - len(boundary_ids - used)
+            else None
+        ),
         "incidents": len(incidents),
         "nuisance_incidents": nuisance,
         "monitored_entity_days": days,
@@ -283,159 +281,3 @@ def evaluate(dataset, incidents, start, end, prompt_hours=24):
         "uncertainty_note": "Poisson/Wilson summaries assume independence; shared events violate it.",
     }
     return result, outcomes
-
-
-def run_development(dataset, output, config):
-    """Development only. Scores/plots never load the holdout measurements."""
-    validate_experiment(config)
-    output = Path(output)
-    if output.exists():
-        raise FileExistsError(output)
-    data, manifest = load_observations(dataset)
-    cadence = manifest["config"]["sample_minutes"] * 60
-    features = build_features(data, cadence, config["minimum_coverage"])
-    boundaries = split_boundaries(manifest)
-    train_end = boundaries["train"][1]
-    fitted = fit_baselines(
-        features.loc[features.timestamp_utc < train_end], config["seed"]
-    )
-    scores = score_baselines(features, fitted)
-    comparisons, details = [], {}
-    for model in ("robust", "isolation_forest"):
-        a, b = boundaries["calibration"]
-        calibration = scores.loc[scores.timestamp_utc.between(a, b, inclusive="left")]
-        values = calibration_blocks(calibration, model, cadence)
-        if not len(values):
-            raise ValueError("No adequately observed daily calibration blocks")
-        va, vb = boundaries["verification"]
-        verification = scores.loc[
-            scores.timestamp_utc.between(va, vb, inclusive="left")
-        ]
-        da, db = boundaries["development"]
-        development = scores.loc[scores.timestamp_utc.between(da, db, inclusive="left")]
-        expected_verify = (
-            manifest["config"]["n_onts"] * (vb - va).total_seconds() / cadence
-        )
-        exposure = verification[model].notna().sum() * cadence / 86400
-        coverage = verification[model].notna().sum() / expected_verify
-        chosen = None
-        for q in config["calibration_quantiles"]:
-            threshold = float(values.quantile(q))
-            check = make_incidents(verification, model, threshold, cadence)
-            upper = 1000 * poisson_rate_interval(len(check), exposure)[1]
-            if (
-                len(values) * (1 - q) >= 5
-                and upper <= config["verification_budget_per_1000_days"]
-            ):
-                chosen = (q, threshold, upper)
-                break
-        # A failed calibration still gets a clearly diagnostic development row.
-        admissible = chosen is not None and coverage >= config["minimum_score_coverage"]
-        q, threshold, upper = chosen or (q, threshold, upper)
-        incidents = make_incidents(development, model, threshold, cadence)
-        metrics, outcomes = evaluate(dataset, incidents, da, db, config["prompt_hours"])
-        expected_dev = (
-            manifest["config"]["n_onts"] * (db - da).total_seconds() / cadence
-        )
-        dev_coverage = development[model].notna().sum() / expected_dev
-        lower = metrics["event_recall_lower"]
-        qualified = (
-            admissible
-            and lower is not None
-            and lower >= config["minimum_event_recall_lower_bound"]
-            and dev_coverage >= config["minimum_score_coverage"]
-            and metrics["nuisance_upper_per_1000_days"]
-            <= config["development_budget_per_1000_days"]
-        )
-        comparisons.append(
-            {
-                "model": model,
-                "quantile": q,
-                "threshold": threshold,
-                "verification_upper_per_1000_days": upper,
-                "verification_coverage": coverage,
-                "calibration_daily_blocks": len(values),
-                "calibration_expected_tail_blocks": len(values) * (1 - q),
-                "development_coverage": dev_coverage,
-                "calibration_admissible": admissible,
-                "qualified": qualified,
-                **metrics,
-            }
-        )
-        details[model] = (incidents, outcomes)
-    comparison = pd.DataFrame(comparisons)
-    output.mkdir(parents=True)
-    comparison.to_csv(output / "comparison.csv", index=False)
-    scores.to_parquet(output / "development_scores.parquet", index=False)
-    for model, (incidents, outcomes) in details.items():
-        incidents.to_csv(output / f"{model}_incidents.csv", index=False)
-        outcomes.to_csv(output / f"{model}_faults.csv", index=False)
-    joblib.dump(fitted, output / "baselines.joblib")
-    receipt = {
-        "dataset": str(Path(dataset).resolve()),
-        "dataset_manifest_sha256": sha256(Path(dataset) / "manifest.json"),
-        "pipeline_sha256": sha256(__file__),
-        "config": config,
-        "holdout_opened": False,
-    }
-    eligible = comparison.loc[comparison.qualified].sort_values(
-        ["prompt_detected", "nuisance_incidents"],
-        ascending=[False, True],
-    )
-    status = {"status": "selected" if len(eligible) else "STOP_no_qualified_candidate"}
-    if len(eligible):
-        selection = eligible.iloc[0][["model", "threshold"]].to_dict()
-        (output / "selected_configuration.json").write_text(
-            json.dumps(selection, indent=2)
-        )
-    receipt["frozen_files"] = {
-        name: sha256(output / name)
-        for name in ("baselines.joblib", "selected_configuration.json")
-        if (output / name).exists()
-    }
-    (output / "run.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    (output / "selection_status.json").write_text(json.dumps(status, indent=2))
-    return comparison
-
-
-def run_holdout(run_directory):
-    """Explicit one-shot evaluation of a qualified frozen selection."""
-    run = Path(run_directory)
-    if (run / "holdout").exists():
-        raise FileExistsError("Holdout results already exist; do not retune on them")
-    selection_path = run / "selected_configuration.json"
-    if not selection_path.exists():
-        raise ValueError("STOP: no qualified selected configuration")
-    receipt = json.loads((run / "run.json").read_text())
-    dataset = Path(receipt["dataset"])
-    if sha256(dataset / "manifest.json") != receipt["dataset_manifest_sha256"]:
-        raise ValueError("Dataset manifest changed")
-    if sha256(__file__) != receipt["pipeline_sha256"]:
-        raise ValueError("Pipeline changed; frozen evaluation refused")
-    manifest = json.loads((dataset / "manifest.json").read_text())
-    for name, digest in manifest["files"].items():
-        if sha256(dataset / name) != digest:
-            raise ValueError(f"Dataset changed: {name}")
-    for name, digest in receipt["frozen_files"].items():
-        if sha256(run / name) != digest:
-            raise ValueError(f"Frozen selection artifact changed: {name}")
-    selected = json.loads(selection_path.read_text())
-    data, manifest = load_observations(dataset, include_holdout=True)
-    cadence = manifest["config"]["sample_minutes"] * 60
-    features = build_features(data, cadence, receipt["config"]["minimum_coverage"])
-    fitted = joblib.load(run / "baselines.joblib")
-    scores = score_baselines(features, fitted)
-    start, end = split_boundaries(manifest)["holdout"]
-    scores = scores.loc[scores.timestamp_utc.between(start, end, inclusive="left")]
-    incidents = make_incidents(
-        scores, selected["model"], selected["threshold"], cadence
-    )
-    metrics, outcomes = evaluate(
-        dataset, incidents, start, end, receipt["config"]["prompt_hours"]
-    )
-    out = run / "holdout"
-    out.mkdir()
-    incidents.to_csv(out / "incidents.csv", index=False)
-    outcomes.to_csv(out / "faults.csv", index=False)
-    (out / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
-    return metrics
