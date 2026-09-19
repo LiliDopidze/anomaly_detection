@@ -35,7 +35,7 @@ week1_outputs/
 *.csv
 
 # Local reference documents and one-off tooling are not team deliverables.
-# Team instructions live in README.md and the three notebooks.
+# Team instructions live in README.md and the five notebooks.
 /docs/
 /scripts/
 legacy/attachments/

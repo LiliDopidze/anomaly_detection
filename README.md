@@ -1,117 +1,126 @@
-# PON optical-loss anomaly detection
+# Optical anomaly detector
 
-A small data-science workflow for detecting sustained deterioration in optical
-power. Start with synthetic data, inspect errors, and adapt the same calculations
-to an operator's measurements. This is an experimental baseline, not a validated
-production alarm system or a detector for every telecom fault.
+Six explicit stages for sustained optical-degradation detection:
+**adapter → validation → features → detectors → incidents → evaluation**.
 
-## Run the workflow
+This is a tested research implementation with production-oriented safeguards,
+not a field-qualified production detector. The current synthetic validation
+policy fails its nuisance-workload target. See [METHOD.md](METHOD.md) for the
+mathematics, critical design decisions, evidence and limitations.
 
-Use Python 3.10 or newer. From the repository root:
+## Start here
+
+Python 3.10 or newer. From the repository root:
 
 ```bash
 python -m pip install -e ".[dev]"
 jupyter notebook
 ```
 
-Run these notebooks in order:
+Run the notebooks in order:
 
-1. `notebooks/01_data_and_eda.ipynb`: generate data, validate it, inspect missingness,
-   optical traces and daily profiles.
-2. `notebooks/02_fit_and_compare.ipynb`: fit the detector and compare it with
-   Isolation Forest and an illustrative static power threshold.
-3. `notebooks/03_error_analysis.ipynb`: inspect misses and early warnings; optionally
-   run stress tests, then explicitly open the final assessment when ready.
+1. `01_generator_eda.ipynb`: generate and inspect baseline telemetry.
+2. `02_feature_distributions.ipynb`: inspect causal features and missingness.
+3. `03_detector_tuning.ipynb`: fit both tiers and tune incident persistence.
+4. `04_evaluation.ipynb`: inspect misses and workload; final assessment defaults off.
+5. `05_end_to_end_demo.ipynb`: reproduce saved scores and see company adaptation.
 
-There is no dataset to download. Notebook 1 creates `data/synthetic_pon_v5` from
-`configs/synthetic.yml`. It can take a few minutes. Results go to
-`outputs/simple_model`. Generated data and results are ignored by Git. Change
-output paths for new experiments; existing runs are not overwritten.
-
-## What the model does
-
-It learns each device's normal optical power and variability, then smooths
-standardised drops with an exponentially weighted moving average (EWMA). Two
-successive high scores open a warning; two low scores confirm recovery. Missing
-telemetry is unknown, not normal. New devices need a reference period.
-
-The two main experiment settings are smoothing duration and threshold sensitivity,
-visible in notebook 2. Higher sensitivity values mean a higher threshold.
-References use the first 40% of time, thresholds the next 30%, development the next
-15%. Final performance assessment uses the remaining 15% only when explicitly
-requested in notebook 3. Simulator structural validation is separate from that
-performance assessment.
-
-## Adapt your company's data
-
-`src/telco_anomaly/adapter.py` is the adapter. It accepts a DataFrame and explicitly
-maps names, timezone and optical-power units. It does not infer vendors or units.
-Downstream receive power is required; upstream receive power is optional.
+Or run development from Python:
 
 ```python
-from telco_anomaly.adapter import adapt
-from telco_anomaly.model import fit_reference, score, calibrate, warnings
+from optical_anomaly.pipeline import develop
 
-# native is your existing DataFrame; timestamps here are local London time.
-data = adapt(
-    native,
-    columns={
-        "timestamp_utc": "sample_time",
-        "ont_id": "device_id",
-        "rx_power_dbm": "downstream_rx",
-        "olt_rx_power_dbm": "upstream_rx",
-    },
-    units={"rx_power_dbm": "dBm", "olt_rx_power_dbm": "dBm"},
-    timezone="Europe/London",
-)
-
-# Choose chronological periods using known operating history.
-training = data.loc[data.timestamp_utc < fit_end]
-model = fit_reference(training, cadence_minutes=15, smoothing_hours=1)
-scored = score(data, model)
-calibration = scored.loc[
-    (scored.timestamp_utc >= fit_end)
-    & (scored.timestamp_utc < calibration_end), "score"
-]
-threshold = calibrate(calibration, sensitivity=6)
-recovery = min(threshold, (threshold + calibration.median()) / 2)
-future = scored.loc[scored.timestamp_utc >= calibration_end]
-alerts = warnings(
-    future, threshold, cadence_minutes=15,
-    recovery_fraction=recovery / threshold,
-)
+run = develop("configs/config.yaml")
 ```
 
-`fit_end` and `calibration_end` are timezone-aware timestamps chosen for your data.
-Most reference/calibration readings must represent the intended healthy regime.
-Use the real poll cadence, verify measurement resolution and noise, and review
-power-class differences. The default 0.15 dB spread floor is an assumption.
-`score` is a chronological batch replay: include recent history for EWMA warm-up.
-`warnings` processes a complete evaluation window; separate calls do not preserve
-warning state. It is not a live monitoring service.
+No data download is needed. The generator creates the source measurements and a
+separate truth file. A new experiment needs a new `output` path in the configuration.
+`prepare` reuses an existing dataset only when its saved settings match; `develop`
+refuses to overwrite a fitted model. Final assessment is a separate explicit call:
 
-Company agnostic means reusable calculations with explicit local calibration.
-It does not mean a universal threshold, no onboarding, or validated transfer to an
-unseen operator. Sparse devices abstain: at least 100 valid reference readings per
-signal are required, but that minimum alone does not establish a good reference.
+```python
+from optical_anomaly.pipeline import final_evaluation
 
-## Files worth keeping
+# Only after fixing the model and completing validation error analysis:
+metrics = final_evaluation(run)
+```
 
-| File | Purpose |
-|---|---|
-| `configs/synthetic.yml` | Simulation assumptions; the only YAML configuration |
-| `src/telco_anomaly/synthetic.py` | Reproducible generator and separate fault truth |
-| `src/telco_anomaly/synthetic_validation.py` | Mathematical and data-quality checks |
-| `src/telco_anomaly/adapter.py` | Explicit field/unit mapping and gap report |
-| `src/telco_anomaly/model.py` | Reference, features, scoring, threshold and warnings |
-| `src/telco_anomaly/experiment.py` | Chronological comparison and final assessment |
-| `src/telco_anomaly/evaluation.py` | Fault matching, misses, lead time and false alarms |
-| `tests/` | Focused checks for leakage, units, missingness and evaluation errors |
-| `SYNTHETIC_REVIEW.md` | Modelling rationale, evidence, assumptions and results |
+Once final data has been inspected, it is no longer an untouched test for further
+tuning. Checksums and an opening marker prevent accidental reuse, not deliberate
+filesystem changes. Load joblib model files only from trusted sources.
 
-No deployment framework, channel registry, topology localisation, operational
-queue engine or layered adapter configuration is needed for this experiment.
-Previous work remains in Git history. Branch `main` is unchanged.
+## Repository structure
 
-Run checks with `python -m pytest`. See [the methodology](SYNTHETIC_REVIEW.md) for
-results and their limitations. Public-data integration remains a later step.
+```text
+configs/config.yaml                 # One readable experiment configuration
+notebooks/                          # Five ordered data-science notebooks
+src/optical_anomaly/
+    generator.py                    # Physical state, measurement and fault truth
+    adapter.py                      # TelemetryAdapter: names, units, timezone
+    validation.py                   # DataValidator: causal resampling, explicit gaps
+    splitting.py                    # TemporalSplit: train/calibration/validation/test
+    mathematics.py                  # Small independently tested formulas
+    features.py                     # FeatureEngineer: normalisation and shape features
+    detectors.py                    # StatisticalDetector and IsolationForestDetector
+    incidents.py                    # IncidentManager: persistent hysteresis state
+    evaluation.py                   # Evaluator: one-to-one matching and metrics
+    pipeline.py                     # Fit/calibrate/tune/save/final orchestration
+    __init__.py
+tests/                              # Mathematics, causality, state, matching, integration
+METHOD.md                           # Scientific rationale and limitations
+pyproject.toml
+README.md
+```
+
+One module per responsibility is enough here. Single-file subpackages and an
+abstract detector superclass would add navigation without helping the current
+implementation. Split a module when it develops genuinely different responsibilities.
+
+There are no copied train/validation/test folders. Timestamp boundaries define the
+splits; past-only rolling history can cross a boundary without future leakage.
+Generated artifacts live under the configured output directory, ignored by Git:
+
+- `telemetry.parquet`: source measurements; `ground_truth.parquet`: separate labels.
+- `settings.json`, `manifest.json`: settings, boundaries and frozen fingerprints.
+- `development_features.parquet`, `validation_scores.parquet`: development evidence.
+- `validation_comparison.csv`, `validation_incidents.csv`, `validation_faults.csv`.
+- `model.joblib`: feature references, both detectors and the chosen incident policy.
+
+Test outputs appear only after explicitly opening final assessment. Previous
+implementations remain in Git history; Branch `main` is unchanged.
+
+## Company data
+
+Map your native DataFrame explicitly; BER is optional:
+
+```python
+from optical_anomaly.adapter import TelemetryAdapter
+from optical_anomaly.validation import DataValidator
+
+adapter = TelemetryAdapter(
+    timestamp_column="sample_time",
+    entity_column="device_id",
+    metrics={"received_power": "rx_power_dbm"},
+    units={"rx_power_dbm": "dBm"},
+    timezone="Europe/London",
+)
+telemetry = DataValidator("5min").transform(adapter.transform(native))
+```
+
+Then use the stage classes with reviewed local chronological periods: fit
+`FeatureEngineer` and `IsolationForestDetector` on training data; calibrate both
+detectors on a later mostly normal period; tune incident rules on validation.
+The `develop` convenience function is specifically for the synthetic experiment.
+
+The canonical schema is `timestamp, entity_id, metric_name, value`. Validation
+adds `observed`; the feature stage uses Rx power. Company-specific assumptions
+include units, timezone, cadence, representative healthy history, daily seasonality,
+measurement precision, impact definition and acceptable workload. Company agnostic
+means portable mathematics plus local calibration, not universal thresholds.
+
+Feature extraction performs causal batch replay with historical context. It is not
+a bounded-memory streaming feature service. `IncidentManager` does retain state
+across consecutive chunks; its output includes new closures and active snapshots.
+Upsert incidents by `incident_id`, and persist the manager if restarting a process.
+
+Run the focused checks with `python -m pytest`.
