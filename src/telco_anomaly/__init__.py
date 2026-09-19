@@ -1,1 +1,1 @@
-"""Synthetic PON data generation, validation and causal detection baselines."""
+"""Synthetic optical-loss experiments and an interpretable early-warning baseline."""

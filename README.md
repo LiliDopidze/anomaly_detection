@@ -1,137 +1,117 @@
-# PON anomaly detection
+# PON optical-loss anomaly detection
 
-A synthetic-first pipeline with an explicit source adapter, data-quality checks,
-causal features, calibrated evidence channels, incident queues and locked
-assessment. [SYNTHETIC_REVIEW.md](SYNTHETIC_REVIEW.md) describes the evidence,
-assumptions and which parts of the approach document are implemented.
+A small data-science workflow for detecting sustained deterioration in optical
+power. Start with synthetic data, inspect errors, and adapt the same calculations
+to an operator's measurements. This is an experimental baseline, not a validated
+production alarm system or a detector for every telecom fault.
 
-## Run the complete workflow
+## Run the workflow
 
-Python 3.10 or later, from the repository root:
+Use Python 3.10 or newer. From the repository root:
 
 ```bash
 python -m pip install -e ".[dev]"
-python -m telco_anomaly.pipeline all
+jupyter notebook
 ```
 
-This generates synthetic data, validates it, creates the canonical model pack,
-fits the models, freezes thresholds before opening development labels, and writes
-comparisons and incident queues. It **does not open the final test**. A failed
-selection writes a STOP status, not a deployable model.
+Run these notebooks in order:
 
-Alternatively, open Jupyter and run the five notebooks in order:
+1. `notebooks/01_data_and_eda.ipynb`: generate data, validate it, inspect missingness,
+   optical traces and daily profiles.
+2. `notebooks/02_fit_and_compare.ipynb`: fit the detector and compare it with
+   Isolation Forest and an illustrative static power threshold.
+3. `notebooks/03_error_analysis.ipynb`: inspect misses and early warnings; optionally
+   run stress tests, then explicitly open the final assessment when ready.
 
-```bash
-python -m jupyter notebook
-```
+There is no dataset to download. Notebook 1 creates `data/synthetic_pon_v5` from
+`configs/synthetic.yml`. It can take a few minutes. Results go to
+`outputs/simple_model`. Generated data and results are ignored by Git. Change
+output paths for new experiments; existing runs are not overwritten.
 
-1. `01_generate_and_validate.ipynb`: generate, validate, adapt and separate truth.
-2. `02_eda_and_seasonality.ipynb`: training-only EDA and seasonal evidence.
-3. `03_features.ipynb`: inspect the same features used by scoring.
-4. `04_develop_baselines.ipynb`: compare channels, build queues and select or STOP.
-5. `05_final_evaluation.ipynb`: explicit final assessment and future inference;
-   both are disabled by default.
+## What the model does
 
-## Where is the adapter?
+It learns each device's normal optical power and variability, then smooths
+standardised drops with an exponentially weighted moving average (EWMA). Two
+successive high scores open a warning; two low scores confirm recovery. Missing
+telemetry is unknown, not normal. New devices need a reference period.
 
-**`src/telco_anomaly/adapter.py`**, configured by **`configs/adapter.yml`**.
-It maps native column names, units and interval/cumulative counter semantics;
-handles reviewed vendor overrides; validates identifiers, timestamps and dated
-topology; and maps alarm codes to canonical event families. It does not infer
-what a counter means or search folders for data. Unknown fields and codes stop
-conversion. Invalid numeric measurements become missing with quality codes.
+The two main experiment settings are smoothing duration and threshold sensitivity,
+visible in notebook 2. Higher sensitivity values mean a higher threshold.
+References use the first 40% of time, thresholds the next 30%, development the next
+15%. Final performance assessment uses the remaining 15% only when explicitly
+requested in notebook 3. Simulator structural validation is separate from that
+performance assessment.
 
-The synthetic workflow calls `write_pack()` with explicit telemetry and inventory
-tables. A different source uses the same function with a reviewed mapping:
+## Adapt your company's data
+
+`src/telco_anomaly/adapter.py` is the adapter. It accepts a DataFrame and explicitly
+maps names, timezone and optical-power units. It does not infer vendors or units.
+Downstream receive power is required; upstream receive power is optional.
 
 ```python
-from telco_anomaly.adapter import load_mapping, write_pack
+from telco_anomaly.adapter import adapt
+from telco_anomaly.model import fit_reference, score, calibrate, warnings
 
-pack = write_pack(
-    telemetry=native_telemetry,   # pandas DataFrame
-    inventory=native_inventory,
-    events=native_events,        # DataFrame, or None when unavailable
-    output="data/operator_pack",
-    mapping=load_mapping("configs/adapter.yml"),  # review for the actual source
-    metadata={
-        "start": "2025-01-01T00:00:00Z",
-        "days": 90,
-        "sample_minutes": 15,
-        "n_onts": 96,
+# native is your existing DataFrame; timestamps here are local London time.
+data = adapt(
+    native,
+    columns={
+        "timestamp_utc": "sample_time",
+        "ont_id": "device_id",
+        "rx_power_dbm": "downstream_rx",
+        "olt_rx_power_dbm": "upstream_rx",
     },
+    units={"rx_power_dbm": "dBm", "olt_rx_power_dbm": "dBm"},
+    timezone="Europe/London",
+)
+
+# Choose chronological periods using known operating history.
+training = data.loc[data.timestamp_utc < fit_end]
+model = fit_reference(training, cadence_minutes=15, smoothing_hours=1)
+scored = score(data, model)
+calibration = scored.loc[
+    (scored.timestamp_utc >= fit_end)
+    & (scored.timestamp_utc < calibration_end), "score"
+]
+threshold = calibrate(calibration, sensitivity=6)
+recovery = min(threshold, (threshold + calibration.median()) / 2)
+future = scored.loc[scored.timestamp_utc >= calibration_end]
+alerts = warnings(
+    future, threshold, cadence_minutes=15,
+    recovery_fraction=recovery / threshold,
 )
 ```
 
-For example, set a received-power field's source unit to `mW` to convert to dBm.
-Set FEC's kind to `cumulative` only when the source counts corrected codewords
-cumulatively; the adapter differences adjacent samples and marks gaps/restarts
-as unavailable. Corrected bits or bytes are **not** interchangeable codewords.
-Naive timestamps require the declared time zone; ambiguous DST times are rejected.
-The supplied mapping is for this synthetic source, not a universal vendor mapping.
+`fit_end` and `calibration_end` are timezone-aware timestamps chosen for your data.
+Most reference/calibration readings must represent the intended healthy regime.
+Use the real poll cadence, verify measurement resolution and noise, and review
+power-class differences. The default 0.15 dB spread floor is an assumption.
+`score` is a chronological batch replay: include recent history for EWMA warm-up.
+`warnings` processes a complete evaluation window; separate calls do not preserve
+warning state. It is not a live monitoring service.
 
-## Files you use
+Company agnostic means reusable calculations with explicit local calibration.
+It does not mean a universal threshold, no onboarding, or validated transfer to an
+unseen operator. Sparse devices abstain: at least 100 valid reference readings per
+signal are required, but that minimum alone does not establish a good reference.
 
-```text
-configs/
-    pipeline.yml              # Shared paths and operational policy
-    adapter.yml               # Reviewed source semantics
-    synthetic.yml             # Generator assumptions
-    synthetic_experiment.yml  # Calibration and qualification gates
-notebooks/                    # Five entry points
-src/telco_anomaly/
-    adapter.py                # Source -> canonical model pack
-    synthetic.py              # Synthetic physical/measurement processes
-    synthetic_validation.py   # Generator checks and sampling audits
-    features.py               # Grid, gaps, seasonality and evidence channels
-    synthetic_pipeline.py     # Baseline features, detectors and event metrics
-    operations.py             # Incident consolidation, disposition and scope ranking
-    evaluation.py             # Matching and uncertainty helpers
-    pipeline.py               # One CLI, frozen artifacts, ledgers and inference
-    __init__.py
-tests/                        # Correctness, causality and end-to-end checks
-```
+## Files worth keeping
 
-Generated `data/`, evaluation-only `evaluation/`, and `outputs/` are excluded
-from Git. No legacy workflow, public-data downloader or source dataset is needed.
-The original work remains on `main` and in Git history.
+| File | Purpose |
+|---|---|
+| `configs/synthetic.yml` | Simulation assumptions; the only YAML configuration |
+| `src/telco_anomaly/synthetic.py` | Reproducible generator and separate fault truth |
+| `src/telco_anomaly/synthetic_validation.py` | Mathematical and data-quality checks |
+| `src/telco_anomaly/adapter.py` | Explicit field/unit mapping and gap report |
+| `src/telco_anomaly/model.py` | Reference, features, scoring, threshold and warnings |
+| `src/telco_anomaly/experiment.py` | Chronological comparison and final assessment |
+| `src/telco_anomaly/evaluation.py` | Fault matching, misses, lead time and false alarms |
+| `tests/` | Focused checks for leakage, units, missingness and evaluation errors |
+| `SYNTHETIC_REVIEW.md` | Modelling rationale, evidence, assumptions and results |
 
-## Reuse, qualification and inference
+No deployment framework, channel registry, topology localisation, operational
+queue engine or layered adapter configuration is needed for this experiment.
+Previous work remains in Git history. Branch `main` is unchanged.
 
-All paths come from `configs/pipeline.yml`. For a revised experiment, choose new
-pack, truth and run paths. Existing prepared data is reused only when its hashes
-match; model runs are never overwritten. The notebooks can display a verified
-existing run. `pipeline all` expects a fresh run directory.
-
-Each run includes label-free thresholds, seasonal decisions, saved scores,
-per-channel and combined incident queues, per-mechanism recall/support,
-a model card, and either a selected configuration or a STOP status.
-Selection attempts and final-test openings are recorded beside evaluation truth.
-The default development-attempt limit is three per truth root.
-
-For an explicitly approved final assessment:
-
-```bash
-python -m telco_anomaly.pipeline holdout
-```
-
-For subsequent observations, after a model qualifies:
-
-```bash
-python -m telco_anomaly.pipeline infer \
-  --input-pack data/new_observations \
-  --output outputs/new_observations
-```
-
-Inference uses frozen preprocessing, models and thresholds, requires observations
-after the original experiment window, and does not read truth. It cannot be used
-to bypass the final-test opening. Supply history for rolling-window warm-up;
-a new operator needs local calibration, and a changed cadence is refused.
-
-```bash
-python -m pytest
-```
-
-This is a complete executable synthetic development path, not an industry-ready
-product. Scope probabilities remain uncalibrated. Independent generator testing,
-operator-transfer evidence, public-data qualification and shadow deployment are
-not claimed.
+Run checks with `python -m pytest`. See [the methodology](SYNTHETIC_REVIEW.md) for
+results and their limitations. Public-data integration remains a later step.
