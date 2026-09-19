@@ -1,0 +1,26 @@
+# Simulation assumptions, not fitted operator statistics.
+generator:
+  seed: 42
+  entities: 24
+  days: 28
+  interval_minutes: 5
+  noise_db: 0.08
+  correlation_hours: 0.5
+  daily_amplitude_db: 0.25
+  missing_probability: 0.02
+  impact_threshold_dbm: -27.0
+  faults_per_entity: 2
+features:
+  window: 12
+  smoothing_hours: 1.0
+  allowance: 0.25
+  seasonal: true
+# Train / score calibration / validation / final test fractions.
+splits: [0.4, 0.55, 0.75, 1.0]
+incidents:
+  high: 0.99
+  low: 0.8
+  opening_candidates: [2, 3, 6]
+  closing_candidates: [3, 6]
+  nuisance_budget_per_1000_days: 5.0
+output: outputs/optical_v6
