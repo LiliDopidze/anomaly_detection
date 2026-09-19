@@ -1,0 +1,12 @@
+# Engineering benchmark settings, not an operator-approved acceptance policy.
+dataset: data/synthetic_pon_v5
+output: outputs/synthetic_baselines_v5
+seed: 42
+minimum_coverage: 0.5
+calibration_quantiles: [0.9, 0.95, 0.975]
+verification_budget_per_1000_days: 9.0
+development_budget_per_1000_days: 9.0
+minimum_event_recall_lower_bound: 0.2
+minimum_score_coverage: 0.8
+prompt_hours: 24
+allow_holdout: false

@@ -1,0 +1,22 @@
+# Values describe a development fixture, not measured operator prevalence.
+seed: 20260919
+days: 90
+start: '2025-01-01T00:00:00Z'
+sample_minutes: 15
+n_onts: 96
+n_olts: 3
+ports_per_olt: 2
+splitters_per_port: 2
+faults_per_ont_year: 12.0
+faults_per_splitter_year: 6.0
+fault_duration_median_hours: 36.0
+fault_duration_log_sd: 0.7
+loss_median_db: 3.0
+loss_log_sd: 0.7
+poll_loss_probability: 0.02
+field_loss_probability: 0.003
+collector_outages_per_month: 1.0
+sensor_noise_db: 0.12
+seasonal_temperature_amplitude_c: 4.0
+daily_temperature_amplitude_c: 2.0
+output: data/synthetic_pon_v5
