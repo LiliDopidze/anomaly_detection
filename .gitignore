@@ -39,3 +39,6 @@ week1_outputs/
 /docs/
 /scripts/
 legacy/attachments/
+
+# Evaluation-only truth is separate from model data.
+/evaluation/

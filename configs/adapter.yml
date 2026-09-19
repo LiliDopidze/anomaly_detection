@@ -1,0 +1,71 @@
+# Explicit synthetic mapping. Review units and kinds before adapting another source.
+timestamp: timestamp_utc
+entity: ont_id
+timezone: UTC
+columns:
+  rx_power_dbm:
+    source: rx_power_dbm
+    unit: dBm
+    kind: gauge
+  olt_rx_power_dbm:
+    source: olt_rx_power_dbm
+    unit: dBm
+    kind: gauge
+  tx_power_dbm:
+    source: tx_power_dbm
+    unit: dBm
+    kind: gauge
+  temperature_c:
+    source: temperature_c
+    unit: C
+    kind: gauge
+  bias_current_ma:
+    source: bias_current_ma
+    unit: mA
+    kind: gauge
+  ber:
+    source: ber
+    unit: ratio
+    kind: gauge
+  fec_count:
+    source: fec_count
+    unit: codewords
+    kind: interval
+  throughput_mbps:
+    source: throughput_mbps
+    unit: Mbps
+    kind: gauge
+  uptime_s:
+    source: uptime_s
+    unit: s
+    kind: cumulative
+  reboot_count:
+    source: reboot_count
+    unit: count
+    kind: cumulative
+inventory:
+  columns:
+    ont_id: ont_id
+    olt_id: olt_id
+    pon_port: pon_port
+    splitter_l1: splitter_l1
+    splitter_l2: splitter_l2
+    rx_sensitivity_dbm: rx_sensitivity_dbm
+  ignored:
+  - vendor
+  - device_model
+  - firmware_version
+  - distance_km
+  - loss_ds_db
+  - loss_us_db
+  - ont_tx_dbm
+  - temperature_offset_c
+  - bias_base_ma
+  - capacity_mbps
+events:
+  timestamp: timestamp_utc
+  entity: ont_id
+  code: alarm_code
+  codes:
+    DYING_GASP: onu_power_loss
+    LOS: loss_of_signal

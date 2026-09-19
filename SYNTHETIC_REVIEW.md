@@ -1,8 +1,175 @@
-# Synthetic PON restart: review, implementation and evidence
+# Synthetic PON pipeline: method, evidence and implementation
 
 19 September 2026. Implemented on `codex/branch-2`; the original `main` branch
-is untouched. This document describes the implemented stage. Branch 2 contains only
+is untouched. The implementation section below supersedes the initial v5 baseline
+workflow described later in this document. This document describes the implemented stage. Branch 2 contains only
 this workflow; the earlier roadmap and implementation remain in Git history.
+
+
+## Current implementation: the explicit adapter and connected workflow
+
+The supplied September 10 approach document describes a research programme through
+operator deployment. The implemented path is generation → validation → adapter →
+canonical pack → training-only EDA → causal features → evidence channels → frozen
+calibration → development assessment → incident queue → qualification → locked
+final assessment or frozen future inference. Public integration remains out of scope.
+
+### Mapping the document to executable components
+
+| Document requirement | Implementation and remaining limit |
+|---|---|
+| Reviewed native mappings | `adapter.py` and `configs/adapter.yml`; explicit fields, units, kinds and vendor overrides |
+| Quality codes and counter resets | Cell-level quality table; no cumulative FEC difference across a gap, reset or kind change |
+| Time and topology | UTC normalisation with explicit local timezone; effective-dated memberships; unknown entities and overlapping memberships rejected |
+| Operational alarms | Reviewed codes map to `onu_power_loss` or `loss_of_signal`; unknown codes fail; no free-text matching |
+| Separate truth | Generator output is transient; only observables enter `data/`; evaluation labels go to the separate `evaluation/` root |
+| Blind reconstruction | Adapter test rebuilds identical packs after removing source labels |
+| Cadence, episodes and gaps | Explicit missing rows; return-time classification using uptime and reboot continuity; restart episodes |
+| EDA decisions | Daily seasonal approval and profiles use the training slice only; timezone, support and decisions saved |
+| Causal features | Past-only rolling deviations, interval FEC rate/nonzero indicator, directional power changes and asymmetry, frozen daily residuals |
+| Independent evidence channels | Robust residual, drift, peer, common mode, silence and inventory margin; residual-feature Isolation Forest challenger |
+| Status-quo comparator | Declared static receive-power limit with the same persistence/recovery; no claim of reproducing an actual operator's rules |
+| Thresholds and portfolio | Empirical daily block maxima with support checks; fixed rules for margin, silence and comparator; combined thresholded-evidence portfolio |
+| Label-free operating points | Choices are written and hashed before the first development truth read |
+| Single scoring implementation | Saved-model development replay must equal original scores exactly; inference and final scoring use the same function |
+| Incidents | Port/quiet-period consolidation, explicit membership and actual last-member decision timestamp |
+| Disposition | Canonical power-event share across the scope; available even when some events belong to non-alerting members |
+| Scope ranking | Conditional single-fault likelihoods over unique observable footprints, top candidates and structural ambiguity |
+| Development selection | Workload/recall/coverage gates; simplest adequate declared candidate; STOP if none qualifies |
+| Capability reports | Per-mechanism recall with Wilson intervals and estimability flag; current queues and matching outcomes |
+| Governance | Frozen code/configuration/package/input fingerprints, artifact checksums, selection ledger and one-opening holdout ledger |
+| Future inference | A qualified frozen model consumes a new canonical pack without opening truth; overlap with the experiment window is refused |
+
+### Deliberate differences from the older approach
+
+The document's twenty-one steps are not all software acceptance tests. Several
+require independent data, a PON engineer or operator participation. The following
+are explicitly **not completed evidence gates**:
+
+- Physical realism calibrated to operator measurements, four simulated operator
+  populations, directional mechanism expansions, power-fault labels and re-homing
+  scenarios in the generator. The adapter accepts effective-dated topology and
+  reviewed events; the current generator does not establish their field accuracy.
+- Independent sealed-generator qualification, leave-one-operator-out capability,
+  graded-injection power curves and comparisons with externally tuned algorithms.
+- Calibrated localisation probabilities, inferred topology corrections and
+  performance against labelled power-loss events. Current rankings use declared
+  hit/background assumptions, not fitted field probabilities.
+- Public-data and partner shadow-deployment gates.
+
+Sparse-tail generalised Pareto fitting is not enabled: small support does not
+justify inventing a stable tail estimate. Unsupported thresholds fail closed.
+Daily maxima reduce row-level pseudo-replication but do not establish independent
+blocks or a conformal coverage guarantee. Weekly profiles and temperature
+compensation are not fitted by default. These are optional refinements needing
+support and incremental-value evidence, not requirements for running the pipeline.
+
+A filesystem allowlist and separate roots protect against accidental label reads.
+They are **not** an OS security boundary: this local process still has permissions
+to other folders. A strict truth-isolated modelling environment requires a separate
+account/container or unmounted storage. The blind-rebuild test proves adapter
+independence from labels, not infrastructure access control. Ledgers similarly
+prevent accidental reuse; an administrator could edit their files.
+
+### Data contract and adapter behaviour
+
+A pack has exactly six files: `telemetry.parquet`, `inventory.parquet`,
+`events.parquet`, `quality.parquet`, `adapter_audit.json`, and `manifest.json`.
+The observable telemetry keeps the ten declared metrics in their canonical units.
+Topology carries only mapped inventory attributes, including simulated receiver
+sensitivity; it does not carry latent path loss or injected fault parameters.
+The absence of events produces an empty typed event table, not fabricated alarms.
+
+Mappings do not guess units or semantics. For example, mW power becomes
+`10*log10(mW)` dBm, watts first become mW, and cumulative corrected-codeword
+counts become adjacent-interval differences. Negative deltas, missing predecessors,
+resets and gaps invalidate that interval. Unknown columns, duplicate observations,
+unknown alarm codes, ambiguous local timestamps and off-cadence readings are refused.
+Missing or invalid numeric observations retain explicit quality codes.
+
+Company independence comes from this stable contract and local label-free
+calibration. It is not a promise that one model's thresholds or seasonal profiles
+work unchanged at another operator. The supplied mapping must be reviewed against
+each actual source, particularly FEC units and alarm semantics.
+
+### Features, decisions and operational semantics
+
+The baseline is the prior median/IQR feature calculation. Additional features are
+frozen daily residuals where population evidence supports seasonality, an FEC
+nonzero indicator, downstream/upstream trailing changes and their asymmetry.
+Isolation Forest uses residual features instead of raw level features. The
+classification of a preceding gap is available only when a reading returns;
+silence itself is available immediately from the current cadence grid.
+
+CUSUM holds its state across missing reports and resets on observed device restarts.
+Peer and common-mode evidence use contemporaneous splitter measurements with a
+minimum group size. Silence compares the target splitter's missing fraction with
+reporting by the rest of its OLT, suppressing whole-collector outages. Optical margin
+uses explicitly supplied inventory sensitivity. Fixed-rule thresholds are not
+selected using fault labels.
+
+Channel thresholds are independent; the full portfolio combines their exceedance
+indicators before persistence/recovery. Threshold verification conservatively
+counts entity alerts. Development metrics count consolidated queue cases, so these
+are different workload quantities, explicitly reported. Case matching uses the
+last member's decision time: later membership never earns backdated detection
+credit. Cases matching no fault, including duplicates, count against workload.
+Boundary events are excluded and reported as in the original evaluator.
+
+Incident consolidation is limited to a PON port and a quiet window. Ranking is a
+single-fault hypothesis model over observed alert membership, not causal diagnosis.
+Identical topology footprints share one hypothesis with equivalent scope names,
+so duplicated inventory levels do not multiply evidence. The reported probability
+belongs to that footprint equivalence class and is not calibrated confidence.
+Simultaneous independent faults, missing topology and collector ambiguity can
+invalidate that simple interpretation. Power disposition is a routing heuristic;
+it is not counted as validated power-loss detection.
+
+### Reproducibility and acceptance
+
+`configs/pipeline.yml` resolves all paths. Preparation and modelling refuse changed
+upstream inputs or existing run outputs. A run saves the resolved policy, package
+versions, source hashes, canonical manifest hash, model, seasonal decisions,
+label-free threshold choices and development scores. Replaying the saved model
+must reproduce those scores exactly before evaluation proceeds.
+
+The selection ledger is written before reading development truth. The holdout
+ledger is written before reading final truth and remains outside the result
+folder, so deleting results does not reopen the test. The current holdout evaluates
+only the frozen selected candidate, not the older document's three-configuration
+research comparison. No holdout is opened automatically by the CLI or notebooks.
+Future inference refuses observations overlapping the experiment window.
+
+Tests include unit conversion, vendor overrides, counter gaps/resets, DST ambiguity,
+blind rebuilding, unknown-field/alarm rejection, dated memberships, collector-vs-group
+silence, topology ambiguity, power disposition, 30 informative causal prefix checks,
+saved-score replay, stale-artifact rejection, ledger reuse prevention and inference
+while the evaluation-truth directory is unavailable. Small integration fixtures use
+explicitly permissive gates only to exercise positive selection and holdout paths;
+the default scientific experiment does not inherit those permissive settings.
+
+### Expanded-pipeline development result
+
+The 90-day synthetic run has 40 fully contained development faults. On consolidated
+case metrics, robust residuals detect 24/40, Isolation Forest 30/40, static rules
+9/40, and the combined portfolio 19/40. Their unmatched case rates are respectively
+15.43, 20.06, 6.94 and 21.60 per 1,000 calendar entity-days. No candidate passes all
+configured gates; the final test remains unopened.
+
+Adding channels did not automatically improve the combined portfolio. Persistent
+channels can merge a long sequence of alerts into a broad case, moving its final
+membership decision later and reducing matching credit. That trade-off is visible
+rather than hidden by backdating. These are development diagnostics, not evidence
+that the combined system is better than the simpler detector. The next modelling
+question is incident fragmentation versus over-consolidation, alongside whether
+the assumed total-alert budget is feasible under enriched synthetic prevalence.
+
+## Historical v5 generator review and first baseline
+
+The remaining sections record the generator audit and initial v5 baseline, before
+the explicit adapter and operational extensions above. Their numerical assumptions
+still describe the generator. Their five-signal model results are historical and
+must not be presented as results of the expanded pipeline.
 
 ## Assessment of the submitted generator
 

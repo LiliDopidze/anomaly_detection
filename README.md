@@ -1,74 +1,137 @@
-# PON anomaly detection — Branch 2 synthetic restart
+# PON anomaly detection
 
-A small, reproducible workflow for generating PON optical-loss scenarios,
-auditing the data and comparing two causal detection baselines. No external
-data download or Google Drive access is required for this stage.
+A synthetic-first pipeline with an explicit source adapter, data-quality checks,
+causal features, calibrated evidence channels, incident queues and locked
+assessment. [SYNTHETIC_REVIEW.md](SYNTHETIC_REVIEW.md) describes the evidence,
+assumptions and which parts of the approach document are implemented.
 
-**Start with [SYNTHETIC_REVIEW.md](SYNTHETIC_REVIEW.md).** It explains the original
-generator review, evidence, assumptions, mathematical choices and actual results.
-Synthetic data is useful for development; it does not establish field accuracy.
+## Run the complete workflow
 
-## Run
-
-Use Python 3.10 or later. From the repository root:
+Python 3.10 or later, from the repository root:
 
 ```bash
 python -m pip install -e ".[dev]"
+python -m telco_anomaly.pipeline all
+```
+
+This generates synthetic data, validates it, creates the canonical model pack,
+fits the models, freezes thresholds before opening development labels, and writes
+comparisons and incident queues. It **does not open the final test**. A failed
+selection writes a STOP status, not a deployable model.
+
+Alternatively, open Jupyter and run the five notebooks in order:
+
+```bash
 python -m jupyter notebook
 ```
 
-Open the five notebooks in `notebooks/` in order. Notebook 1 generates and checks
-the dataset. Notebook 2 performs EDA, including seasonality. Notebook 3 explains
-the features. Notebook 4 compares baselines and either selects a qualified model
-or reports STOP. Notebook 5 leaves the final test period sealed by default.
+1. `01_generate_and_validate.ipynb`: generate, validate, adapt and separate truth.
+2. `02_eda_and_seasonality.ipynb`: training-only EDA and seasonal evidence.
+3. `03_features.ipynb`: inspect the same features used by scoring.
+4. `04_develop_baselines.ipynb`: compare channels, build queues and select or STOP.
+5. `05_final_evaluation.ipynb`: explicit final assessment and future inference;
+   both are disabled by default.
 
-For generation without Jupyter:
+## Where is the adapter?
+
+**`src/telco_anomaly/adapter.py`**, configured by **`configs/adapter.yml`**.
+It maps native column names, units and interval/cumulative counter semantics;
+handles reviewed vendor overrides; validates identifiers, timestamps and dated
+topology; and maps alarm codes to canonical event families. It does not infer
+what a counter means or search folders for data. Unknown fields and codes stop
+conversion. Invalid numeric measurements become missing with quality codes.
+
+The synthetic workflow calls `write_pack()` with explicit telemetry and inventory
+tables. A different source uses the same function with a reviewed mapping:
+
+```python
+from telco_anomaly.adapter import load_mapping, write_pack
+
+pack = write_pack(
+    telemetry=native_telemetry,   # pandas DataFrame
+    inventory=native_inventory,
+    events=native_events,        # DataFrame, or None when unavailable
+    output="data/operator_pack",
+    mapping=load_mapping("configs/adapter.yml"),  # review for the actual source
+    metadata={
+        "start": "2025-01-01T00:00:00Z",
+        "days": 90,
+        "sample_minutes": 15,
+        "n_onts": 96,
+    },
+)
+```
+
+For example, set a received-power field's source unit to `mW` to convert to dBm.
+Set FEC's kind to `cumulative` only when the source counts corrected codewords
+cumulatively; the adapter differences adjacent samples and marks gaps/restarts
+as unavailable. Corrected bits or bytes are **not** interchangeable codewords.
+Naive timestamps require the declared time zone; ambiguous DST times are rejected.
+The supplied mapping is for this synthetic source, not a universal vendor mapping.
+
+## Files you use
+
+```text
+configs/
+    pipeline.yml              # Shared paths and operational policy
+    adapter.yml               # Reviewed source semantics
+    synthetic.yml             # Generator assumptions
+    synthetic_experiment.yml  # Calibration and qualification gates
+notebooks/                    # Five entry points
+src/telco_anomaly/
+    adapter.py                # Source -> canonical model pack
+    synthetic.py              # Synthetic physical/measurement processes
+    synthetic_validation.py   # Generator checks and sampling audits
+    features.py               # Grid, gaps, seasonality and evidence channels
+    synthetic_pipeline.py     # Baseline features, detectors and event metrics
+    operations.py             # Incident consolidation, disposition and scope ranking
+    evaluation.py             # Matching and uncertainty helpers
+    pipeline.py               # One CLI, frozen artifacts, ledgers and inference
+    __init__.py
+tests/                        # Correctness, causality and end-to-end checks
+```
+
+Generated `data/`, evaluation-only `evaluation/`, and `outputs/` are excluded
+from Git. No legacy workflow, public-data downloader or source dataset is needed.
+The original work remains on `main` and in Git history.
+
+## Reuse, qualification and inference
+
+All paths come from `configs/pipeline.yml`. For a revised experiment, choose new
+pack, truth and run paths. Existing prepared data is reused only when its hashes
+match; model runs are never overwritten. The notebooks can display a verified
+existing run. `pipeline all` expects a fresh run directory.
+
+Each run includes label-free thresholds, seasonal decisions, saved scores,
+per-channel and combined incident queues, per-mechanism recall/support,
+a model card, and either a selected configuration or a STOP status.
+Selection attempts and final-test openings are recorded beside evaluation truth.
+The default development-attempt limit is three per truth root.
+
+For an explicitly approved final assessment:
 
 ```bash
-python -m telco_anomaly.synthetic --config configs/synthetic.yml
+python -m telco_anomaly.pipeline holdout
+```
+
+For subsequent observations, after a model qualifies:
+
+```bash
+python -m telco_anomaly.pipeline infer \
+  --input-pack data/new_observations \
+  --output outputs/new_observations
+```
+
+Inference uses frozen preprocessing, models and thresholds, requires observations
+after the original experiment window, and does not read truth. It cannot be used
+to bypass the final-test opening. Supply history for rolling-window warm-up;
+a new operator needs local calibration, and a changed cadence is refused.
+
+```bash
 python -m pytest
 ```
 
-The defaults generate 96 ONTs over 90 days. Change `configs/synthetic.yml` before
-generating another scenario, and choose a new output directory. Keep its path
-aligned with `dataset` in `configs/synthetic_experiment.yml`. Generation and
-model development refuse to overwrite existing runs. Existing notebooks reuse
-saved outputs; change paths to run a revised experiment.
-
-`fec_count` means **corrected codewords within the sampling interval** in v5.
-It is not a cumulative counter and is not interchangeable with the old v4 field
-without confirming semantics. Model input excludes truth and latent parameters.
-
-## Repository structure
-
-```text
-configs/                    # Generator and experiment settings (two files)
-notebooks/                  # Five numbered notebooks
-src/telco_anomaly/
-    synthetic.py            # Generate measurements and separate truth
-    synthetic_validation.py # Validate and audit generated data
-    synthetic_pipeline.py   # Features, baselines and evaluation workflow
-    evaluation.py           # Required matching and uncertainty helpers
-    __init__.py
-tests/                      # Tests for this workflow only
-README.md                   # Setup and running instructions
-SYNTHETIC_REVIEW.md          # Methodology, evidence, assumptions and results
-pyproject.toml              # Installation and required dependencies
-```
-
-`data/` and `outputs/` are created locally and excluded from Git. They contain
-simulation data and run results, not source code. Tests remain because they
-protect causality, physical invariants and final-evaluation safeguards.
-
-The earlier implementation remains on `main`. The original submitted generator
-and broader design are preserved in the [pre-cleanup commit](https://github.com/LiliDopidze/anomaly_detection/tree/a4f37dd0e5d5702e863ca6ae9883c4173a72bcaa).
-They are not needed to run this pipeline. Public-data integration and advanced
-localisation are deferred.
-
-## Current result
-
-All 18 default dataset invariants and 15 focused tests pass. On the development
-period, robust detection finds 27/40 eligible events and Isolation Forest 30/40.
-Both fail the configured alert-burden gates. No model is selected; final test
-performance has not been examined. These are assumption-dependent development
-results, not a production recommendation or a comparison on the old dataset.
+This is a complete executable synthetic development path, not an industry-ready
+product. Scope probabilities remain uncalibrated. Independent generator testing,
+operator-transfer evidence, public-data qualification and shadow deployment are
+not claimed.
