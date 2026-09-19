@@ -123,4 +123,7 @@ a bounded-memory streaming feature service. `IncidentManager` does retain state
 across consecutive chunks; its output includes new closures and active snapshots.
 Upsert incidents by `incident_id`, and persist the manager if restarting a process.
 
-Run the focused checks with `python -m pytest`.
+Run the focused checks with `python -m pytest` after the editable installation.
+Tests own their configuration and do not require your current working directory
+to be the repository root. See [RUN_GUIDE.md](RUN_GUIDE.md) for Windows/macOS setup,
+notebook order, output interpretation and rerunning an experiment.

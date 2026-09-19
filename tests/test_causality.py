@@ -3,7 +3,6 @@
 import numpy as np
 import pandas as pd
 import pytest
-from optical_anomaly.generator import GeneratorConfig, generate
 from optical_anomaly.adapter import TelemetryAdapter
 from optical_anomaly.validation import DataValidator
 from optical_anomaly.features import FeatureEngineer, FEATURES
@@ -32,14 +31,14 @@ def test_adapter_units_and_past_only_resampling():
         adapter.transform(pd.concat([native, native.iloc[:1]]))
 
 
-def test_feature_causality_offset_invariance_and_missing_warmup():
-    native, _ = generate(GeneratorConfig(entities=1, days=8, missing_probability=0))
-    data = DataValidator().transform(TelemetryAdapter().transform(native))
-    end = native.time.iloc[1000]
+def test_feature_causality_offset_invariance_and_missing_warmup(clean_telemetry):
+    data = clean_telemetry
+    start = data.timestamp.min()
+    end = start + pd.Timedelta(days=1)
     engineer = FeatureEngineer().fit(data.loc[data.timestamp < end])
     original = engineer.transform(data)
     modified = data.copy()
-    cut = native.time.iloc[1200]
+    cut = start + pd.Timedelta(hours=36)
     modified.loc[modified.timestamp >= cut, "value"] -= 5
     changed = engineer.transform(modified)
     pd.testing.assert_frame_equal(
@@ -53,16 +52,22 @@ def test_feature_causality_offset_invariance_and_missing_warmup():
     np.testing.assert_allclose(
         original[FEATURES], shifted[FEATURES], atol=1e-9, equal_nan=True
     )
-    rx_index = data.index[data.metric_name.eq("rx_power_dbm")][1100]
+    missing_time = start + pd.Timedelta(hours=30)
+    rx_index = data.index[data.timestamp.eq(missing_time)]
     missing = data.copy()
     missing.loc[rx_index, "value"] = np.nan
     result = engineer.transform(missing)
-    assert result.cusum.iloc[1100:1113].isna().all()
+    recovery_time = missing_time + pd.Timedelta(
+        minutes=(engineer.window + 1) * engineer.interval_minutes
+    )
+    warming_up = result.timestamp.between(missing_time, recovery_time, inclusive="left")
+    assert result.loc[warming_up, "cusum"].isna().all()
+    assert result.loc[result.timestamp.eq(recovery_time), "cusum"].notna().all()
 
 
-def test_unknown_entities_abstain():
-    native, _ = generate(GeneratorConfig(entities=1, days=8))
-    data = DataValidator().transform(TelemetryAdapter().transform(native))
-    engineer = FeatureEngineer().fit(data.loc[data.timestamp < native.time.iloc[1000]])
+def test_unknown_entities_abstain(clean_telemetry):
+    data = clean_telemetry
+    fit_end = data.timestamp.min() + pd.Timedelta(days=1)
+    engineer = FeatureEngineer().fit(data.loc[data.timestamp < fit_end])
     unknown = data.assign(entity_id="new")
     assert engineer.transform(unknown)[FEATURES].isna().all().all()

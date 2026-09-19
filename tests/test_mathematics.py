@@ -24,3 +24,25 @@ def test_mathematical_definitions():
     np.testing.assert_allclose(
         negative_cusum(np.array([0, -1, -2]), np.zeros(3), 0.25), [0, 0.75, 2.5]
     )
+
+
+@pytest.mark.filterwarnings("error")
+@pytest.mark.parametrize(
+    "values, expected",
+    [
+        (np.array([]), (np.nan, np.nan, np.nan)),
+        (np.full(4, np.nan), (np.nan, np.nan, np.nan)),
+        (np.array([1.0, np.nan]), (np.nan, np.nan, np.nan)),
+        (np.array([1.0, np.inf]), (np.nan, np.nan, np.nan)),
+        (np.zeros(4), (np.nan, 0.0, 0.0)),
+        (np.ones(4), (0.0, 0.0, 0.0)),
+    ],
+    ids=["empty", "all_missing", "partly_missing", "infinite", "zero", "constant"],
+)
+def test_degenerate_windows(values, expected):
+    actual = (
+        coefficient_of_variation(values),
+        lag_one(values),
+        entropy(values, np.array([-np.inf, 0.5, np.inf])),
+    )
+    np.testing.assert_allclose(actual, expected, equal_nan=True)
