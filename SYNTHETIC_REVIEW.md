@@ -1,175 +1,157 @@
-# Synthetic PON pipeline: method, evidence and implementation
+# A pragmatic optical-loss detection workflow
 
-19 September 2026. Implemented on `codex/branch-2`; the original `main` branch
-is untouched. The implementation section below supersedes the initial v5 baseline
-workflow described later in this document. This document describes the implemented stage. Branch 2 contains only
-this workflow; the earlier roadmap and implementation remain in Git history.
+19 September 2026. Branch `codex/branch-2`; `main` is unchanged.
 
+## Decision: fewer mechanisms, better measurement of errors
 
-## Current implementation: the explicit adapter and connected workflow
+The goal is useful early warning of sustained optical deterioration. This is a
+narrower, testable target than detecting every telecom anomaly. The primary model
+is a robust per-device reference plus EWMA. Isolation Forest remains a challenger,
+not a mandatory extra production model. No algorithm can reliably predict a
+sudden failure without an observable precursor.
 
-The supplied September 10 approach document describes a research programme through
-operator deployment. The implemented path is generation → validation → adapter →
-canonical pack → training-only EDA → causal features → evidence channels → frozen
-calibration → development assessment → incident queue → qualification → locked
-final assessment or frozen future inference. Public integration remains out of scope.
+| Keep | Simplify or remove | Why |
+|---|---|---|
+| Reproducible generator and physical checks | Do not rebuild the simulator again | Its separation of physics, measurement and truth is useful |
+| Explicit adapter | Four canonical fields, no mapping YAML | The model needs time, identity and two optical powers |
+| EDA, missingness and seasonality inspection | Three notebooks instead of five | Follow the actual data-science decisions |
+| Per-device normalisation and causal smoothing | Remove the separate feature framework | The few features fit directly beside the scoring calculation |
+| Static and Isolation Forest benchmarks | Remove combined channels and portfolio selection | No demonstrated incremental benefit justifies the extra layers |
+| Chronological evaluation and frozen final assessment | Small saved JSON and one opening marker | Prevent accidental leakage without an experiment-ledger framework |
+| Warning persistence and recovery | Remove topology localisation and queue ranking | These require operational evidence and are separate from detection |
+| Focused statistical tests | Remove tests of deleted infrastructure | Protect meaningful behaviour without maintaining unused abstractions |
 
-### Mapping the document to executable components
+The previous expanded implementation is preserved in
+[Git history](https://github.com/LiliDopidze/anomaly_detection/tree/74ae8a86dcd24afb43170bc7379eab6f0f0e6eac).
+Generated local datasets and outputs are preserved too.
 
-| Document requirement | Implementation and remaining limit |
-|---|---|
-| Reviewed native mappings | `adapter.py` and `configs/adapter.yml`; explicit fields, units, kinds and vendor overrides |
-| Quality codes and counter resets | Cell-level quality table; no cumulative FEC difference across a gap, reset or kind change |
-| Time and topology | UTC normalisation with explicit local timezone; effective-dated memberships; unknown entities and overlapping memberships rejected |
-| Operational alarms | Reviewed codes map to `onu_power_loss` or `loss_of_signal`; unknown codes fail; no free-text matching |
-| Separate truth | Generator output is transient; only observables enter `data/`; evaluation labels go to the separate `evaluation/` root |
-| Blind reconstruction | Adapter test rebuilds identical packs after removing source labels |
-| Cadence, episodes and gaps | Explicit missing rows; return-time classification using uptime and reboot continuity; restart episodes |
-| EDA decisions | Daily seasonal approval and profiles use the training slice only; timezone, support and decisions saved |
-| Causal features | Past-only rolling deviations, interval FEC rate/nonzero indicator, directional power changes and asymmetry, frozen daily residuals |
-| Independent evidence channels | Robust residual, drift, peer, common mode, silence and inventory margin; residual-feature Isolation Forest challenger |
-| Status-quo comparator | Declared static receive-power limit with the same persistence/recovery; no claim of reproducing an actual operator's rules |
-| Thresholds and portfolio | Empirical daily block maxima with support checks; fixed rules for margin, silence and comparator; combined thresholded-evidence portfolio |
-| Label-free operating points | Choices are written and hashed before the first development truth read |
-| Single scoring implementation | Saved-model development replay must equal original scores exactly; inference and final scoring use the same function |
-| Incidents | Port/quiet-period consolidation, explicit membership and actual last-member decision timestamp |
-| Disposition | Canonical power-event share across the scope; available even when some events belong to non-alerting members |
-| Scope ranking | Conditional single-fault likelihoods over unique observable footprints, top candidates and structural ambiguity |
-| Development selection | Workload/recall/coverage gates; simplest adequate declared candidate; STOP if none qualifies |
-| Capability reports | Per-mechanism recall with Wilson intervals and estimability flag; current queues and matching outcomes |
-| Governance | Frozen code/configuration/package/input fingerprints, artifact checksums, selection ledger and one-opening holdout ledger |
-| Future inference | A qualified frozen model consumes a new canonical pack without opening truth; overlap with the experiment window is refused |
+## Model and features
 
-### Deliberate differences from the older approach
+For each ONT and supported optical signal, fit a reference median `m` and robust
+spread `s = max(1.4826 * MAD, 0.15 dB)`. Use only the reference period. At time t:
 
-The document's twenty-one steps are not all software acceptance tests. Several
-require independent data, a PON engineer or operator participation. The following
-are explicitly **not completed evidence gates**:
+- Signed deterioration: `z[t] = (m - power[t]) / s`.
+- Smoothed deterioration: `u[t] = (1-alpha)*u[t-1] + alpha*z[t]`.
+- `alpha = 1 - exp(-poll_interval / smoothing_duration)`; default duration one hour.
+- Main score: maximum of the available downstream and upstream smoothed scores.
 
-- Physical realism calibrated to operator measurements, four simulated operator
-  populations, directional mechanism expansions, power-fault labels and re-homing
-  scenarios in the generator. The adapter accepts effective-dated topology and
-  reviewed events; the current generator does not establish their field accuracy.
-- Independent sealed-generator qualification, leave-one-operator-out capability,
-  graded-injection power curves and comparisons with externally tuned algorithms.
-- Calibrated localisation probabilities, inferred topology corrections and
-  performance against labelled power-loss events. Current rankings use declared
-  hit/background assumptions, not fitted field probabilities.
-- Public-data and partner shadow-deployment gates.
+These are four derived features: downstream/upstream signed deviation and their
+two EWMAs. Only the two EWMAs determine the main score. Isolation Forest uses all
+four with training-only median imputation. Device IDs, topology, fault labels,
+impact times and other simulator fields are never model features.
 
-Sparse-tail generalised Pareto fitting is not enabled: small support does not
-justify inventing a stable tail estimate. Unsupported thresholds fail closed.
-Daily maxima reduce row-level pseudo-replication but do not establish independent
-blocks or a conformal coverage guarantee. Weekly profiles and temperature
-compensation are not fitted by default. These are optional refinements needing
-support and incremental-value evidence, not requirements for running the pipeline.
+The reference stays fixed so slow degradation is not learned away. At least 100
+readings support a reference signal; an unseen device or two missing signals
+produce no score. A missing reading or a gap greater than 1.5 polling intervals
+resets smoothing. The next valid value starts the new smooth; warnings still need
+two successive valid high scores. Longer history is needed to judge whether the
+reference covers seasonal regimes; 100 readings is only a support safeguard.
 
-A filesystem allowlist and separate roots protect against accidental label reads.
-They are **not** an OS security boundary: this local process still has permissions
-to other folders. A strict truth-isolated modelling environment requires a separate
-account/container or unmounted storage. The blind-rebuild test proves adapter
-independence from labels, not infrastructure access control. Ledgers similarly
-prevent accidental reuse; an administrator could edit their files.
+Threshold = calibration-score median + six robust standard deviations, with a
+minimum score of three for EWMA. This is an empirical operating-point heuristic,
+not a six-sigma false-alarm guarantee. Serial dependence, mixed devices, faults
+in calibration and taking a maximum all prevent that interpretation. The normal
+reference and calibration periods must be mostly healthy. Contamination and long
+seasonal changes require operator review and additional stress tests.
 
-### Data contract and adapter behaviour
+Two highs open a warning at the second reading, never backdated. Two lows below
+the midpoint of calibration median and threshold close it. Short missing periods
+preserve an open warning but clear pending confirmation counts. After six hours
+without a valid score it closes at the last valid observation, labelled `gap`;
+this is administrative closure, not evidence of recovery. Silence itself is not
+an optical-loss detection. Coverage and missingness must remain visible.
 
-A pack has exactly six files: `telemetry.parquet`, `inventory.parquet`,
-`events.parquet`, `quality.parquet`, `adapter_audit.json`, and `manifest.json`.
-The observable telemetry keeps the ten declared metrics in their canonical units.
-Topology carries only mapped inventory attributes, including simulated receiver
-sensitivity; it does not carry latent path loss or injected fault parameters.
-The absence of events produces an empty typed event table, not fabricated alarms.
+EWMA's sensitivity to small persistent shifts is established statistical process
+control practice: [NIST EWMA guidance](https://www.itl.nist.gov/div898/handbook/pmc/section3/pmc324.htm).
+The smoothing duration, noise floor, confirmation counts and recovery policy are
+engineering choices, not values established for this operator. Fit-only-on-past
+preprocessing follows [scikit-learn leakage guidance](https://scikit-learn.org/stable/common_pitfalls.html).
 
-Mappings do not guess units or semantics. For example, mW power becomes
-`10*log10(mW)` dBm, watts first become mW, and cumulative corrected-codeword
-counts become adjacent-interval differences. Negative deltas, missing predecessors,
-resets and gaps invalidate that interval. Unknown columns, duplicate observations,
-unknown alarm codes, ambiguous local timestamps and off-cadence readings are refused.
-Missing or invalid numeric observations retain explicit quality codes.
+## Seasonality and company transfer
 
-Company independence comes from this stable contract and local label-free
-calibration. It is not a promise that one model's thresholds or seasonal profiles
-work unchanged at another operator. The supplied mapping must be reviewed against
-each actual source, particularly FEC units and alarm semantics.
+Notebook 1 plots training-only time traces and device-centred daily profiles.
+We do not automatically remove a fitted daily curve: that extra model must earn
+its place by reducing false alarms on later periods while preserving fault
+sensitivity. The current spread absorbs some normal variation, but it cannot
+guarantee protection from annual change or a new operating regime. The 90-day
+simulation cannot establish annual realism.
 
-### Features, decisions and operational semantics
+The adapter makes field names, dBm/mW/W conversion and local timezone explicit.
+Local references remove fixed link-budget offsets; tests verify offset invariance
+after refitting. This is portability of a method, not evidence of zero-shot transfer.
+Cadence, reference dates, measurement resolution, receiver classes and acceptable
+alert workload remain company-specific. The illustrative static −27 dBm limit
+must be replaced by actual receiver specifications when evaluating an operator.
 
-The baseline is the prior median/IQR feature calculation. Additional features are
-frozen daily residuals where population evidence supports seasonality, an FEC
-nonzero indicator, downstream/upstream trailing changes and their asymmetry.
-Isolation Forest uses residual features instead of raw level features. The
-classification of a preceding gap is available only when a reading returns;
-silence itself is available immediately from the current cadence grid.
+The batch API accepts mapped measurements directly. It needs historical context
+for smoothing and does not persist live warning state across separate calls.
+Live scheduling, notifications and ticket integration are intentionally absent.
 
-CUSUM holds its state across missing reports and resets on observed device restarts.
-Peer and common-mode evidence use contemporaneous splitter measurements with a
-minimum group size. Silence compares the target splitter's missing fraction with
-reporting by the rest of its OLT, suppressing whole-collector outages. Optical margin
-uses explicitly supplied inventory sensitivity. Fixed-rule thresholds are not
-selected using fault labels.
+## Evaluation that answers the operational question
 
-Channel thresholds are independent; the full portfolio combines their exceedance
-indicators before persistence/recovery. Threshold verification conservatively
-counts entity alerts. Development metrics count consolidated queue cases, so these
-are different workload quantities, explicitly reported. Case matching uses the
-last member's decision time: later membership never earns backdated detection
-credit. Cases matching no fault, including duplicates, count against workload.
-Boundary events are excluded and reported as in the original evaluator.
+The chronological split is 40% reference fit, 30% threshold calibration, 15%
+development, 15% final assessment. Settings are written before development labels
+are scored. Code/data/model fingerprints and an explicit one-opening marker guard
+against accidental final-test reuse; they are not security controls. Generator
+structural validation may inspect the complete fixture, but held-out detector
+performance is not used for development.
 
-Incident consolidation is limited to a PON port and a quiet window. Ranking is a
-single-fault hypothesis model over observed alert membership, not causal diagnosis.
-Identical topology footprints share one hypothesis with equivalent scope names,
-so duplicated inventory levels do not multiply evidence. The reported probability
-belongs to that footprint equivalence class and is not calibrated confidence.
-Simultaneous independent faults, missing topology and collector ambiguity can
-invalidate that simple interpretation. Power disposition is a routing heuristic;
-it is not counted as validated power-loss detection.
+Faults fully contained in the evaluation interval are eligible. An alert must
+start during the physical fault interval on an affected device. Maximum-cardinality
+one-to-one matching avoids counting one warning as several detected faults.
+Overlapping faults can make attribution ambiguous; this is association, not proof
+of the physical cause. Boundary faults and warnings starting within them are
+reported separately. A warning starting before a later fault is not excused just
+because its duration overlaps that fault.
 
-### Reproducibility and acceptance
+Report detected/missed events, onset delay, warnings before simulated impact,
+false alarms per monitored device-day, duplicate warnings, total warnings and
+score coverage. Positive lead-time medians describe successes only; early recall
+uses all eligible impacting faults in its denominator. Duplicates include multiple
+ONT warnings for one shared fault and repeated warnings during the same fault.
+They remain real workload. Poisson/Wilson intervals are descriptive: shared faults
+violate independent-event assumptions. We do not inflate point-level recall by
+crediting every timestamp in an event after one detection.
 
-`configs/pipeline.yml` resolves all paths. Preparation and modelling refuse changed
-upstream inputs or existing run outputs. A run saves the resolved policy, package
-versions, source hashes, canonical manifest hash, model, seasonal decisions,
-label-free threshold choices and development scores. Replaying the saved model
-must reproduce those scores exactly before evaluation proceeds.
+## Observed development evidence
 
-The selection ledger is written before reading development truth. The holdout
-ledger is written before reading final truth and remains outside the result
-folder, so deleting results does not reopen the test. The current holdout evaluates
-only the frozen selected candidate, not the older document's three-configuration
-research comparison. No holdout is opened automatically by the CLI or notebooks.
-Future inference refuses observations overlapping the experiment window.
+All results below use unchanged one-hour smoothing and sensitivity six. All three
+detectors share warning/recovery logic, but their operating points are not matched
+to identical workload and the comparators are not exhaustively tuned.
 
-Tests include unit conversion, vendor overrides, counter gaps/resets, DST ambiguity,
-blind rebuilding, unknown-field/alarm rejection, dated memberships, collector-vs-group
-silence, topology ambiguity, power disposition, 30 informative causal prefix checks,
-saved-score replay, stale-artifact rejection, ledger reuse prevention and inference
-while the evaluation-truth directory is unavailable. Small integration fixtures use
-explicitly permissive gates only to exercise positive selection and holdout paths;
-the default scientific experiment does not inherit those permissive settings.
+| Default scenario | Faults detected | False alarms | Duplicate warnings | Total warnings | Before impact |
+|---|---:|---:|---:|---:|---:|
+| Robust EWMA | 36/40 | 2 | 62 | 161 | 3/9 |
+| Isolation Forest | 36/40 | 18 | 63 | 174 | 3/9 |
+| Static power limit | 11/40 | 0 | 27 | 54 | 3/9 |
 
-### Expanded-pipeline development result
+EWMA detected 9/12 abrupt, 13/13 gradual and 14/15 intermittent faults. It warned
+before impact for all three impacting gradual events, but not the other six
+impacting faults. Median lead time among its three successful early warnings was
+17.75 hours. Three examples do not establish reliable prediction. Remaining
+warnings outside the table's matched/false/duplicate categories concern boundary
+faults; see the comparison CSV for their counts.
 
-The 90-day synthetic run has 40 fully contained development faults. On consolidated
-case metrics, robust residuals detect 24/40, Isolation Forest 30/40, static rules
-9/40, and the combined portfolio 19/40. Their unmatched case rates are respectively
-15.43, 20.06, 6.94 and 21.60 per 1,000 calendar entity-days. No candidate passes all
-configured gates; the final test remains unopened.
+| Additional scenario | EWMA detected | EWMA false alarms | IF detected | IF false alarms |
+|---|---:|---:|---:|---:|
+| New seed, 48 ONTs | 17/19 | 2 | 19/19 | 19 |
+| More noise and missing polls | 20/23 | 1 | 19/23 | 1 |
+| Hourly observations | 17/19 | 2 | 17/19 | 1 |
+| No injected faults | 0/0 | 0 | 0/0 | 3 |
 
-Adding channels did not automatically improve the combined portfolio. Persistent
-channels can merge a long sequence of alerts into a broad case, moving its final
-membership decision later and reducing matching credit. That trade-off is visible
-rather than hidden by backdating. These are development diagnostics, not evidence
-that the combined system is better than the simpler detector. The next modelling
-question is incident fragmentation versus over-consolidation, alongside whether
-the assumed total-alert budget is feasible under enriched synthetic prevalence.
+These runs support retaining EWMA as an understandable starting point; IF remains
+worth comparing and sometimes detects more events. Zero false alarms in one
+healthy synthetic run does not imply a zero field rate. Shared-event duplicates
+are still substantial. The final performance period has not been opened.
+The changed features and warning policy mean these figures are not a direct
+algorithmic improvement claim over the earlier expanded pipeline.
 
-## Historical v5 generator review and first baseline
-
-The remaining sections record the generator audit and initial v5 baseline, before
-the explicit adapter and operational extensions above. Their numerical assumptions
-still describe the generator. Their five-signal model results are historical and
-must not be presented as results of the expanded pipeline.
+Next evidence to obtain: normal-regime changes, contaminated calibration and
+seasonal shifts; more independent seeds and weaker gradual loss; then representative
+operator measurements and incident records. Fix the false-alarm budget and minimum
+useful lead time with the operator before claiming success. Add FEC, explicit
+seasonal correction or topology grouping only when error analysis demonstrates a
+specific missing capability and a later-period comparison shows benefit.
 
 ## Assessment of the submitted generator
 
@@ -241,7 +223,7 @@ implementation remains available in Git history for comparison.
 | Received power = launched power − link losses | Optical link-budget practice in [1] | Feeder/drop distributions, connector losses, attenuation coefficients and receiver thresholds are illustrative |
 | RS(255,239) framing assumption | ITU-T G.984.3 amendment [2] | Always-on coding, full-rate opportunities and independent errors simplify an actual device counter |
 | Optical power, temperature and bias are useful observations | Industry monitoring practice [3, 4] | Exact noise, thermal coefficients, accuracy and resolution must be measured for a real source |
-| Time-aware EDA and chronological validation | Forecasting practice [5] | 40/15/15/15/15 split fractions are engineering choices |
+| Time-aware EDA and chronological validation | Forecasting practice [5] | 40/30/15/15 split fractions are engineering choices |
 | Fit preprocessing only on training observations | scikit-learn guidance [6] | The small baseline models and their fixed settings are initial choices |
 | Avoid misleading benchmark construction and metrics | TSB-AD [7] | Our event-matching policy is explicitly chosen for this application, not mandated by that paper |
 
@@ -330,158 +312,6 @@ it is not complete causal attribution. The 0.5 threshold is an assumed service
 proxy, not an SLA. The current model comparison evaluates detection, not a
 validated prediction of customer impact.
 
-## Data and features
-
-The observable table contains timestamp, ONT identifier and ten measurements:
-
-| Measurement | Purpose / semantics |
-|---|---|
-| ONT receive power, OLT receive power | Downstream/upstream loss detection |
-| ONT transmit power, bias current | Device operating context and benign variability |
-| Temperature | EDA, dependency and seasonal checks |
-| BER | Noisy downstream bit-error estimate; diagnostic context |
-| FEC count | Corrected codewords in the interval, never a cumulative counter |
-| Throughput | Seasonal load and assumed service degradation; diagnostic context |
-| Uptime, reboot count | Device continuity/reset audit; reboot count is cumulative |
-
-Five signals enter the initial models: both received powers, transmit power,
-bias current and `log1p(FEC_count / interval_seconds)`. Each supplies its level
-and two past-only robust deviations, over 6 and 24 hours: **15 features**.
-A deviation uses the past-window median and IQR/1.349 with a measurement-scale
-floor. Lower receive power is suspicious, higher FEC is suspicious, and transmit
-power/current changes are two-sided. Temperature, throughput, BER, uptime and
-reboots are retained for audit; they do not silently add more model features.
-
-Windows exclude the current sample and require at least half their expected
-history, with a four-observation minimum. There is no forward-filling across
-outages. Less than 80% available deviation features means abstention. Isolation
-Forest uses training-only median imputation for the remaining gaps; the robust
-baseline takes the maximum available directional deviation. Entity identity,
-vendor, sensitivity, distance and fault properties are not predictors.
-
-The v5 loader is the narrow adapter for this stage. Its input is the explicit
-observable Parquet contract. It does not claim compatibility with arbitrary
-vendor files or the old v4 canonical pack. Later adapters should map names,
-units, directions, cadence and counter semantics to this contract, then pass
-invariant checks. Company independence means a common measurement contract and
-recalibration process, not universal thresholds or vendor-independent accuracy.
-
-## Development and evaluation protocol
-
-The chronological roles are 40% training, then 15% each for calibration,
-verification, development and final evaluation. Normal features may use earlier
-observations across boundaries, as in live operation. Parameters are not fitted
-on later partitions. Incidents reset at partition boundaries, a conservative
-choice that should be remembered when interpreting missed boundary events.
-
-Threshold candidates are quantiles of per-entity daily score maxima, requiring
-80% daily score coverage and at least five expected tail blocks. This reduces
-row-level pseudo-replication; it does not establish independence of entities or
-days. Verification checks total alert burden without fault labels. Development
-checks recall, score coverage and unmatched incident burden. A model may qualify
-only if all configured gates pass; otherwise no selected configuration is saved.
-The current gate values are illustrative engineering limits, not operator SLAs.
-In particular, the verification limit is total alerts, whereas the development
-limit is unmatched alerts. Enriched event prevalence can make the total-alert
-limit infeasible even for useful detection. Revise operating policies explicitly
-when defining a target population; do not change the simulator to pass them.
-
-Two consecutive exceedances open an incident at the second sample, without
-backdating. Two recovery samples close it. Missing scores or a cadence gap reset
-state. There is no cooldown or topology incident merging in this first baseline;
-fragmentation therefore remains visible in workload metrics.
-
-The existing deterministic maximum-cardinality matching algorithm is reused.
-An incident beginning within a fault interval on an affected ONT is a candidate;
-one incident matches at most one fault and vice versa. These are temporal
-associations, not proof of causation. Repeated alerts for a true event count
-against unmatched workload, so “nuisance” here includes duplicates and is not
-identical to the number of false-positive physical causes. Fully contained
-faults are eligible; boundary faults and related alerts are reported separately.
-Recall includes unobservable events. Prompt detection is within 24 hours of the
-visibility proxy, reported separately from event recall.
-
-Wilson recall intervals and Garwood/Poisson rate intervals reuse existing tested
-utilities. Shared faults, serial dependence and repeated alerts violate their
-independence assumptions. They are diagnostic uncertainty summaries, not
-certified confidence bounds. Independent simulated network replications and
-cluster-aware intervals are needed before any stronger statistical claim.
-
-Final evaluation is off by default. A qualified frozen configuration, unchanged
-dataset checksums, unchanged pipeline source and unchanged saved model/threshold
-files are required. The final output directory cannot already exist. These are
-accidental-misuse safeguards; a user with filesystem access can still reopen
-truth, and must not retune against the final period.
-
-## Validation performed
-
-The default run produced 805,739 observed rows out of 829,440 scheduled rows.
-All 18 structural checks passed. They cover integrity, identities, topology,
-physical count bounds, monotonic service effect, model/truth separation,
-chronological uniqueness, value ranges and label timing. Descriptive metric and
-seasonal summaries are restricted to the first 85%; structural integrity checks
-may inspect the complete generated file.
-
-Healthy-only, another seed, and noisier hourly-cadence scenarios also passed
-invariants. They test robustness of the implementation, not calibrated realism.
-Unit tests check reproducibility, OU variance/correlation at two cadences,
-physical invariance under changes to sensing/collection, causal features,
-gap handling, corrected-codeword probabilities and overlapping-event matching.
-A separate 100-seed event-sampling audit produced the following comparisons:
-
-| Quantity | Prescribed | Empirical |
-|---|---:|---:|
-| Events per run, mean | 301.602 | 301.080 |
-| Events per run, variance | 301.602 | 299.852 |
-| Log duration mean | 3.5835 | 3.5825 |
-| Log duration standard deviation | 0.7000 | 0.6976 |
-| Log loss mean | 1.0986 | 1.0892 |
-| Log loss standard deviation | 0.7000 | 0.6976 |
-| Fractional onset mean | 0.5000 | 0.5000 |
-
-These results cover 30,108 events with fixed topology and independently seeded
-fault samples. They check implementation of the assumed laws, not field realism.
-All five active notebooks also executed successfully, with final evaluation off.
-The retained pipeline and evaluation-helper tests pass. Tests specific to
-the removed workflow have been removed too. Low-support event groups are flagged;
-no detector-accuracy band is a synthetic-data acceptance condition.
-
-On the default development interval, the robust baseline detected 27/40 eligible
-faults (67.5%) and Isolation Forest 30/40 (75%). Their unmatched incident rates
-were 37.8 and 34.7 per 1,000 calendar entity-days. Neither qualified under the
-configured workload limits. **No model was selected and the final evaluation
-was not opened.** This is a diagnostic baseline, not a claim of improvement over
-v14: the datasets and contracts differ.
-
-The next scientific priorities are calibration against operator distributions,
-paired sensitivity experiments varying one assumption at a time, repeated
-network seeds, and distinguishing alert fragmentation from genuine unrelated
-alerts. Seasonal conditioning, topology grouping and added model complexity
-should follow those findings. Synthetic performance alone cannot establish
-field precision, incident prevalence, customer impact or commercial value.
-
-## Files and responsibilities
-
-| File | Responsibility |
-|---|---|
-| `configs/synthetic.yml` | Generator scenario, rates, noise and output path |
-| `configs/synthetic_experiment.yml` | Baseline settings, workload/coverage gates and paths |
-| `src/telco_anomaly/synthetic.py` | Topology, named random streams, physical state, measurement process, truth and manifest |
-| `src/telco_anomaly/synthetic_validation.py` | Hard invariants and separate descriptive reports |
-| `src/telco_anomaly/synthetic_pipeline.py` | Observable-only loading, causal features, baselines, incidents, evaluation and freeze checks |
-| `src/telco_anomaly/evaluation.py` | Only the matching and uncertainty functions used by this pipeline |
-| `tests/test_synthetic_stage.py` | Tests of statistical meaning and temporal isolation |
-| Five root notebooks | Readable sequence from generation through sealed final evaluation |
-| `data/`, `outputs/` | Local generated files and run reports, excluded from Git |
-
-Each dataset has observable Parquet, topology, fault registry, fault/entity
-intervals, service windows, simulation diagnostics and a manifest. Topology
-contains latent parameters for audit, so model loading deliberately excludes it.
-The manifest records configuration, package versions, source hash and file
-checksums. Generation refuses to overwrite a directory and uses a staging
-folder before publishing completed files. Exact reproduction assumes the same
-code, configuration and numerical-library versions; changing horizon/cadence
-is a new experiment, not a promised prefix-identical continuation.
 
 ## References
 

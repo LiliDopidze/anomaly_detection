@@ -17,13 +17,8 @@ from telco_anomaly.synthetic import (
     sample_faults,
     sha256,
 )
-from telco_anomaly.synthetic_pipeline import (
-    build_features,
-    evaluate,
-    make_incidents,
-)
+from telco_anomaly.evaluation import evaluate
 from telco_anomaly.synthetic_validation import validate_dataset
-from telco_anomaly.pipeline import run_holdout
 
 
 @pytest.fixture
@@ -90,47 +85,6 @@ def test_corrected_codewords_have_physical_probability():
     assert p[3] < p[2]
 
 
-def test_features_are_causal_and_do_not_bridge_missing_history():
-    n = 400
-    data = pd.DataFrame(
-        {
-            "timestamp_utc": pd.date_range(
-                "2025-01-01", periods=n, freq="15min", tz="UTC"
-            ),
-            "ont_id": "A",
-            "rx_power_dbm": -20.0,
-            "olt_rx_power_dbm": -21.0,
-            "tx_power_dbm": 2.0,
-            "bias_current_ma": 20.0,
-            "fec_count": 0.0,
-        }
-    )
-    before = build_features(data)
-    changed = data.copy()
-    changed.loc[200:, "rx_power_dbm"] = -30
-    after = build_features(changed)
-    pd.testing.assert_frame_equal(before.iloc[:200], after.iloc[:200])
-    assert after.loc[200, "rx_power_dbm__z6h"] > 50
-    gapped = pd.concat([data.iloc[:100], data.iloc[300:]])
-    features = build_features(gapped)
-    assert pd.isna(features.loc[100, "rx_power_dbm__z6h"])
-
-
-def test_incidents_use_actual_decision_time_and_reset_at_gaps():
-    times = pd.to_datetime(
-        [
-            "2025-01-01T00:00Z",
-            "2025-01-01T00:15Z",
-            "2025-01-01T02:00Z",
-            "2025-01-01T02:15Z",
-        ]
-    )
-    scores = pd.DataFrame({"ont_id": "A", "timestamp_utc": times, "robust": 10.0})
-    incidents = make_incidents(scores, "robust", 5, 900)
-    assert incidents.start_ts.tolist() == [times[1], times[3]]
-    assert incidents.end_ts.iloc[0] == times[1]
-
-
 def test_matching_does_not_lose_overlap_event(tmp_path):
     start, end = pd.Timestamp("2025-01-01", tz="UTC"), pd.Timestamp(
         "2025-01-03", tz="UTC"
@@ -161,11 +115,6 @@ def test_matching_does_not_lose_overlap_event(tmp_path):
     metrics, _ = evaluate(tmp_path, incidents, start, end)
     assert metrics["detected"] == 2
     assert metrics["nuisance_incidents"] == 0
-
-
-def test_holdout_requires_selected_model(tmp_path):
-    with pytest.raises(ValueError, match="STOP"):
-        run_holdout(tmp_path)
 
 
 def test_invalid_config_rejected(small_config):
