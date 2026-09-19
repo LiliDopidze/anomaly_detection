@@ -39,3 +39,38 @@ def test_unknown_period_is_not_recovery_and_long_gap_is_explicit():
     closed = manager.process(scores.iloc[10:])
     assert closed.reason.iloc[0] == "telemetry_gap"
     assert closed.end_time.iloc[0] == times[2]
+
+
+@pytest.mark.parametrize("opening_intervals", [1, 2, 3])
+def test_minimum_confirmation_and_threshold_equality(opening_intervals):
+    times = pd.date_range(
+        "2025-01-01", periods=opening_intervals + 3, freq="5min", tz="UTC"
+    )
+    scores = pd.DataFrame(
+        {
+            "timestamp": times,
+            "entity_id": "A",
+            "score": [0.9] + [1.0] * opening_intervals + [0.2, 0.1],
+        }
+    )
+    manager = IncidentManager(
+        high=0.9, low=0.2, opening_intervals=opening_intervals, closing_intervals=1
+    )
+    result = manager.process(scores)
+    # Equality to high does not open; equality to low does not close.
+    assert result.start_time.iloc[0] == times[opening_intervals]
+    assert result.end_time.iloc[0] == times[-1]
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"high": 0.8, "low": 0.8},
+        {"high": 0.7, "low": 0.8},
+        {"opening_intervals": 0},
+        {"closing_intervals": 0},
+    ],
+)
+def test_invalid_policies_are_rejected(policy):
+    with pytest.raises(ValueError):
+        IncidentManager(**policy)

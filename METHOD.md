@@ -91,11 +91,15 @@ ends at the preceding observation. Missing data resets window/state history.
 | Feature | Implemented meaning | Important qualification |
 |---|---|---|
 | CoV | Population SD / absolute mean of linear optical power | dBm is logarithmic, so its CoV is not physically scale invariant |
-| Lag-1 correlation | Centred lag product sum / full centred squared sum | Exact requested estimator; constant windows return zero, a declared convention |
+| Lag-1 correlation | Centred lag product sum / full centred squared sum | Exact requested estimator; constant finite windows return zero; invalid windows return NaN |
 | Negative CUSUM | `max(0, previous + prior_rolling_mean - current - C)` on normalised residuals | C=0.25 is in residual units; rolling means can absorb slow loss |
 | Shannon entropy | `-sum(p*log(p))` using fixed residual bins | Fixed bins preserve comparability; extreme loss can reduce entropy |
 | EWMA acceleration | EWMA of second difference / dt² | Scale-normalised and cadence-aware; differentiation amplifies noise |
 | EWMA slope | EWMA of first difference / dt | Tier 1 uses negative slope; plateaued loss need not maintain a high slope score |
+
+Empty or non-finite windows return NaN for CoV, autocorrelation and entropy.
+Zero-mean CoV is undefined (NaN); constant positive CoV and constant-window
+entropy are zero. These cases are covered by parameterised tests.
 
 Entropy edges are `[-inf,-3,-2,-1,0,1,2,3,inf]` in training-standardised residual
 units. EWMA alpha is `1-exp(-dt/smoothing_hours)`. Both the one-hour memory and

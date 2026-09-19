@@ -5,11 +5,15 @@ import numpy as np
 
 def coefficient_of_variation(values: np.ndarray) -> float:
     """Population CoV; meaningful here on linear power, never on dBm."""
+    if len(values) == 0 or not np.isfinite(values).all():
+        return np.nan
     mean = abs(float(np.mean(values)))
     return float(np.std(values) / mean) if mean > 1e-15 else np.nan
 
 
 def lag_one(values: np.ndarray) -> float:
+    if len(values) < 2 or not np.isfinite(values).all():
+        return np.nan
     centred = values - np.mean(values)
     denominator = float(centred @ centred)
     return (
@@ -18,6 +22,8 @@ def lag_one(values: np.ndarray) -> float:
 
 
 def entropy(values: np.ndarray, bins: np.ndarray) -> float:
+    if len(values) == 0 or not np.isfinite(values).all():
+        return np.nan
     counts, _ = np.histogram(values, bins=bins)
     probabilities = counts[counts > 0] / len(values)
     return float(-np.sum(probabilities * np.log(probabilities)))
