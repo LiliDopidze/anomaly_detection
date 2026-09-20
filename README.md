@@ -217,3 +217,9 @@ The full feature catalogue and source/assumption mapping are in METHOD.md.
 Six-hour optical features require uninterrupted history. Missing readings restart
 that history, which can substantially reduce score coverage. Notebook 02 reports
 coverage, and notebook 04 reports missed faults as well as nuisance alerts.
+
+Notebook 01 includes per-ONT Pearson/Spearman correlations and selected-lag
+autocorrelations, both raw and after daily-pattern removal, alongside seasonality.
+Reports include paired counts and are saved under `eda/`. No cutoff drops features.
+FEC display labels use received/corrected/uncorrectable blocks, with upstream and
+downstream explicit; a block means one FEC codeword per reporting interval.
