@@ -6,7 +6,7 @@ import json
 import joblib
 import pandas as pd
 import yaml
-from .adapter import TelemetryAdapter
+from .sources import synthetic_adapter
 from .validation import DataValidator
 from .generator import GeneratorConfig, generate, make_topology
 from .optics import validate_generated
@@ -142,7 +142,9 @@ def develop(config_path: str | Path) -> Path:
     split = TemporalSplit(*boundaries)
     # Do not even adapt final-period measurements during development.
     telemetry = DataValidator(f"{config.interval_minutes}min").transform(
-        TelemetryAdapter().transform(native.loc[native.time < split.validation_end])
+        synthetic_adapter(["rx_dbm"]).transform(
+            native.loc[native.time < split.validation_end]
+        )
     )
     train = telemetry.loc[telemetry.timestamp < split.train_end]
     engineer = FeatureEngineer(
@@ -259,7 +261,7 @@ def final_evaluation(run: str | Path) -> dict:
         run / "telemetry.parquet", columns=["time", "device", "rx_dbm"]
     )
     telemetry = DataValidator(f"{model['interval']}min").transform(
-        TelemetryAdapter().transform(native)
+        synthetic_adapter(["rx_dbm"]).transform(native)
     )
     features = model["engineer"].transform(telemetry)
     scores = score_detectors(features, model["statistical"], model["forest"])

@@ -19,7 +19,11 @@ def test_adapter_units_and_past_only_resampling():
         }
     )
     adapter = TelemetryAdapter(
-        metrics={"rx": "rx_power_dbm"}, units={"rx_power_dbm": "mW"}
+        timestamp_column="time",
+        entity_column="device",
+        metrics={"rx": "rx_power_dbm"},
+        units={"rx_power_dbm": "mW"},
+        kinds={"rx_power_dbm": "gauge"},
     )
     mapped = adapter.transform(native)
     np.testing.assert_allclose(mapped.value, [-20, -30, -10])

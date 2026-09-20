@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 from optical_anomaly.generator import generate, make_topology
 from optical_anomaly.optics import fec_probabilities, fec_counts, validate_generated
-from optical_anomaly.adapter import TelemetryAdapter
+from optical_anomaly.sources import synthetic_adapter
 from optical_anomaly.validation import DataValidator
 
 
@@ -71,7 +71,7 @@ def test_expanded_adapter_and_count_aggregation():
             field: [np.nan, 2.0, 3.0, 4.0],
         }
     )
-    adapted = TelemetryAdapter().transform(data)
+    adapted = synthetic_adapter(data.columns.drop(["time", "device"])).transform(data)
     assert "upstream_rx_power_dbm" in set(adapted.metric_name)
     aggregated = DataValidator("15min").transform(adapted)
     counts = aggregated.loc[aggregated.metric_name.eq(field)].set_index("timestamp")
