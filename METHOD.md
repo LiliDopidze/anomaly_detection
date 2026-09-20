@@ -218,7 +218,7 @@ tuned synthetic validation results, not evidence of production readiness or of
 benefit from the additional measurements (which are not yet detector features).
 
 The final full development run took about 197 seconds on this machine and wrote
-about 190 MB of run artifacts. These are observations, not Colab resource or timing
+about 190 MB of run artifacts. These are observations, not resource or timing
 guarantees. The synthetic family, known-normal fit/calibration periods, hypothetical
 impact thresholds and individual fault mechanisms still limit generalisation.
 
@@ -285,3 +285,28 @@ Invalid numeric observations become missing. Cumulative counters require an expl
 upstream conversion; no reset behaviour is inferred. Detector requirements are
 checked after adaptation. This separates input portability from demonstrated
 cross-company detection performance.
+
+## Telemetry priorities: evidence review, 20 September 2026
+
+ETSI F5G 011 sections 8.3–8.4 describe optical power, transceiver diagnostics and
+FEC monitoring at OLT/ONU scopes. These are collection capabilities, not a prescribed
+ML feature set. [ETSI specification](https://www.etsi.org/deliver/etsi_gs/F5G/001_099/011/01.01.01_60/gs_F5G011v010101p.pdf).
+
+CableLabs' June 2025 PON operations report covers optical diagnostic information
+and FEC performance monitoring, including distinct bit/byte and codeword counters.
+[Operations report](https://account.cablelabs.com/server/alfresco/0737eca3-84bb-4526-9dfb-22c42ba1c9b8).
+
+Sica et al. (published 11 May 2026) combine OLT monitoring and OTDR traces for PON
+fault detection/localisation and compare a heuristic with ML alternatives. This
+supports complementary observations, but does not establish pre-impact performance
+for our five-minute scalar telemetry detector. The public abstract was reviewed;
+no inaccessible full-text results are claimed.
+[Research article](https://doi.org/10.1364/JOCN.587134).
+
+Our next proposed comparison is downstream Rx alone, then both Rx directions,
+then Tx/Rx relationships, then optional FEC and temperature. This is a project
+recommendation, not an implemented multivariate detector or standard requirement.
+Improve shared-path faults, benign changes, sensor artefacts and receiver diversity
+before simply increasing entity count. Keep raw topology identifiers out of model
+features. A larger synthetic fleet tests scale; it does not establish generalisation
+to another company. No generator or detector behaviour changed in this review.

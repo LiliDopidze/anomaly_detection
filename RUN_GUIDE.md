@@ -1,74 +1,9 @@
-# Run locally or in Google Colab
+# Run locally
 
 The default experiment generates **96 ONTs × 90 days × five-minute samples**:
 2,488,320 rows. No dataset download is needed. The generator emits 14 measurements,
 separate ground truth and a simple topology table. The current detector remains
 the downstream-Rx baseline; added signals are available for EDA.
-
-## Google Colab: the simplest route
-
-1. Open `notebooks/00_colab_start.ipynb` from Branch 2 in Colab. You can use Colab's
-   **File → Open notebook → GitHub**, paste the repository URL below, select
-   `codex/branch-2`, and choose that notebook. Alternatively upload the downloaded
-   `.ipynb` file to Colab.
-
-   Repository: https://github.com/LiliDopidze/anomaly_detection
-
-2. Use a **CPU runtime**. GPU hardware is not used by this pipeline.
-
-3. Run the first code cell. It clones Branch 2 into `/content/anomaly_detection`
-   and installs the project. It reuses an existing checkout rather than silently
-   overwriting it; start a fresh runtime to obtain newer code cleanly.
-
-4. In the output-location cell, set:
-
-   ```python
-   SAVE_TO_DRIVE = True
-   RUN_NAME = "optical_v7_run01"
-   SMALL_SMOKE_RUN = False
-   ```
-
-   Approve the Drive mount when Colab asks. Set `SMALL_SMOKE_RUN=True` only for a
-   quick installation check (8 ONTs, 14 days). Leave it False for the full dataset.
-
-5. Run the remaining cells in order. They generate/check data, fit the model,
-   evaluate validation candidates, show training examples and list output files.
-   The full run takes several minutes; actual time depends on runtime resources.
-
-6. Keep `OPEN_FINAL_TEST=False` while developing. Only enable it once the model
-   and settings are fixed and you deliberately want to inspect final performance.
-
-**Where Colab outputs go:**
-
-| Choice | Exact output folder |
-|---|---|
-| `SAVE_TO_DRIVE=True` | `/content/drive/MyDrive/anomaly_detection/optical_v7_run01/` |
-| `SAVE_TO_DRIVE=False` | `/content/anomaly_detection/outputs/optical_v7_run01/` |
-| Smoke run | Same location, with `_smoke` appended to the run name |
-
-With Drive enabled, open Google Drive → My Drive → anomaly_detection → your run
-folder to find the files. The configuration used by the notebook is temporarily
-written to `/content/optical_run.yaml`; a copy of its settings is saved permanently
-in the run folder as `settings.json`.
-
-Files under `/content` can disappear when Colab recycles the runtime. Drive-mounted
-files persist independently of that runtime. Colab resources are not guaranteed:
-see [Google's Colab FAQ](https://research.google.com/colaboratory/faq.html).
-If memory is constrained, reduce entities/days explicitly; do not silently
-interpret a smoke run as the full experiment.
-
-To download a run without Drive, execute this additional Colab cell:
-
-```python
-import shutil
-from google.colab import files
-
-archive = shutil.make_archive("/content/optical_results", "zip", root_dir=RUN)
-files.download(archive)
-```
-
-The Colab starter is an end-to-end route. Notebooks 01–05 provide the more detailed
-local workflow below. No Drive connection or authorisation is needed locally.
 
 ## Local environment
 
@@ -128,8 +63,6 @@ local workflow below. No Drive connection or authorisation is needed locally.
    | `04_evaluation.ipynb` | Review validation errors; final assessment defaults off |
    | `05_end_to_end_demo.ipynb` | Verify saved-model replay; optional stress tests |
 
-   **Do not run notebook 00 locally**: its setup is specifically for Colab.
-
 Without notebooks, the complete development run is:
 
 ```bash
@@ -144,7 +77,7 @@ For the current local checkout, that is:
 On Windows or another machine, the prefix is wherever you cloned/extracted the repo.
 An absolute `output` path in the YAML saves directly to that path instead.
 
-## Output files in either environment
+## Output files
 
 | File | Contents |
 |---|---|
@@ -192,6 +125,6 @@ current detector without usable downstream Rx. Training also needs sufficient he
 history. The synthetic convenience pipeline uses `synthetic_adapter(["rx_dbm"])`.
 
 For an existing run made before this adapter change, set a fresh `output` in
-`configs/config.yaml` (or a fresh Colab `RUN_NAME`) before running notebooks 02–05.
+`configs/config.yaml` before running notebooks 02–05.
 Preserve old run directories; their frozen code fingerprints intentionally differ.
 Notebook 01 may inspect the existing generated data without retraining its model.
