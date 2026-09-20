@@ -16,60 +16,93 @@ The previous implementation is preserved at
 We retain its principles of separated truth, explicit units, causal calculations,
 missing-data abstention, temporal evaluation and protected final assessment.
 
-## Synthetic data: evidence versus assumptions
+## Expanded generator (v7): evidence versus assumptions
 
-Normal latent Rx power is a device baseline plus a 24-hour sinusoid and stationary
-Gaussian AR(1) residual. For sampling duration dt and correlation time tau:
+The default is **96 ONTs over 90 days at five-minute cadence**: 2,488,320 rows.
+`make_topology` produces one static row per ONT, with OLT, globally unique PON-port
+and splitter IDs. Defaults give 12 splitters, six ports and two OLTs. Membership
+is an illustrative allocation (8 ONTs/splitter, 2 splitters/port, 4 ports/OLT),
+not a prescribed operator design. No operational events, peer detector, historical
+inventory engine or incident grouping is introduced.
 
-`phi = exp(-dt/tau)`
+The 14 measurements are:
 
-`e[t] = phi*e[t-1] + sigma*sqrt(1-phi²)*epsilon[t]`, with `e[0] ~ N(0,sigma²)`.
+| Native field | Meaning / unit |
+|---|---|
+| `rx_dbm` | Downstream receive power at the ONT, dBm |
+| `upstream_rx_dbm` | Upstream receive power at the OLT for that ONT, dBm |
+| `ont_tx_dbm` | ONT transmit power, dBm |
+| `olt_tx_dbm` | Shared PON-port transmit power, dBm |
+| `ont_temperature_c`, `olt_temperature_c` | Optical module temperatures, Celsius |
+| `ber`, `upstream_ber` | Illustrative instantaneous pre-FEC bit error ratios |
+| `{downstream,upstream}_fec_corrected_codewords` | Corrected codewords in the preceding interval |
+| `{downstream,upstream}_fec_uncorrectable_codewords` | Uncorrectable codewords in the preceding interval |
+| `{downstream,upstream}_fec_total_codewords` | Received codeword opportunities in the preceding interval |
 
-This gives stationary variance sigma² and lag-k correlation phi^k. Tests check
-both. Gaussian noise satisfies the requested stationary Gaussian-or-pink choice;
-pink noise is not added without evidence that its extra structure is needed.
-Device phases differ. Independent sensor noise is added after physical state.
-Independent random streams ensure changing collection loss does not redraw the
-faults or their impact times. Missing polls stay missing.
+These measurement categories follow [ETSI GS F5G 011, sections 8.3–8.4](https://www.etsi.org/deliver/etsi_gs/F5G/001_099/011/01.01.01_60/gs_F5G011v010101p.pdf)
+and [ITU-T G.988](https://www.itu.int/rec/T-REC-G.988). Actual device availability,
+accuracy, aggregation and counter semantics must still be mapped explicitly.
+The generator is not a standards-compliance implementation or a calibrated digital twin.
 
-Three mechanisms alter latent power, with a separate repair/end time:
+Received power follows directional link budgets: OLT Tx minus downstream path
+loss, and ONT Tx minus upstream path loss. The path components are related but
+have an assumed wavelength-dependent difference. Each optical-loss fault changes
+both paths, with an assumed upstream multiplier of 1.1. Tx power stays independent
+of the injected path fault. OLT Tx/temperature are shared per port and repeated in
+ONT rows for convenience: they are not independent observations of the OLT.
 
-- Random walk: increments `Normal(-0.15*dt, 0.06²*dt)` dB plus an initial -0.2 dB
-  change. Negative drift does not mean every individual increment is negative.
-- Exponential attenuation: `-0.2 - 0.35*expm1(min(hours/12, 3))` dB. This models
-  accelerating loss in dB followed by a capped loss, not exponential linear power.
-  A pure exponential decay in watts would be linear in dBm.
-- Variance shift: an additional correlated zero-mean Gaussian component with
-  0.5 dB standard deviation. It is a regime anomaly, not necessarily a mean loss
-  or a customer-impacting event.
+Module temperatures have daily patterns and correlated residuals. The OLT also has
+an assumed slow annual component; 90 days cannot validate an annual cycle. Small
+explicit thermal coefficients link temperatures to transmitter power. Missed polls are independent of severity in this revision; loss of remote
+telemetry during severe optical failure is not yet modelled. Stationary
+Gaussian residuals use `phi=exp(-dt/tau)` and innovation SD `sigma*sqrt(1-phi²)`,
+including a stationary initial value. Sensor noise is added after physical state;
+changing `sensor_noise_db` cannot manufacture FEC errors or impact labels.
 
-These rates, amplitudes, caps, device baselines and durations are explicit scenario
-assumptions, not values established by a telecom field study. The long severe
-faults make many cases easier than weak real degradations. The simulator starts
-with a known normal baseline and places separated validation/test events; it does
-not estimate field prevalence, overlapping-fault attribution or shared topology
-failures. All these are future realism tests, not demonstrated capabilities.
+Fault signatures remain negative-drift random walks, accelerating dB attenuation
+and variance shifts. Their duration is now lognormal with a 36-hour median and
+log-SD 0.5, truncated by the scenario boundary. Severity is multiplied by a
+uniform 0.4–1.4 factor. Longer observation windows therefore do not automatically
+create proportionally longer, more severe faults. Faults remain individual-ONT
+scenarios; shared topology faults are deferred. The first 55% is deliberately
+fault-free and two faults per ONT are scheduled into development/final periods.
+These are enriched scenarios, not estimates of real arrival rates or prevalence.
 
-BER is an illustrative clipped monotone mapping of latent optical margin:
-`10**(-9 - (rx_latent - impact_threshold))`, bounded to [1e-12, 0.1]. It is not a
-measured receiver BER curve. It is emitted for inspection but excluded from the
-model, avoiding a redundant simulator-derived confirmation signal. Real BER
-integration needs reviewed counter/measurement semantics and empirical calibration.
-[ITU-T G.984.2](https://www.itu.int/rec/T-REC-G.984.2) supports the importance of
-optical interface budgets and receiver requirements; it does **not** validate this
-BER equation, a universal -27 dBm threshold, or our fault distributions.
+The FEC approximation uses optional GPON RS(255,239) coding: an ideal decoder can
+correct up to eight erroneous byte symbols. GPON rates here are 2.48832 Gbit/s
+downstream and 1.24416 Gbit/s upstream, consistent with
+[ITU-T G.984.3](https://www.itu.int/rec/T-REC-G.984.3). Always-on FEC, full downstream
+coding, equal upstream allocations, omitted framing/burst overhead and independent
+bit errors are simplifying assumptions. This is not an XGS-PON/LDPC counter model.
 
-Ground truth is emitted separately:
+For pre-FEC bit error probability p, symbol error probability is `q=1-(1-p)^8`.
+For `K~Binomial(255,q)`, corrected probability is `P(1<=K<=8)` and uncorrectable
+probability is `P(K>8)`. Joint categorical sampling guarantees corrected plus
+uncorrectable never exceeds total. Corrected counts can fall at severe corruption
+as uncorrectable counts rise. Upstream allocation sums to at most the port line
+rate across its ONTs; downstream broadcast reception is counted separately per ONT.
 
-- `onset_time`: the first sample governed by the changed distribution.
-- `observable_onset_time`: first available reading after an injected effect exceeds
-  twice the baseline physical-noise SD; variance faults use their added SD.
-  This is a declared visibility proxy, not a statistical detectability theorem.
-- `impact_time`: first latent Rx sample below the hypothetical -27 dBm threshold.
-  It can be absent; sensor readout noise cannot manufacture impact.
-- `end_time`: repair/end of the injected mechanism, not the last alert timestamp.
+The assumed BER response is `10**clip(-5-(latent_rx-impact_threshold), -12, -1)`.
+Standards do **not** establish this receiver curve or these scenario thresholds.
+The counters use piecewise-constant physical state over the preceding interval;
+a state change at t first affects counts reported at t+dt. The first row has no
+preceding interval and its counters are missing. Counts are interval totals, not
+cumulative counters, so there are no synthetic resets or reboot events. Coarser
+resampling sums observed interval counts; missing portions remain unobserved and
+must not be interpreted as a fully measured interval. Ratios should use matching
+corrected/uncorrectable and total observations.
 
-A real customer-impact definition requires operator evidence, not this proxy.
+The separate truth log retains distribution-change onset, an observable-onset
+proxy, hypothetical impact and repair time. Impact is the first latent crossing
+of either -27 dBm downstream or -28 dBm upstream, configurable assumptions rather
+than universal receiver limits or customer SLAs. Variance shifts need not cause
+impact. The visibility proxy uses the known injected effect, never model scores.
+
+The adapter accepts the expanded measurements. For this revision the detector
+remains the downstream-Rx baseline: no performance benefit from the added signals
+is claimed until feature ablations demonstrate it. Topology never enters the
+feature matrix. `generation_checks.json` records structural/count invariants;
+passing them demonstrates consistency, not empirical realism.
 
 ## Causal validation and feature mathematics
 
@@ -171,9 +204,30 @@ N. This is an operational proxy, not a guarantee of sufficient statistical power
 - Delay: actual alert emission minus observable-onset proxy, in minutes. Delays are
   reported for detected events; misses remain explicit and are not assigned zero.
 
-## Results and remaining work
+## Current v7 development check
 
-Default validation, 24 faults: the selected Isolation Forest policy (N=6, M=3)
+The full default run completed locally: 2,488,320 telemetry rows, 96 topology rows,
+192 injected faults across development/final scenarios. The 11 generation checks
+passed. Final detector performance assessment remains unopened.
+
+The selected validation policy was Isolation Forest with N=6, M=3. It detected
+95/96 validation faults and warned before impact on 46/46 declared opportunities.
+However, 112 unmatched plus six duplicate incidents produced 68.3 nuisance
+incidents per 1,000 entity-days, above the configured budget of five. These are
+tuned synthetic validation results, not evidence of production readiness or of
+benefit from the additional measurements (which are not yet detector features).
+
+The final full development run took about 197 seconds on this machine and wrote
+about 190 MB of run artifacts. These are observations, not Colab resource or timing
+guarantees. The synthetic family, known-normal fit/calibration periods, hypothetical
+impact thresholds and individual fault mechanisms still limit generalisation.
+
+## Historical v6 results and remaining work
+
+The following figures describe the earlier 24-ONT/28-day generator, **not v7**.
+They are retained for context and must not be compared as a like-for-like dataset.
+
+Earlier validation, 24 faults: the selected Isolation Forest policy (N=6, M=3)
 detected 24/24 and warned before impact on 16/16 declared opportunities. Four
 unmatched incidents correspond to 29.8 nuisance incidents per 1,000 entity-days,
 above the configured budget of five. Combining tiers increased unmatched incidents

@@ -3,28 +3,41 @@
 from dataclasses import dataclass
 import numpy as np
 import pandas as pd
+from .optics import error_telemetry
 
 
 @dataclass(frozen=True)
 class GeneratorConfig:
     seed: int = 42
-    entities: int = 24
-    days: int = 28
+    entities: int = 96
+    days: int = 90
     interval_minutes: int = 5
     noise_db: float = 0.08
+    sensor_noise_db: float = 0.04
     correlation_hours: float = 0.5
     daily_amplitude_db: float = 0.25
     missing_probability: float = 0.02
     impact_threshold_dbm: float = -27.0
     faults_per_entity: int = 2
+    upstream_impact_threshold_dbm: float = -28.0
+    fault_duration_median_hours: float = 36.0
+    onts_per_splitter: int = 8
+    splitters_per_port: int = 2
+    ports_per_olt: int = 4
 
     def __post_init__(self) -> None:
         if self.days < 8 or self.entities < 1 or self.interval_minutes < 1:
             raise ValueError("Need >=8 days, >=1 entity and a positive interval")
         if self.noise_db <= 0 or self.correlation_hours <= 0:
             raise ValueError("Noise and correlation time must be positive")
+        if self.sensor_noise_db < 0 or not np.isfinite(self.sensor_noise_db):
+            raise ValueError("Sensor noise must be finite and nonnegative")
         if not 0 <= self.missing_probability < 1:
             raise ValueError("Missing probability must be in [0, 1)")
+        if min(self.onts_per_splitter, self.splitters_per_port, self.ports_per_olt) < 1:
+            raise ValueError("Topology fan-outs must be positive")
+        if self.fault_duration_median_hours <= 0:
+            raise ValueError("Fault duration must be positive")
         if self.faults_per_entity not in (0, 1, 2):
             raise ValueError("Use zero, one or two separated faults per entity")
 
@@ -58,80 +71,140 @@ def fault_signature(
     raise ValueError(f"Unknown fault signature: {kind}")
 
 
+def make_topology(config: GeneratorConfig) -> pd.DataFrame:
+    """Static lookup only: no topology features, event tables or incident grouping."""
+    entity = np.arange(config.entities)
+    splitter = entity // config.onts_per_splitter
+    port = splitter // config.splitters_per_port
+    olt = port // config.ports_per_olt
+    return pd.DataFrame(
+        {
+            "entity_id": [f"ONT-{i:03d}" for i in entity],
+            "olt_id": [f"OLT-{i:03d}" for i in olt],
+            "pon_port_id": [f"PON-{i:03d}" for i in port],
+            "splitter_id": [f"SPLITTER-{i:03d}" for i in splitter],
+        }
+    )
+
+
+def _port_optics(
+    config: GeneratorConfig, entity: int, size: int
+) -> tuple[np.ndarray, np.ndarray]:
+    port = entity // (config.onts_per_splitter * config.splitters_per_port)
+    rng = np.random.default_rng(np.random.SeedSequence([config.seed, port, 100]))
+    hours = np.arange(size) * config.interval_minutes / 60
+    temperature = 35 + 2 * np.sin(2 * np.pi * hours / 24)
+    temperature += 4 * np.sin(2 * np.pi * hours / (24 * 365.25))
+    temperature += stationary_noise(
+        size, 0.5, np.exp(-config.interval_minutes / 360), rng
+    )
+    transmit = 3 + 0.005 * (temperature - 35)
+    transmit += stationary_noise(size, 0.03, np.exp(-config.interval_minutes / 60), rng)
+    return transmit, temperature
+
+
+def _normal_optics(
+    config: GeneratorConfig, entity: int, size: int, rng: np.random.Generator
+) -> dict[str, np.ndarray]:
+    dt = config.interval_minutes / 60
+    hours = np.arange(size) * dt
+    phase = rng.uniform(0, 2 * np.pi)
+    olt_tx, olt_temperature = _port_optics(config, entity, size)
+    ont_temperature = 38 + 3 * np.sin(2 * np.pi * hours / 24 + phase)
+    ont_temperature += stationary_noise(size, 0.6, np.exp(-dt / 3), rng)
+    ont_tx = 2 + 0.008 * (ont_temperature - 38)
+    ont_tx += stationary_noise(size, 0.03, np.exp(-dt), rng)
+    path_loss = rng.uniform(23, 27) + config.daily_amplitude_db * np.sin(
+        2 * np.pi * hours / 24 + phase
+    )
+    path_loss += stationary_noise(
+        size, config.noise_db, np.exp(-dt / config.correlation_hours), rng
+    )
+    return {
+        "rx_dbm": olt_tx - path_loss,
+        "upstream_rx_dbm": ont_tx - path_loss - rng.uniform(0.4, 1.2),
+        "ont_tx_dbm": ont_tx,
+        "olt_tx_dbm": olt_tx,
+        "ont_temperature_c": ont_temperature,
+        "olt_temperature_c": olt_temperature,
+    }
+
+
 def _inject_fault(
     config: GeneratorConfig,
     entity: int,
     number: int,
     times: pd.DatetimeIndex,
-    latent: np.ndarray,
+    optics: dict[str, np.ndarray],
     missing: np.ndarray,
-    physics: np.random.Generator,
+    rng: np.random.Generator,
 ) -> dict:
     dt = config.interval_minutes / 60
     left, right = [(0.57, 0.72), (0.78, 0.96)][number]
-    onset = int(len(times) * physics.uniform(left, left + 0.02))
-    stop = int(len(times) * right)
+    onset = int(len(times) * rng.uniform(left, left + 0.02))
+    duration = rng.lognormal(np.log(config.fault_duration_median_hours), 0.5)
+    stop = min(int(len(times) * right), onset + max(2, int(duration / dt)))
     kind = ("random_walk", "exponential", "variance_shift")[(entity + number) % 3]
-    delta = fault_signature(kind, stop - onset, dt, physics)
-    latent[onset:stop] += delta
-    crossings = np.flatnonzero(latent[onset:stop] < config.impact_threshold_dbm)
-    # A declared visibility proxy, independent of detector outcomes.
-    effect = np.abs(delta) if kind != "variance_shift" else np.full(len(delta), 0.5)
+    signature = fault_signature(kind, stop - onset, dt, rng)
+    severity = rng.uniform(0.4, 1.4)
+    delta = signature * severity
+    optics["rx_dbm"][onset:stop] += delta
+    optics["upstream_rx_dbm"][onset:stop] += 1.1 * delta
+    crosses = (optics["rx_dbm"][onset:stop] < config.impact_threshold_dbm) | (
+        optics["upstream_rx_dbm"][onset:stop] < config.upstream_impact_threshold_dbm
+    )
+    crossings = np.flatnonzero(crosses)
+    effect = (
+        np.abs(delta)
+        if kind != "variance_shift"
+        else np.full(len(delta), 0.5 * severity)
+    )
     visible = np.flatnonzero((effect >= 2 * config.noise_db) & ~missing[onset:stop])
     return {
         "fault_id": f"F-{entity:03d}-{number}",
         "entity_id": f"ONT-{entity:03d}",
         "fault_type": kind,
         "onset_time": times[onset],
-        "observable_onset_time": (
-            times[onset + visible[0]] if len(visible) else pd.NaT
-        ),
-        "impact_time": (times[onset + crossings[0]] if len(crossings) else pd.NaT),
+        "observable_onset_time": times[onset + visible[0]] if len(visible) else pd.NaT,
+        "impact_time": times[onset + crossings[0]] if len(crossings) else pd.NaT,
         "end_time": times[stop],
     }
 
 
 def _simulate_entity(
-    config: GeneratorConfig,
-    entity: int,
-    times: pd.DatetimeIndex,
+    config: GeneratorConfig, entity: int, times: pd.DatetimeIndex
 ) -> tuple[pd.DataFrame, list[dict]]:
-    dt = config.interval_minutes / 60
     physics = np.random.default_rng(np.random.SeedSequence([config.seed, entity, 0]))
     sensor = np.random.default_rng(np.random.SeedSequence([config.seed, entity, 1]))
     collection = np.random.default_rng(np.random.SeedSequence([config.seed, entity, 2]))
-    level = physics.uniform(-24, -20)
-    phase = physics.uniform(0, 2 * np.pi)
-    latent = level + config.daily_amplitude_db * np.sin(
-        2 * np.pi * np.arange(len(times)) * dt / 24 + phase
-    )
-    latent += stationary_noise(
-        len(times),
-        config.noise_db,
-        np.exp(-dt / config.correlation_hours),
-        physics,
-    )
+    optics = _normal_optics(config, entity, len(times), physics)
     missing = collection.random(len(times)) < config.missing_probability
-    faults = []
-    for number in range(config.faults_per_entity):
-        faults.append(
-            _inject_fault(config, entity, number, times, latent, missing, physics)
-        )
-    measured = latent + sensor.normal(0, config.noise_db / 2, len(times))
-    # Illustrative monotone link-margin response, not a calibrated receiver.
-    ber = np.clip(10 ** (-9 - (latent - config.impact_threshold_dbm)), 1e-12, 0.1)
-    measured[missing], ber[missing] = np.nan, np.nan
-    return (
-        pd.DataFrame(
-            {
-                "time": times,
-                "device": f"ONT-{entity:03d}",
-                "rx_dbm": measured,
-                "ber": ber,
-            }
-        ),
-        faults,
+    faults = [
+        _inject_fault(config, entity, number, times, optics, missing, physics)
+        for number in range(config.faults_per_entity)
+    ]
+    per_port = config.onts_per_splitter * config.splitters_per_port
+    port_start = entity // per_port * per_port
+    members = min(per_port, config.entities - port_start)
+    errors = error_telemetry(
+        optics["rx_dbm"],
+        optics["upstream_rx_dbm"],
+        (config.impact_threshold_dbm, config.upstream_impact_threshold_dbm),
+        config.interval_minutes,
+        members,
+        np.random.SeedSequence([config.seed, entity, 3]),
     )
+    for name in ("rx_dbm", "upstream_rx_dbm", "ont_tx_dbm"):
+        optics[name] = np.round(
+            optics[name] + sensor.normal(0, config.sensor_noise_db, len(times)), 3
+        )
+    # Port Tx/temperature are shared measurements, repeated by ONT for convenience.
+    for values in (*optics.values(), *errors.values()):
+        values[missing] = np.nan
+    frame = pd.DataFrame(
+        {"time": times, "device": f"ONT-{entity:03d}", **optics, **errors}
+    )
+    return frame, faults
 
 
 def generate(config: GeneratorConfig) -> tuple[pd.DataFrame, pd.DataFrame]:

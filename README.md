@@ -4,8 +4,7 @@ Six explicit stages for sustained optical-degradation detection:
 **adapter → validation → features → detectors → incidents → evaluation**.
 
 This is a tested research implementation with production-oriented safeguards,
-not a field-qualified production detector. The current synthetic validation
-policy fails its nuisance-workload target. See [METHOD.md](METHOD.md) for the
+not a field-qualified production detector. Synthetic validation is development evidence, not proof of operator performance. See [METHOD.md](METHOD.md) for the
 mathematics, critical design decisions, evidence and limitations.
 
 ## Start here
@@ -17,7 +16,11 @@ python -m pip install -e ".[dev]"
 jupyter notebook
 ```
 
-Run the notebooks in order:
+For **Google Colab**, open [00_colab_start.ipynb](notebooks/00_colab_start.ipynb)
+and follow its setup and output-location cells. It runs the development pipeline
+and defaults to saving results in your Google Drive. Use a CPU runtime.
+
+For local analysis, run the notebooks in order:
 
 1. `01_generator_eda.ipynb`: generate and inspect baseline telemetry.
 2. `02_feature_distributions.ipynb`: inspect causal features and missingness.
@@ -55,7 +58,8 @@ filesystem changes. Load joblib model files only from trusted sources.
 configs/config.yaml                 # One readable experiment configuration
 notebooks/                          # Five ordered data-science notebooks
 src/optical_anomaly/
-    generator.py                    # Physical state, measurement and fault truth
+    generator.py                    # Expanded telemetry, static topology and fault truth
+    optics.py                       # GPON-inspired directional FEC and invariants
     adapter.py                      # TelemetryAdapter: names, units, timezone
     validation.py                   # DataValidator: causal resampling, explicit gaps
     splitting.py                    # TemporalSplit: train/calibration/validation/test
@@ -80,7 +84,11 @@ There are no copied train/validation/test folders. Timestamp boundaries define t
 splits; past-only rolling history can cross a boundary without future leakage.
 Generated artifacts live under the configured output directory, ignored by Git:
 
-- `telemetry.parquet`: source measurements; `ground_truth.parquet`: separate labels.
+- `telemetry.parquet`: 96 ONTs × 90 days × five-minute samples by default
+  (2,488,320 rows; 14 measurement columns plus time/device).
+- `ground_truth.parquet`: separate onset, visibility, impact and repair labels.
+- `topology.parquet`: static `entity_id`, `olt_id`, `pon_port_id`, `splitter_id` mapping.
+- `generation_checks.json`: data consistency and FEC count checks.
 - `settings.json`, `manifest.json`: settings, boundaries and frozen fingerprints.
 - `development_features.parquet`, `validation_scores.parquet`: development evidence.
 - `validation_comparison.csv`, `validation_incidents.csv`, `validation_faults.csv`.
@@ -112,6 +120,13 @@ Then use the stage classes with reviewed local chronological periods: fit
 detectors on a later mostly normal period; tune incident rules on validation.
 The `develop` convenience function is specifically for the synthetic experiment.
 
+The generator includes downstream/upstream Rx, ONT/OLT Tx, ONT/OLT temperatures,
+two pre-FEC BER proxies, and corrected/uncorrectable/total FEC interval counts in
+each direction. The adapter recognises all 14 measurements. The baseline model
+still uses downstream Rx; extra measurements are available in EDA for future
+feature comparisons. Topology is context only. Operational events, voltage,
+bias current, traffic and topology-based incident logic are not added.
+
 The canonical schema is `timestamp, entity_id, metric_name, value`. Validation
 adds `observed`; the feature stage uses Rx power. Company-specific assumptions
 include units, timezone, cadence, representative healthy history, daily seasonality,
@@ -127,3 +142,8 @@ Run the focused checks with `python -m pytest` after the editable installation.
 Tests own their configuration and do not require your current working directory
 to be the repository root. See [RUN_GUIDE.md](RUN_GUIDE.md) for Windows/macOS setup,
 notebook order, output interpretation and rerunning an experiment.
+
+Default local outputs are under `<repository>/outputs/optical_v7/`. The Colab
+starter saves to `/content/drive/MyDrive/anomaly_detection/<RUN_NAME>/` with
+`SAVE_TO_DRIVE=True`, or `/content/anomaly_detection/outputs/<RUN_NAME>/` otherwise.
+All outputs stay outside Git. See [RUN_GUIDE.md](RUN_GUIDE.md) for exact commands.

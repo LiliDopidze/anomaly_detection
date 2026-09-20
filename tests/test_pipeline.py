@@ -15,11 +15,17 @@ def test_frozen_end_to_end(tmp_path, monkeypatch):
             "days": 8,
             "interval_minutes": 5,
             "noise_db": 0.08,
+            "sensor_noise_db": 0.04,
             "correlation_hours": 0.5,
             "daily_amplitude_db": 0.25,
             "missing_probability": 0.02,
             "impact_threshold_dbm": -27.0,
             "faults_per_entity": 2,
+            "upstream_impact_threshold_dbm": -28.0,
+            "fault_duration_median_hours": 36.0,
+            "onts_per_splitter": 8,
+            "splitters_per_port": 2,
+            "ports_per_olt": 4,
         },
         "features": {
             "window": 12,
@@ -42,6 +48,9 @@ def test_frozen_end_to_end(tmp_path, monkeypatch):
     path.write_text(yaml.safe_dump(settings))
     run = develop(path)
     assert not (run / "FINAL_OPENED.json").exists()
+    topology = pd.read_parquet(run / "topology.parquet")
+    assert len(topology) == 3
+    assert (run / "generation_checks.json").exists()
     scores = pd.read_parquet(run / "validation_scores.parquet")
     assert (
         scores[["statistical", "isolation_forest", "combined"]]
