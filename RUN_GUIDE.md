@@ -2,8 +2,8 @@
 
 The default experiment generates **96 ONTs × 90 days × five-minute samples**:
 2,488,320 rows. No dataset download is needed. The generator emits 14 measurements,
-separate ground truth and a simple topology table. The current detector remains
-the downstream-Rx baseline; added signals are available for EDA.
+separate ground truth and a simple topology table. The pipeline compares five cumulative telemetry feature sets, retaining
+downstream Rx alone as the baseline.
 
 ## Local environment
 
@@ -43,8 +43,8 @@ the downstream-Rx baseline; added signals are available for EDA.
    ```
 
 4. Open `configs/config.yaml`. Defaults are 96 entities, 90 days, five-minute
-   intervals and `output: outputs/optical_v7`. To run another experiment, use a
-   fresh output folder, such as `outputs/optical_v7_run02`.
+   intervals and `output: outputs/optical_v8`. To run another experiment, use a
+   fresh output folder, such as `outputs/optical_v8_run02`.
 
 5. Start Jupyter with the installed environment:
 
@@ -53,13 +53,14 @@ the downstream-Rx baseline; added signals are available for EDA.
    python -m notebook
    ```
 
-   Select **Python (optical anomaly)** inside each notebook. Run 01–05 in order:
+   Select **Python (optical anomaly)** inside each notebook. Run 00–05 in order:
 
    | Notebook | Purpose |
    |---|---|
-   | `01_generator_eda.ipynb` | Inspect native data and qualification checks; review development faults; then preview canonical adaptation |
-   | `02_feature_distributions.ipynb` | Inspect the baseline detector's causal Rx features and coverage |
-   | `03_detector_tuning.ipynb` | Fit/calibrate detectors and tune incident persistence |
+   | `00_generate_and_diagnose.ipynb` | Generate; inspect native data, missingness, structural checks and development faults |
+   | `01_canonical_eda.ipynb` | Adapt and validate; inspect canonical distributions, correlations and seasonality |
+   | `02_feature_distributions.ipynb` | Inspect all five cumulative feature sets and their coverage |
+   | `03_detector_tuning.ipynb` | Compare five telemetry sets; fit/calibrate detectors and tune incident persistence |
    | `04_evaluation.ipynb` | Review validation errors; final assessment defaults off |
    | `05_end_to_end_demo.ipynb` | Verify saved-model replay; optional stress tests |
 
@@ -71,9 +72,9 @@ python -c "from optical_anomaly.pipeline import develop; print(develop('configs/
 
 Run this from the repository root. It refuses to overwrite a fitted model.
 
-**Where local outputs go:** `<repository>/outputs/optical_v7/` by default.
+**Where local outputs go:** `<repository>/outputs/optical_v8/` by default.
 For the current local checkout, that is:
-`/Users/lilidopidze/Documents/Anomaly Detection/outputs/optical_v7/`.
+`/Users/lilidopidze/Documents/Anomaly Detection/outputs/optical_v8/`.
 On Windows or another machine, the prefix is wherever you cloned/extracted the repo.
 An absolute `output` path in the YAML saves directly to that path instead.
 
@@ -86,7 +87,9 @@ An absolute `output` path in the YAML saves directly to that path instead.
 | `ground_truth.parquet` | Fault ID/type, entity, onset, observable onset, impact and repair/end |
 | `generation_checks.json` | Structural and FEC consistency checks |
 | `settings.json`, `manifest.json` | Settings, time splits and frozen fingerprints |
-| `development_features.parquet` | Baseline Rx features, excluding final-period observations |
+| `canonical_development.parquet` | Adapted and validated long telemetry; final period excluded |
+| `development_features.parquet` | All 33 candidate features, excluding final-period observations |
+| `feature_set_comparison.csv` | Best validation policy per feature set |
 | `validation_scores.parquet` | Normalised anomaly scores for validation |
 | `validation_comparison.csv` | Candidate incident policies and operational metrics |
 | `validation_incidents.csv`, `validation_faults.csv` | Discrete incidents and matched/missed faults |
@@ -111,20 +114,35 @@ new folder name does not make it independent evidence.
 
 ## Native-data qualification and source mappings
 
-Run notebook 01 before feature engineering. It writes reports to
-`<configured output>/eda/`: measurement dictionary, development missingness and
-distributions, healthy statistical diagnostics, development fault summaries and
-contrasts, structural checks, and a small canonical preview. It does not write a
-second full copy of the long-format dataset.
+Run notebook 00 first for native-data diagnostics, then notebook 01 for canonical
+adaptation and statistical EDA. Reports are saved under `<configured output>/eda/`.
+The adapted and validated development data is saved once as
+`canonical_development.parquet`; processing and replay work one ONT at a time.
+No final-period rows appear in that file. The canonical EDA uses training data;
+its seasonal holdout is inside training, not the model-validation or test period.
 
 For company data, follow the explicit mapping example in README: both `units` and
 `kinds` are required and keyed by canonical measurement name. Optional measurements
 are omitted from the mapping, not silently ignored when an expected column is absent.
 Gauge-only or temperature-only inputs can adapt successfully, but cannot run the
 current detector without usable downstream Rx. Training also needs sufficient healthy
-history. The synthetic convenience pipeline uses `synthetic_adapter(["rx_dbm"])`.
+history. The five-set synthetic comparison requires the full mapping. Standalone Rx-only
+company experiments can still use the original FeatureEngineer and detector classes.
 
-For an existing run made before this adapter change, set a fresh `output` in
-`configs/config.yaml` before running notebooks 02–05.
+For an existing run made before this multivariate change, set a fresh `output` in
+`configs/config.yaml` before running notebooks 00–05.
 Preserve old run directories; their frozen code fingerprints intentionally differ.
-Notebook 01 may inspect the existing generated data without retraining its model.
+Old completed runs cannot be upgraded in place. The new default is `outputs/optical_v8`.
+
+## Reading the comparison
+
+Notebook 03 saves `validation_comparison.csv` (every candidate) and
+`feature_set_comparison.csv` (best policy per telemetry set). Compare pre-impact
+recall, missed faults, nuisance workload, delay and score coverage together.
+Different feature sets may abstain on different rows; missing scores are not normal
+scores. Opportunity denominators remain based on observed downstream Rx for every
+candidate. The `feature_set` and exact feature columns are stored in `manifest.json`.
+
+The expanded canonical table and five model comparisons take more disk space and
+runtime than v7. Keep the standard run for development; use fewer ONTs for an
+installation smoke test, clearly separated from performance experiments.

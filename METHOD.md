@@ -9,7 +9,7 @@ one-to-one event matching. These address real statistical and operational errors
 
 The proposed folder structure is more fragmented than this implementation needs.
 Use one package, one short module per stage, one configuration with clearly named
-sections, and five notebooks. Avoid three YAML files for parameters used together,
+sections, and six local notebooks. Avoid three YAML files for parameters used together,
 copied temporal datasets, and an abstract superclass with only two implementations.
 The previous implementation is preserved at
 [commit c999529](https://github.com/LiliDopidze/anomaly_detection/tree/c999529696dba66dd0060eeebc40612f7a04a624).
@@ -98,9 +98,9 @@ of either -27 dBm downstream or -28 dBm upstream, configurable assumptions rathe
 than universal receiver limits or customer SLAs. Variance shifts need not cause
 impact. The visibility proxy uses the known injected effect, never model scores.
 
-The adapter accepts the expanded measurements. For this revision the detector
-remains the downstream-Rx baseline: no performance benefit from the added signals
-is claimed until feature ablations demonstrate it. Topology never enters the
+The adapter accepts the expanded measurements. Version 8 compares five nested
+telemetry feature sets against the downstream-Rx baseline; additional channels
+are not presumed beneficial. Topology never enters the
 feature matrix. `generation_checks.json` records structural/count invariants;
 passing them demonstrates consistency, not empirical realism.
 
@@ -150,8 +150,8 @@ false-alarm guarantees do not automatically apply to this correlated telemetry.
 
 ## Detectors, calibration and temporal splits
 
-Tier 1 scores negative EWMA slope. Tier 2 uses Isolation Forest on six complete
-features, fitted on at most 20,000 training rows with a fixed seed. Missing feature
+Tier 1 scores negative EWMA slope. Tier 2 uses Isolation Forest on the selected set of complete
+features (6, 9, 15, 27 or 33), fitted on at most 20,000 training rows with a fixed seed. Missing feature
 vectors abstain rather than receive imputed healthy values. IDs and truth are not
 features. The forest's raw anomaly score is negated `score_samples`, following
 [scikit-learn's convention](https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.IsolationForest.html).
@@ -204,7 +204,7 @@ N. This is an operational proxy, not a guarantee of sufficient statistical power
 - Delay: actual alert emission minus observable-onset proxy, in minutes. Delays are
   reported for detected events; misses remain explicit and are not assigned zero.
 
-## Current v7 development check
+## Historical v7 development check
 
 The full default run completed locally: 2,488,320 telemetry rows, 96 topology rows,
 192 injected faults across development/final scenarios. The 11 generation checks
@@ -215,7 +215,7 @@ The selected validation policy was Isolation Forest with N=6, M=3. It detected
 However, 112 unmatched plus six duplicate incidents produced 68.3 nuisance
 incidents per 1,000 entity-days, above the configured budget of five. These are
 tuned synthetic validation results, not evidence of production readiness or of
-benefit from the additional measurements (which are not yet detector features).
+benefit from the additional measurements (which were not detector features in v7).
 
 The final full development run took about 197 seconds on this machine and wrote
 about 190 MB of run artifacts. These are observations, not resource or timing
@@ -261,7 +261,7 @@ requirements; the current library does not pretend they already exist.
 
 ## Native-data qualification before adaptation
 
-Notebook 01 checks native telemetry before any unit conversion or resampling. The
+Notebook 00 checks native telemetry before any unit conversion or resampling. The
 full dataset receives structural checks only. Development data supplies missingness,
 gaps, distributions, fault contrasts and warning-opportunity screens; the final
 period is excluded from those reports. Measurements are distinguished from engineered
@@ -303,10 +303,87 @@ for our five-minute scalar telemetry detector. The public abstract was reviewed;
 no inaccessible full-text results are claimed.
 [Research article](https://doi.org/10.1364/JOCN.587134).
 
-Our next proposed comparison is downstream Rx alone, then both Rx directions,
-then Tx/Rx relationships, then optional FEC and temperature. This is a project
-recommendation, not an implemented multivariate detector or standard requirement.
-Improve shared-path faults, benign changes, sensor artefacts and receiver diversity
-before simply increasing entity count. Keep raw topology identifiers out of model
-features. A larger synthetic fleet tests scale; it does not establish generalisation
-to another company. No generator or detector behaviour changed in this review.
+Version 8 implements downstream Rx alone, then both Rx directions, then Tx/Rx
+relationships, then optional FEC and temperature. This is a project comparison,
+not a standard-mandated feature set. Shared-path faults, benign changes, sensor
+artefacts and receiver diversity remain generator limitations; a larger synthetic
+fleet alone does not establish generalisation to another company.
+
+## Version 8: cumulative features and statistical EDA
+
+The local sequence is native generation/diagnostics (00), canonical adaptation
+and EDA (01), features (02), model comparison (03), evaluation (04), replay (05).
+Structural native checks must pass; statistical screens require interpretation
+rather than an automatic declaration of realism. Detailed canonical EDA uses only
+training observations. For each metric it reports distributions, missingness,
+lag-one/daily/weekly correlation and a chronological comparison of constant,
+daily-harmonic and daily-plus-weekly-harmonic models. Fit the first 70% of training,
+evaluate the last 30%; weekly fitting needs 21 days in the inner training subset.
+Negative holdout R² means worse than the fitted constant. These are exploratory
+comparisons, not multiple-testing-corrected significance tests. Annual behaviour
+cannot be validated from 90 days.
+
+Keep the six original downstream Rx features unchanged. Add nine channels:
+upstream Rx; two loss proxies (OLT Tx minus ONT Rx and ONT Tx minus OLT Rx);
+four directional FEC corrected/uncorrectable fractions; two temperatures.
+For each channel, fit a daily reference per entity on training only, subtract it,
+and divide by residual MAD times 1.4826. Scale floors are 0.05 dB for power/loss,
+0.1 °C for temperature, and 0.05 transformed units for FEC. These floors are explicit
+numerical assumptions. Do not apply CoV to temperature or signed dB loss.
+
+FEC fractions use matching interval totals and `log1p(fraction / 1e-6)` before
+reference fitting. The 1e-6 reference is a numerical choice, not an error threshold.
+Zero totals and invalid fractions remain missing. Since synthetic FEC derives from
+optical power, improvements may reflect constructed dependence, not new field
+information. BER proxies are intentionally excluded from the feature matrix.
+
+Each extra standardised channel contributes a rolling mean (level), rolling
+population standard deviation (variability), and EWMA first derivative per hour.
+The derivative requires a full warmup; missing samples or time gaps reset all
+three summaries. Negative upstream Rx movement and positive loss/FEC movement
+can indicate degradation; Isolation Forest treats both tails as unusual.
+Temperature is context, and benign temperature changes must be tested separately.
+
+Compute all 33 candidate features once, using training-only references. Fit and
+calibrate five forests separately on their nested column subsets. Keep the original
+statistical Rx detector as a shared comparator, reported once. Combined scores are
+the maximum only when both tiers are available. All policies share the same time
+splits, fault truth, Rx-based warning opportunities and incident matching rules.
+Record score coverage alongside event metrics. Rank by budget feasibility, early
+recall, nuisance workload, then fewer features for exact ties. This does not imply
+statistical superiority when differences are small. All-failing candidates still
+produce a clearly flagged experimental selection, not deployment approval.
+
+Persist one selected forest, its exact feature list and the fitted entity references.
+The full canonical development file is fingerprinted with the source data/model.
+Final evaluation replays prior history with frozen references, uses only the chosen
+candidate and keeps the one-opening guard. No final-test tuning or point adjustment
+is introduced. Generator physics, fleet size and fault scenarios are unchanged.
+
+
+## Version 8 full development verification
+
+All six local notebooks executed on the default 96-ONT, 90-day dataset. The final
+assessment remains unopened. There are 58 passing tests, including causal-prefix,
+missing-history reset, feature nesting, frozen replay and disposable final-evaluation
+checks. The full five-set fitting/tuning notebook took about 585 seconds locally;
+frozen replay took 143 seconds. Run artifacts occupied approximately 628 MB.
+These are machine-specific observations, not runtime guarantees.
+
+Best validation policy per set (46 warning opportunities in every comparison):
+
+| Feature set | Detected / 96 faults | Pre-impact / 46 | Nuisance / 1,000 entity-days |
+|---|---:|---:|---:|
+| Rx only | 95 | 46 | 68.30 |
+| Both Rx directions | 96 | 46 | 68.30 |
+| Add Tx/Rx relationships | 96 | 46 | 70.62 |
+| Add FEC | 96 | 46 | 82.77 |
+| Add temperature | 95 | 46 | 95.50 |
+
+Score coverage was 76.92% for all five best candidates. All used Isolation Forest,
+and none met the nuisance budget of five. The fixed rule selected Rx only on the
+simpler-feature tie-break: both-Rx improved total detected faults by one, but did
+not improve pre-impact recall or nuisance workload. These are tuned synthetic
+validation results, not evidence that extra telemetry is unhelpful in real networks.
+The generator's constructed dependencies and narrow fault family remain material
+limitations. No extra feature set is claimed to improve deployment reliability.

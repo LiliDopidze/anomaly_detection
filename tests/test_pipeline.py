@@ -1,6 +1,8 @@
 """Checks for pipeline."""
 
 import pandas as pd
+import joblib
+import json
 import pytest
 import yaml
 from optical_anomaly.pipeline import develop, final_evaluation
@@ -57,6 +59,28 @@ def test_frozen_end_to_end(tmp_path, monkeypatch):
         .stack()
         .between(0, 1)
         .all()
+    )
+    comparison = pd.read_csv(run / "validation_comparison.csv")
+    assert set(comparison.feature_set) == {
+        "rx_only",
+        "both_rx",
+        "tx_rx",
+        "fec",
+        "temperature",
+    }
+    assert comparison.score_coverage.between(0, 1).all()
+    canonical = pd.read_parquet(run / "canonical_development.parquet")
+    model = joblib.load(run / "model.joblib")
+    assert canonical.timestamp.max() < model["split"].validation_end
+    from optical_anomaly.workflow import feature_data
+    from optical_anomaly.pipeline import score_detectors
+
+    features, _, _ = feature_data(run, settings, model["engineers"])
+    replay = score_detectors(features, model["statistical"], model["forest"])
+    replay = replay.loc[model["split"].masks(replay.timestamp)["validation"]]
+    pd.testing.assert_frame_equal(replay.reset_index(drop=True), scores)
+    assert json.loads((run / "manifest.json").read_text())["feature_set"] in set(
+        comparison.feature_set
     )
     result = final_evaluation(run)  # Disposable test fixture, not the development run.
     assert result["monitored_entity_days"] > 0
