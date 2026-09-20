@@ -37,7 +37,7 @@ def test_nested_feature_sets_keep_original_baseline(canonical):
     pd.testing.assert_frame_equal(result[FEATURES], baseline[FEATURES])
     assert result[columns_for("temperature")].notna().all(axis=1).any()
     previous = set()
-    for stage, count in zip(FEATURE_SETS, [6, 9, 15, 27, 33]):
+    for stage, count in zip(FEATURE_SETS, [12, 18, 30, 46, 52]):
         columns = columns_for(stage)
         assert len(columns) == count
         assert previous.issubset(columns)
@@ -124,3 +124,35 @@ def test_added_summaries_reset_and_rewarm(break_kind):
         np.sqrt((12**2 - 1) / 12)
     )
     assert result.signal_slope.iloc[first + 12] == pytest.approx(12.0)
+
+
+def test_long_optical_windows_and_regression_have_physical_time_units():
+    model = MultivariateFeatures(FeatureEngineer())
+    times = pd.Series(pd.date_range("2025-01-01", periods=100, freq="5min"))
+    values = pd.Series(2 + 3 * np.arange(100) / 12)
+    result = model._summaries(values, times, "upstream_rx")
+    assert result.upstream_rx_long_level.iloc[:71].isna().all()
+    assert result.upstream_rx_long_level.iloc[71] == pytest.approx(
+        values.iloc[:72].mean()
+    )
+    assert result.upstream_rx_regression_slope.iloc[11] == pytest.approx(3)
+    expected = values.iloc[60:72].mean() - values.iloc[:72].mean()
+    assert result.upstream_rx_short_minus_long.iloc[71] == pytest.approx(expected)
+    values.iloc[80] = np.nan
+    broken = model._summaries(values, times, "upstream_rx")
+    assert broken.upstream_rx_long_level.iloc[80:].isna().all()
+
+
+def test_fec_error_frequency_uses_uncentred_counts_and_preserves_unknowns():
+    times = pd.Series(pd.date_range("2025-01-01", periods=30, freq="5min"))
+    measured = pd.Series(np.tile([0.0, 0.0, 1.0], 10))
+    model = MultivariateFeatures(FeatureEngineer())
+    result = model._summaries(measured - 5, times, "downstream_fec_corrected", measured)
+    assert result.downstream_fec_corrected_error_interval_fraction.iloc[
+        11
+    ] == pytest.approx(1 / 3)
+    measured.iloc[15] = np.nan
+    result = model._summaries(measured - 5, times, "downstream_fec_corrected", measured)
+    assert (
+        result.downstream_fec_corrected_error_interval_fraction.iloc[15:27].isna().all()
+    )

@@ -37,7 +37,7 @@ class StatisticalDetector:
 
     def raw_score(self, features: pd.DataFrame) -> pd.Series:
         # Slope already uses EWMA in FeatureEngineer; negative means deterioration.
-        return -features.slope.where(features[FEATURES].notna().all(axis=1))
+        return -features.slope.where(features.slope.notna())
 
     def calibrate(self, features: pd.DataFrame) -> "StatisticalDetector":
         self.normalizer.fit(self.raw_score(features))

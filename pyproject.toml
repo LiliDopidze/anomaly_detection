@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "optical-anomaly-detector"
-version = "8.0.0"
+version = "9.0.0"
 description = "Causal optical-degradation detection and event-level evaluation"
 requires-python = ">=3.10"
 dependencies = [
@@ -19,6 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+explain = ["shap>=0.46"]
 dev = ["jupyter>=1.0", "nbclient>=0.10", "pytest>=8.0"]
 
 [tool.setuptools.packages.find]

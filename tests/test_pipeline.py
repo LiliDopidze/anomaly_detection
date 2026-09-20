@@ -82,6 +82,20 @@ def test_frozen_end_to_end(tmp_path, monkeypatch):
     assert json.loads((run / "manifest.json").read_text())["feature_set"] in set(
         comparison.feature_set
     )
+    assert model["feature_set"] == "temperature"
+    assert len(model["forest"].feature_columns) == 52
+    assert set(model["forests"]) == set(comparison.feature_set)
+    assert not (run / "FINAL_OPENED.json").exists()
+    import importlib.util
+
+    if importlib.util.find_spec("shap"):
+        from optical_anomaly.explanations import explain_run
+
+        report = explain_run(
+            run, sample_size=2, background_size=2, local_size=1, permutations=1
+        )
+        assert len(pd.read_csv(report / "importance.csv")) == 52
+        assert not (run / "FINAL_OPENED.json").exists()
     result = final_evaluation(run)  # Disposable test fixture, not the development run.
     assert result["monitored_entity_days"] > 0
     with pytest.raises(FileExistsError):

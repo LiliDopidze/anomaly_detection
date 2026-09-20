@@ -12,7 +12,7 @@ mathematics, critical design decisions, evidence and limitations.
 Python 3.10 or newer. From the repository root:
 
 ```bash
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,explain]"
 jupyter notebook
 ```
 
@@ -24,6 +24,7 @@ For local analysis, run the notebooks in order:
 3. `03_detector_tuning.ipynb`: fit both tiers and tune incident persistence.
 4. `04_evaluation.ipynb`: inspect misses and workload; final assessment defaults off.
 5. `05_end_to_end_demo.ipynb`: reproduce saved scores and see company adaptation.
+6. `06_feature_importance.ipynb`: inspect global/local SHAP and feature correlations.
 
 Or run development from Python:
 
@@ -53,7 +54,7 @@ filesystem changes. Load joblib model files only from trusted sources.
 
 ```text
 configs/config.yaml                 # One readable experiment configuration
-notebooks/                          # Six ordered local data-science notebooks
+notebooks/                          # Seven ordered local data-science notebooks
 src/optical_anomaly/
     generator.py                    # Expanded telemetry, static topology and fault truth
     optics.py                       # GPON-inspired directional FEC and invariants
@@ -69,6 +70,7 @@ src/optical_anomaly/
     detectors.py                    # StatisticalDetector and IsolationForestDetector
     incidents.py                    # IncidentManager: persistent hysteresis state
     evaluation.py                   # Evaluator: one-to-one matching and metrics
+    explanations.py                 # Validation-only SHAP; no feature removal
     pipeline.py                     # Fit/calibrate/tune/save/final orchestration
     __init__.py
 tests/                              # Mathematics, causality, state, matching, integration
@@ -148,7 +150,7 @@ Tests own their configuration and do not require your current working directory
 to be the repository root. See [RUN_GUIDE.md](RUN_GUIDE.md) for Windows/macOS setup,
 notebook order, output interpretation and rerunning an experiment.
 
-Default local outputs are under `<repository>/outputs/optical_v8/`.
+Default local outputs are under `<repository>/outputs/optical_v9/`.
 All outputs stay outside Git. See [RUN_GUIDE.md](RUN_GUIDE.md) for exact commands.
 
 ### Inspect first, then adapt
@@ -178,11 +180,11 @@ do not overwrite their hashes or reuse them as a new experiment.
 
 | Feature set | Cumulative inputs | Feature count |
 |---|---|---|
-| `rx_only` | Original downstream Rx shape features | 6 |
-| `both_rx` | Add upstream Rx | 9 |
-| `tx_rx` | Add downstream and upstream Tx minus Rx loss proxies | 15 |
-| `fec` | Add directional corrected and uncorrectable FEC fractions | 27 |
-| `temperature` | Add ONT and OLT optical-module temperatures | 33 |
+| `rx_only` | Downstream Rx shape, level and multi-window features | 12 |
+| `both_rx` | Add upstream Rx | 18 |
+| `tx_rx` | Add downstream and upstream Tx minus Rx loss proxies | 30 |
+| `fec` | Add directional corrected and uncorrectable FEC fractions and error-interval frequency | 46 |
+| `temperature` | Add ONT and OLT optical-module temperatures | 52 |
 
 Every added channel contributes rolling standardised level, EWMA slope and rolling
 variability. References are fitted per ONT on training data only. Fixed FEC log
@@ -191,10 +193,10 @@ Unseen entities abstain in the feature classes; missing required channels produc
 missing scores, never healthy imputation. The synthetic fitting workflow requires
 all measurements needed to compare all five sets.
 
-The statistical Rx baseline is unchanged. Each feature set has its own Isolation
+The statistical comparator uses the downstream EWMA slope alone. Each feature set has its own Isolation
 Forest and score calibration; combined scores require both tiers to be available.
-Validation compares early recall, nuisance workload, delay and coverage. Exact
-performance ties prefer the simpler feature set. A failed nuisance budget is
+Validation compares early recall, nuisance workload, delay and coverage. The configured `model.feature_set` is retained (default: all 52 features).
+Comparisons do not automatically choose a smaller set or remove features. A failed nuisance budget is
 flagged, even when an experimental best candidate is saved. Only that frozen
 candidate is eligible for the final assessment; final results are not used to
 choose among telemetry sets.
@@ -202,3 +204,16 @@ choose among telemetry sets.
 Notebook 01 saves canonical training statistics under `eda/`, including daily/weekly
 lag correlations and chronological seasonality comparisons. Notebook 02 illustrates
 all feature groups on one training ONT; notebook 03 runs the full fleet comparison.
+
+## Feature explanations
+
+Notebook 06 saves `explanations/<feature_set>/` inside the configured output:
+`importance.csv`, global and high-score SHAP tables, feature samples, score
+reconstruction checks, correlations and sampling metadata. All five fitted forests
+remain in `model.joblib` for review. SHAP explains raw Isolation Forest scores,
+not incident decisions or physical causes; it never removes features.
+The full feature catalogue and source/assumption mapping are in METHOD.md.
+
+Six-hour optical features require uninterrupted history. Missing readings restart
+that history, which can substantially reduce score coverage. Notebook 02 reports
+coverage, and notebook 04 reports missed faults as well as nuisance alerts.

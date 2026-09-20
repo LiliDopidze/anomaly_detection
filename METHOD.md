@@ -1,389 +1,222 @@
-# Method and critical assessment
+# Method
 
-## What is sound in the proposed architecture
+The task is early warning of sustained optical degradation. Synthetic data supports
+controlled development and software verification; it does not establish field
+accuracy. The current model retains all 52 configured features. Telemetry-set
+comparisons and SHAP are diagnostic reports, not automatic feature-selection rules.
 
-Separate input mapping, causal validation, features, scoring, incident decisions
-and event evaluation. Keep mathematical primitives independently testable.
-Preserve explicit onset and impact labels, chronological splits, hysteresis and
-one-to-one event matching. These address real statistical and operational errors.
+References below distinguish support for a measurement or mathematical method
+from evidence for a particular parameter. Numerical simulation parameters are
+assumptions unless explicitly identified as standard-defined. No cited paper
+validates this complete generator or exact feature combination.
 
-The proposed folder structure is more fragmented than this implementation needs.
-Use one package, one short module per stage, one configuration with clearly named
-sections, and six local notebooks. Avoid three YAML files for parameters used together,
-copied temporal datasets, and an abstract superclass with only two implementations.
-The previous implementation is preserved at
-[commit c999529](https://github.com/LiliDopidze/anomaly_detection/tree/c999529696dba66dd0060eeebc40612f7a04a624).
-We retain its principles of separated truth, explicit units, causal calculations,
-missing-data abstention, temporal evaluation and protected final assessment.
+## Generated data
 
-## Expanded generator (v7): evidence versus assumptions
+Defaults are 96 ONTs, 90 days and five-minute samples. Static membership gives
+12 splitters, six PON ports and two OLTs. These sizes and fan-outs are scenario
+choices. The output is native wide telemetry, a topology lookup and a separate
+fault log; labels and topology identifiers never enter the feature matrix.
 
-The default is **96 ONTs over 90 days at five-minute cadence**: 2,488,320 rows.
-`make_topology` produces one static row per ONT, with OLT, globally unique PON-port
-and splitter IDs. Defaults give 12 splitters, six ports and two OLTs. Membership
-is an illustrative allocation (8 ONTs/splitter, 2 splitters/port, 4 ports/OLT),
-not a prescribed operator design. No operational events, peer detector, historical
-inventory engine or incident grouping is introduced.
-
-The 14 measurements are:
-
-| Native field | Meaning / unit |
-|---|---|
-| `rx_dbm` | Downstream receive power at the ONT, dBm |
-| `upstream_rx_dbm` | Upstream receive power at the OLT for that ONT, dBm |
-| `ont_tx_dbm` | ONT transmit power, dBm |
-| `olt_tx_dbm` | Shared PON-port transmit power, dBm |
-| `ont_temperature_c`, `olt_temperature_c` | Optical module temperatures, Celsius |
-| `ber`, `upstream_ber` | Illustrative instantaneous pre-FEC bit error ratios |
-| `{downstream,upstream}_fec_corrected_codewords` | Corrected codewords in the preceding interval |
-| `{downstream,upstream}_fec_uncorrectable_codewords` | Uncorrectable codewords in the preceding interval |
-| `{downstream,upstream}_fec_total_codewords` | Received codeword opportunities in the preceding interval |
-
-These measurement categories follow [ETSI GS F5G 011, sections 8.3–8.4](https://www.etsi.org/deliver/etsi_gs/F5G/001_099/011/01.01.01_60/gs_F5G011v010101p.pdf)
-and [ITU-T G.988](https://www.itu.int/rec/T-REC-G.988). Actual device availability,
-accuracy, aggregation and counter semantics must still be mapped explicitly.
-The generator is not a standards-compliance implementation or a calibrated digital twin.
-
-Received power follows directional link budgets: OLT Tx minus downstream path
-loss, and ONT Tx minus upstream path loss. The path components are related but
-have an assumed wavelength-dependent difference. Each optical-loss fault changes
-both paths, with an assumed upstream multiplier of 1.1. Tx power stays independent
-of the injected path fault. OLT Tx/temperature are shared per port and repeated in
-ONT rows for convenience: they are not independent observations of the OLT.
-
-Module temperatures have daily patterns and correlated residuals. The OLT also has
-an assumed slow annual component; 90 days cannot validate an annual cycle. Small
-explicit thermal coefficients link temperatures to transmitter power. Missed polls are independent of severity in this revision; loss of remote
-telemetry during severe optical failure is not yet modelled. Stationary
-Gaussian residuals use `phi=exp(-dt/tau)` and innovation SD `sigma*sqrt(1-phi²)`,
-including a stationary initial value. Sensor noise is added after physical state;
-changing `sensor_noise_db` cannot manufacture FEC errors or impact labels.
-
-Fault signatures remain negative-drift random walks, accelerating dB attenuation
-and variance shifts. Their duration is now lognormal with a 36-hour median and
-log-SD 0.5, truncated by the scenario boundary. Severity is multiplied by a
-uniform 0.4–1.4 factor. Longer observation windows therefore do not automatically
-create proportionally longer, more severe faults. Faults remain individual-ONT
-scenarios; shared topology faults are deferred. The first 55% is deliberately
-fault-free and two faults per ONT are scheduled into development/final periods.
-These are enriched scenarios, not estimates of real arrival rates or prevalence.
-
-The FEC approximation uses optional GPON RS(255,239) coding: an ideal decoder can
-correct up to eight erroneous byte symbols. GPON rates here are 2.48832 Gbit/s
-downstream and 1.24416 Gbit/s upstream, consistent with
-[ITU-T G.984.3](https://www.itu.int/rec/T-REC-G.984.3). Always-on FEC, full downstream
-coding, equal upstream allocations, omitted framing/burst overhead and independent
-bit errors are simplifying assumptions. This is not an XGS-PON/LDPC counter model.
-
-For pre-FEC bit error probability p, symbol error probability is `q=1-(1-p)^8`.
-For `K~Binomial(255,q)`, corrected probability is `P(1<=K<=8)` and uncorrectable
-probability is `P(K>8)`. Joint categorical sampling guarantees corrected plus
-uncorrectable never exceeds total. Corrected counts can fall at severe corruption
-as uncorrectable counts rise. Upstream allocation sums to at most the port line
-rate across its ONTs; downstream broadcast reception is counted separately per ONT.
-
-The assumed BER response is `10**clip(-5-(latent_rx-impact_threshold), -12, -1)`.
-Standards do **not** establish this receiver curve or these scenario thresholds.
-The counters use piecewise-constant physical state over the preceding interval;
-a state change at t first affects counts reported at t+dt. The first row has no
-preceding interval and its counters are missing. Counts are interval totals, not
-cumulative counters, so there are no synthetic resets or reboot events. Coarser
-resampling sums observed interval counts; missing portions remain unobserved and
-must not be interpreted as a fully measured interval. Ratios should use matching
-corrected/uncorrectable and total observations.
-
-The separate truth log retains distribution-change onset, an observable-onset
-proxy, hypothetical impact and repair time. Impact is the first latent crossing
-of either -27 dBm downstream or -28 dBm upstream, configurable assumptions rather
-than universal receiver limits or customer SLAs. Variance shifts need not cause
-impact. The visibility proxy uses the known injected effect, never model scores.
-
-The adapter accepts the expanded measurements. Version 8 compares five nested
-telemetry feature sets against the downstream-Rx baseline; additional channels
-are not presumed beneficial. Topology never enters the
-feature matrix. `generation_checks.json` records structural/count invariants;
-passing them demonstrates consistency, not empirical realism.
-
-## Causal validation and feature mathematics
-
-Resampling uses right-closed, right-labelled bins: a reading at 00:02 is available
-at the 00:05 decision, not at 00:00. No interpolation or forward fill is performed.
-The adapter rejects duplicate keys and ambiguous/nonexistent local timestamps.
-Invalid physical values become missing. Units are explicit, never guessed.
-
-Training-only least squares fits an intercept and daily sine/cosine per device.
-Residuals are divided by a training MAD scale, floored at 0.05 dB. The baseline must
-be representative and mostly healthy; ordinary least squares is not robust to
-heavy contamination. `seasonal: false` enables a median-only reference for an
-ablation. Weekly or changing seasonal patterns are not modelled automatically.
-
-The feature engineer produces the requested five features plus the slope needed
-by Tier 1. All windows end at the current observation; CUSUM's reference window
-ends at the preceding observation. Missing data resets window/state history.
-
-| Feature | Implemented meaning | Important qualification |
+| Generated fields | Construction and purpose | Basis and limits |
 |---|---|---|
-| CoV | Population SD / absolute mean of linear optical power | dBm is logarithmic, so its CoV is not physically scale invariant |
-| Lag-1 correlation | Centred lag product sum / full centred squared sum | Exact requested estimator; constant finite windows return zero; invalid windows return NaN |
-| Negative CUSUM | `max(0, previous + prior_rolling_mean - current - C)` on normalised residuals | C=0.25 is in residual units; rolling means can absorb slow loss |
-| Shannon entropy | `-sum(p*log(p))` using fixed residual bins | Fixed bins preserve comparability; extreme loss can reduce entropy |
-| EWMA acceleration | EWMA of second difference / dt² | Scale-normalised and cadence-aware; differentiation amplifies noise |
-| EWMA slope | EWMA of first difference / dt | Tier 1 uses negative slope; plateaued loss need not maintain a high slope score |
+| `rx_dbm`, `upstream_rx_dbm` | Directional receive power: transmitter power minus path loss. Downstream path loss starts uniformly between 23 and 27 dB; upstream adds an assumed 0.4–1.2 dB offset. Both paths share normal fluctuations and injected loss. | Optical measurement categories: [ETSI F5G 011, §§8.3–8.4][etsi]. Subtraction follows the logarithmic power definition [NIST][db]. Ranges and cross-direction dependence are simulation assumptions. |
+| `ont_tx_dbm`, `olt_tx_dbm` | Nominal 2/3 dBm; small thermal response and stationary residuals. OLT Tx is shared by ONTs on a port. Tx does not change in response to a simulated path fault. | Monitored quantities: [ETSI][etsi]. Nominal levels and thermal coefficients 0.008/0.005 dB/°C are uncalibrated assumptions, not vendor specifications. |
+| `ont_temperature_c`, `olt_temperature_c` | Baselines 38/35°C, daily amplitudes 3/2°C and correlated residuals. OLT temperature is shared per port and includes an assumed slow annual component. | Temperature monitoring: [ETSI][etsi]. Waveform, ranges and time constants are assumptions. Ninety days cannot identify an annual cycle. |
+| `ber`, `upstream_ber` | Illustrative pre-FEC probability `10**clip(-5-(latent_rx-impact_limit), -12, -1)`. Used to generate errors, not supplied to the detector. | Error monitoring context: [G.988][g988]. This receiver curve is an explicit assumption; it is not an optical receiver calibration. |
+| `{downstream,upstream}_fec_total_codewords` | Received codeword opportunities during the preceding interval, using 255-byte codewords and GPON line rates. Upstream capacity is divided among port members. | Coding/rate context: [G.984.3][g984]. Always-on coding, equal upstream allocation and omitted framing overhead are simplifications. |
+| `{downstream,upstream}_fec_corrected_codewords` | For bit error probability p, symbol error probability is `q=1-(1-p)^8`. Sample codewords with 1–8 erroneous symbols. | RS(255,239) correction capability: [G.984.3][g984]; binomial probability calculation [SciPy][binomial]. Independent bit errors and ideal decoding are assumptions. |
+| `{downstream,upstream}_fec_uncorrectable_codewords` | Sample codewords with more than eight erroneous symbols jointly with corrected/clean categories. Corrected + uncorrectable cannot exceed total. | Same coding basis. These are illustrative interval counters, not measured BER, cumulative counters or an XGS-PON LDPC model. |
 
-Empty or non-finite windows return NaN for CoV, autocorrelation and entropy.
-Zero-mean CoV is undefined (NaN); constant positive CoV and constant-window
-entropy are zero. These cases are covered by parameterised tests.
+Normal residual noise is stationary Gaussian AR(1):
+`u[t] = phi*u[t-1] + sigma*sqrt(1-phi²)*epsilon[t]`, with stationary initial
+variance and `phi=exp(-dt/tau)`. This is a standard autoregressive construction
+([statsmodels time-series methods][ar]); its applicability and numerical time
+constants are assumptions. Independent optical sensor noise is added after the
+latent physical state. It therefore cannot itself create FEC errors or impact.
+Daily sinusoidal structure is a controlled seasonal scenario, not an assertion
+that every PON has daily optical seasonality.
 
-Entropy edges are `[-inf,-3,-2,-1,0,1,2,3,inf]` in training-standardised residual
-units. EWMA alpha is `1-exp(-dt/smoothing_hours)`. Both the one-hour memory and
-12-observation rolling window are choices to test, not universal optical constants.
-A change in poll cadence should prompt a review of window and debounce durations.
+Missed polls are independent Bernoulli draws with default probability 0.02. They
+remove an ONT's telemetry row measurements together. This is a stress scenario,
+not an empirical model of outages. Correlated missing runs and severity-dependent
+telemetry loss remain limitations.
 
-[NIST's CoV guidance](https://itl.nist.gov/div898/software/dataplot/refman2/auxillar/coefvari.htm)
-supports using a ratio scale. An additive dBm offset becomes a multiplicative
-linear-power factor, leaving CoV unchanged. Tests also verify invariance of the
-other features after refitting local references. This does not prove transfer
-across sensor quantisation, noise, hardware classes or new operating regimes.
-[NIST's EWMA guidance](https://www.itl.nist.gov/div898/handbook/pmc/section3/pmc314.htm)
-supports sensitivity to small sustained changes; independent-Gaussian chart
-false-alarm guarantees do not automatically apply to this correlated telemetry.
+Faults use three deliberately distinct scenario families: negative-drift random
+walks (-0.15 dB/hour, diffusion 0.06 dB/sqrt(hour)); accelerating attenuation
+`-0.2-0.35*expm1(min(hours/12,3))`; and a stationary variance increase to 0.5 dB.
+Severity is multiplied by Uniform(0.4,1.4); duration is lognormal with median
+36 hours and log-SD 0.5, truncated at scenario boundaries. All signatures,
+parameters, timings and the 1.1 upstream fault multiplier are **project assumptions**.
+Optical soft failures motivate the task [San Martín et al., 2026][optical], but
+that study does not establish these PON degradation laws.
 
-## Detectors, calibration and temporal splits
+The first 55% is deliberately healthy. Up to two individual-ONT faults are placed
+later, rather than sampled from a claimed real failure arrival process. Shared
+port faults, independent Tx failures and field prevalence are not reproduced.
+FEC counters describe the preceding interval: a state change at t affects the
+report at t+dt. First-interval counts are missing.
 
-Tier 1 scores negative EWMA slope. Tier 2 uses Isolation Forest on the selected set of complete
-features (6, 9, 15, 27 or 33), fitted on at most 20,000 training rows with a fixed seed. Missing feature
-vectors abstain rather than receive imputed healthy values. IDs and truth are not
-features. The forest's raw anomaly score is negated `score_samples`, following
-[scikit-learn's convention](https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.IsolationForest.html).
+Truth records distribution-change onset, observable-onset proxy, hypothetical
+impact and fault end. Observable onset requires an injected effect at least twice
+the configured physical-noise SD and an observed Rx reading. Impact is the first
+latent crossing of -27 dBm downstream or -28 dBm upstream. These are declared
+scenario thresholds, not universal receiver limits or verified customer impact.
 
-Each raw score is mapped to [0,1] using an interpolated empirical rank fitted on
-normal calibration data. These are anomaly ranks, **not** posterior probabilities
-of faults or calibrated p-values. Serial dependence and multiple entities still
-require workload validation. The maximum of the two ranks is a third candidate;
-it is not itself a calibrated probability and can increase false alarms.
+## Observation, adaptation and EDA
 
-Chronological fractions: 40% train, 15% score calibration, 20% validation, 25% test.
-No future samples enter reference fitting, forest fitting or score calibration.
-Causal rolling history is allowed across split boundaries; resetting every split
-would introduce artificial cold starts. Incident evaluation starts with closed
-state at each evaluation boundary; crossing faults are excluded and counted.
-[Scikit-learn's leakage guidance](https://scikit-learn.org/stable/common_pitfalls.html)
-supports separating fitting from later evaluation. Fractions are engineering choices.
+Notebook 00 checks native fields, counts, missing runs, distributions, topology,
+noise/seasonality diagnostics, FEC conservation and development fault scenarios.
+Structural checks establish consistency; comparisons against intended noise and
+seasonality establish whether the implementation reproduces its assumptions.
+Neither demonstrates resemblance to an operator network.
 
-Validation compares N in {2,3,6}, M in {3,6}, with high=0.99 and low=0.8, separately
-for both tiers and their maximum. Selection prefers the declared workload budget,
-then pre-impact recall, then lower workload with deterministic ties. If no policy
-meets the budget, the saved experimental policy is explicitly flagged as failing.
-No default setting constitutes an operator-approved alarm policy.
+Notebook 01 maps names, units and gauge/interval-count semantics to
+`timestamp, entity_id, metric_name, value`. Company mappings are explicit; the
+synthetic source has its own mapping. Cumulative counters require reset-aware
+conversion before this adapter. The detector checks required measurements after
+adaptation. Validation resamples into right-closed, right-labelled intervals;
+there is no interpolation or forward filling. Invalid readings remain missing.
 
-## Incidents and evaluation
+Canonical training EDA reports distributions, missingness, lag correlations and
+chronological daily/weekly seasonal comparisons. Its holdout is inside training.
+The model uses one daily sine/cosine pair fitted on healthy training only, or a
+median baseline when seasonality is disabled. Harmonic regression is established
+([Hyndman and Athanasopoulos][harmonic]); its necessity must be assessed per source.
+Weekly terms are examined in EDA, not automatically fitted by the model.
 
-N successive scores strictly above high open an incident at the actual Nth decision.
-M successive scores strictly below low close it. Equality satisfies neither rule.
-Missing scores reset confirmation counters but keep an open incident unknown.
-A gap beyond six hours administratively closes at the last valid observation,
-labelled `telemetry_gap`; it is not evidence of recovery. Active incidents retain
-missing end times. State persists across chunks; repeated/overlapping chunks fail.
-Outputs contain new closures and active snapshots, keyed by stable incident IDs.
+## Features
 
-Matching is deterministic maximum-cardinality one-to-one matching by entity and
-alert start within the fault's physical interval. It never credits an entire
-interval's individual points. Overlapping labels can make attribution ambiguous;
-matching is association, not causal proof. Earlier warnings are not retroactively
-excused by a later fault. Boundary events are reported separately.
+For each ONT/channel, `z=(measurement-fitted_daily_baseline)/scale`. The scale is
+`1.4826*median(abs(residual-median(residual)))` on training, with floors of 0.05
+for dB/transformed-FEC channels and 0.1°C for temperature. MAD is a robust spread
+measure ([NIST][mad]); these floors are numerical assumptions, not alarm limits.
+Ordinary least-squares seasonal fitting itself is not robust to contaminated
+training. A representative reviewed local baseline remains necessary.
 
-A defensible warning opportunity is declared before scoring: an impacting fault
-has an observable-onset proxy plus at least three consecutive observed Rx readings
-by impact minus 30 minutes. It does not change with detector success or the tuned
-N. This is an operational proxy, not a guarantee of sufficient statistical power.
+Short windows contain 12 readings (one hour at default cadence). Long optical
+windows contain `ceil(6 hours/cadence)` readings. Six hours is a development
+choice, not a standard. Windows end at the current decision; CUSUM's reference
+ends one reading earlier. Missing values or time gaps reset temporal state.
+Long-window features require complete uninterrupted history: report the resulting
+coverage and misses, particularly with frequent missing polls.
 
-- Pre-impact recall: matched warnings before impact / faults with that opportunity.
-- Nuisance workload: unmatched plus duplicate incidents per 1,000 scheduled monitored
-  entity-days. Missingness coverage is reported alongside exposure; telemetry loss
-  must not be interpreted as good detector performance.
-- Delay: actual alert emission minus observable-onset proxy, in minutes. Delays are
-  reported for detected events; misses remain explicit and are not assigned zero.
+| Feature suffix/name | Definition and application | Source or assumption |
+|---|---|---|
+| `level` | Short-window mean of z. Downstream/upstream Rx, both losses, four FEC channels and both temperatures. | Window summaries have optical precedent [San Martín et al.][optical]; baseline normalisation/window duration are our choices. |
+| `variability` | Short-window population SD of z on the same channels. | Same optical precedent; no standard optical warning threshold is implied. |
+| `slope` | EWMA of first differences of z divided by elapsed hours. Same ten channels. Alpha=`1-exp(-dt/smoothing_hours)`, default one hour. | [NIST EWMA][ewma] supplies the smoothing basis. Applying it to optical derivatives is our modelling choice. |
+| `regression_slope` | Least-squares slope of z against elapsed hours inside the short window. Downstream/upstream Rx and both loss channels. | [NIST least squares][ols]. Its early-warning value must be measured locally. |
+| `long_level` | Six-hour mean of z for the four optical channels above. | Established mean statistic; chosen time scale is an assumption. |
+| `short_minus_long` | Short-window mean minus six-hour mean for those four channels. | Proposed multi-scale contrast. No claim that this exact formulation is an established PON standard. |
+| `below_baseline_fraction` | Fraction of short-window downstream Rx residuals below zero. Zero means the fitted expected value, not a fault threshold. | Proposed persistence summary; no feature-selection threshold. |
+| `cusum` | Downstream Rx `max(0, previous + prior_short_mean - z - 0.25)`. | [NIST CUSUM][cusum] motivates accumulation. Rolling reference and allowance are adaptations; the reference can absorb slow degradation. |
+| `cov` | Short-window SD/absolute mean of downstream **linear** optical power. | [NIST CoV][cov] requires a ratio scale. Retained experimental feature; never computed on dBm or Celsius. |
+| `autocorrelation` | Downstream residual lag-1 centred product sum divided by full-window centred squared sum. | [NIST autocorrelation][acf]. Retained experimental feature; not specific evidence of a fault. |
+| `entropy` | `-sum(p*log(p))` for downstream z in fixed bins `[-inf,-3,-2,-1,0,1,2,3,inf]`. | [Shannon entropy definition][entropy]. Bin edges and optical application are assumptions. Extreme loss can reduce entropy. |
+| `acceleration` | EWMA of downstream second difference divided by dt². | Finite-difference definition plus [EWMA][ewma]; exploratory optical application. Differentiation amplifies noise. |
+| `*_error_interval_fraction` | Short-window fraction with a positive corrected/uncorrectable FEC numerator; four directional error channels. | Proposed persistence statistic based on FEC counters [G.988][g988]. Zero is exact absence of recorded errors, not a learned cutoff. |
 
-## Historical v7 development check
+The downstream names above are unprefixed. Other prefixes are `upstream_rx`,
+`downstream_loss`, `upstream_loss`, `{downstream,upstream}_fec_{corrected,uncorrectable}`,
+`ont_temperature` and `olt_temperature`. This covers every generated feature column.
 
-The full default run completed locally: 2,488,320 telemetry rows, 96 topology rows,
-192 injected faults across development/final scenarios. The 11 generation checks
-passed. Final detector performance assessment remains unopened.
+Loss channels are synchronised Tx(dBm) minus Rx(dBm): OLT Tx–ONT Rx downstream,
+ONT Tx–OLT Rx upstream. They are link-loss proxies, affected by measurement error
+and location. FEC channels are matching corrected/uncorrectable interval counts
+divided by received codeword totals, then `log1p(fraction/1e-6)`. Zero totals are
+unknown, not healthy zero. The numerical log reference is a scaling choice.
+Vendor counters may have different denominators: [ETSI][etsi] supports checking
+semantics, not assuming every field called FEC total counts all received codewords.
 
-The selected validation policy was Isolation Forest with N=6, M=3. It detected
-95/96 validation faults and warned before impact on 46/46 declared opportunities.
-However, 112 unmatched plus six duplicate incidents produced 68.3 nuisance
-incidents per 1,000 entity-days, above the configured budget of five. These are
-tuned synthetic validation results, not evidence of production readiness or of
-benefit from the additional measurements (which were not detector features in v7).
+There are 12 downstream features; upstream adds six; both losses add twelve;
+FEC adds sixteen; temperature adds six: **52 total**. The five cumulative sets
+therefore contain 12, 18, 30, 46 and 52 features. No IDs, ground truth or simulated
+BER are model inputs. Temperature is currently a separate feature group, not a
+regressor used to remove thermal power variation. Receiver-margin and peer-port
+features are deferred until reliable equipment limits/shared-fault scenarios exist.
 
-The final full development run took about 197 seconds on this machine and wrote
-about 190 MB of run artifacts. These are observations, not resource or timing
-guarantees. The synthetic family, known-normal fit/calibration periods, hypothetical
-impact thresholds and individual fault mechanisms still limit generalisation.
+Company independence comes from explicit schema mapping, physical relationships
+and per-device reference fitting. It is not zero-shot transfer across equipment,
+sensor precision, polling cadence or operator conditions. Unknown devices abstain.
 
-## Historical v6 results and remaining work
+## Modelling and operational evaluation
 
-The following figures describe the earlier 24-ONT/28-day generator, **not v7**.
-They are retained for context and must not be compared as a like-for-like dataset.
+Chronological partitions are 40% training, 15% score calibration, 20% validation
+and 25% final test. Training fits references and forests; later healthy calibration
+fits empirical score ranks. Causal past history may cross a split boundary.
+No future data enters fitting ([scikit-learn leakage guidance][leakage]).
 
-Earlier validation, 24 faults: the selected Isolation Forest policy (N=6, M=3)
-detected 24/24 and warned before impact on 16/16 declared opportunities. Four
-unmatched incidents correspond to 29.8 nuisance incidents per 1,000 entity-days,
-above the configured budget of five. Combining tiers increased unmatched incidents
-to six. These are tuned validation results, not final-test or operator accuracy.
+The statistical comparator scores negative downstream EWMA slope. Each telemetry
+set has an Isolation Forest with 100 trees, max_samples=256 and at most 20,000
+training rows. Raw anomaly score is negative `score_samples` ([scikit-learn][iforest]).
+Missing vectors abstain. Calibration maps raw scores to empirical ranks in [0,1],
+not fault probabilities. The maximum of two ranks is an additional comparison,
+requiring both scores; it is not itself a calibrated probability.
 
-Keeping that incident policy fixed while refitting local baselines/calibration:
+`model.feature_set` explicitly selects telemetry scope; default `temperature`
+retains all 52 features. All five forests remain saved. Comparisons never remove
+features or switch to a smaller set. Within that configured scope, validation
+chooses detector and debounce duration using the declared nuisance budget, then
+early recall and workload. Failure to meet the budget remains explicit.
 
-| Scenario, 12 entities | Detected | Pre-impact | Unmatched | Duplicates | Nuisance / 1,000 days |
-|---|---:|---:|---:|---:|---:|
-| New seed | 12/12 | 8/8 | 3 | 3 | 89.3 |
-| Double physical noise, 10% missing polls | 12/12 | 5/8 | 2 | 6 | 119.1 |
-| No injected faults | N/A | N/A | 6 | 0 | 89.3 |
+Incident thresholds remain necessary operational decisions: N consecutive ranks
+above high open at the Nth decision; M below low close. Equality triggers neither.
+Current high/low 0.99/0.8 and N={2,3,6}, M={3,6} are development choices requiring
+operator calibration. They are not feature-retention thresholds. Missing scores
+reset confirmation; extended gaps close administratively, not as confirmed repair.
 
-Complete-score coverage was 78.3% in the default validation run and 26.7% in
-the noisier/10%-missing run. Requiring a full window after each missing reading
-causes this loss of coverage; missingness handling is a priority before deployment.
-Neither absence of a score nor a long telemetry gap means a healthy network.
+Evaluation deterministically matches incidents one-to-one with faults by entity
+and emission inside the physical fault interval. No point adjustment is used.
+Pre-impact recall counts early matched faults among those with a declared warning
+opportunity: observable onset and three observed Rx intervals before impact minus
+30 minutes. Nuisance counts unmatched and duplicate incidents per 1,000 scheduled
+entity-days. Delay uses actual alert emission minus observable onset; misses and
+coverage are reported separately. These opportunity/matching definitions are
+project evaluation decisions, not claims of an industry-wide metric standard.
+Final assessment is explicit, frozen and one-time; notebook defaults leave it shut.
 
-The stress results weaken the clean-scenario claim. No candidate should be labelled
-production ready. Final performance assessment remains unopened. Tiny event counts,
-known-normal calibration, strong long faults, independent devices and simplified
-seasonality all limit generalisation.
+## Feature importance
 
-Next work should challenge weak/slow faults, baseline contamination, quantisation,
-shared faults, topology changes and seasonal shifts; measure uncertainty across
-independent runs; compare feature ablations and a fixed-reference level baseline;
-and validate against representative operator measurements and incidents. A bounded
-streaming feature implementation, durable operational state, monitoring and shadow
-operation are still needed for deployment. Add these only against concrete operating
-requirements; the current library does not pretend they already exist.
+Notebook 06 uses [SHAP PermutationExplainer][shap] on the actual negative forest
+`score_samples` function. It uses training-only background rows and complete
+validation rows. Global mean absolute SHAP covers a uniform sample (default 64);
+separate local explanations cover eight highest-score rows. Background size 16,
+two permutation cycles and seed 42 are exploratory runtime choices. Larger/repeated
+samples are needed to judge ranking stability. Saved local values must reconstruct
+the raw score from the background expectation within numerical tolerance.
 
-## Native-data qualification before adaptation
+Positive SHAP increases the anomaly score. Attributions are not probabilities,
+causes, incident explanations or measurements of pre-impact utility. Correlated
+features can share credit, and independent masking can create unlikely feature
+combinations. The notebook also reports Spearman correlations and complete-score
+coverage. No SHAP cutoff removes features. Operational evaluation stays separate;
+any future removal needs a reviewed, reproducible comparison, not a small ranking.
 
-Notebook 00 checks native telemetry before any unit conversion or resampling. The
-full dataset receives structural checks only. Development data supplies missingness,
-gaps, distributions, fault contrasts and warning-opportunity screens; the final
-period is excluded from those reports. Measurements are distinguished from engineered
-features. Qualification is a review step, not a claim of operator-level validity.
+The combination of optical power, temperature and error measurements also has
+field optical-transport precedent in [Zhang et al. (2025)](https://opg.optica.org/jocn/abstract.cfm?uri=jocn-17-2-81),
+which uses SHAP for model interpretation. That is support for examining model
+contributions, not evidence that SHAP identifies physical causes or that results
+transfer directly to PON early warning. For the 2026 optical study, the public
+abstract and tables support the cited window statistics; no inaccessible methods
+are assumed here.
 
-For healthy downstream telemetry, subtract Rx from measured OLT Tx and fit a daily
-harmonic per ONT. The remaining path-loss residual has expected variance
-`noise_db**2 + sensor_noise_db**2` and lag-one correlation
-`exp(-dt / correlation_hours) * noise_db**2 / expected_variance`, apart from rounding
-and finite-sample harmonic estimation. Diagnostic bands are 25% for variance,
-0.1 absolute for correlation, and max(0.05 dB, 20%) for daily amplitude. These are
-explicit screening assumptions, not standards or formal confidence intervals.
-Missing samples are not compressed when estimating adjacent-sample correlation.
-Fault-versus-preceding-day contrasts expose very easy faults and potential
-missingness shortcuts; they do not prove independence or causal effects.
+## Sources
 
-Canonical definitions describe units and gauge/interval-count semantics. The
-synthetic generator is one explicit source mapping, separate from the generic
-adapter. All mapped columns are required; unknown units or counter semantics fail.
-Invalid numeric observations become missing. Cumulative counters require an explicit
-upstream conversion; no reset behaviour is inferred. Detector requirements are
-checked after adaptation. This separates input portability from demonstrated
-cross-company detection performance.
-
-## Telemetry priorities: evidence review, 20 September 2026
-
-ETSI F5G 011 sections 8.3–8.4 describe optical power, transceiver diagnostics and
-FEC monitoring at OLT/ONU scopes. These are collection capabilities, not a prescribed
-ML feature set. [ETSI specification](https://www.etsi.org/deliver/etsi_gs/F5G/001_099/011/01.01.01_60/gs_F5G011v010101p.pdf).
-
-CableLabs' June 2025 PON operations report covers optical diagnostic information
-and FEC performance monitoring, including distinct bit/byte and codeword counters.
-[Operations report](https://account.cablelabs.com/server/alfresco/0737eca3-84bb-4526-9dfb-22c42ba1c9b8).
-
-Sica et al. (published 11 May 2026) combine OLT monitoring and OTDR traces for PON
-fault detection/localisation and compare a heuristic with ML alternatives. This
-supports complementary observations, but does not establish pre-impact performance
-for our five-minute scalar telemetry detector. The public abstract was reviewed;
-no inaccessible full-text results are claimed.
-[Research article](https://doi.org/10.1364/JOCN.587134).
-
-Version 8 implements downstream Rx alone, then both Rx directions, then Tx/Rx
-relationships, then optional FEC and temperature. This is a project comparison,
-not a standard-mandated feature set. Shared-path faults, benign changes, sensor
-artefacts and receiver diversity remain generator limitations; a larger synthetic
-fleet alone does not establish generalisation to another company.
-
-## Version 8: cumulative features and statistical EDA
-
-The local sequence is native generation/diagnostics (00), canonical adaptation
-and EDA (01), features (02), model comparison (03), evaluation (04), replay (05).
-Structural native checks must pass; statistical screens require interpretation
-rather than an automatic declaration of realism. Detailed canonical EDA uses only
-training observations. For each metric it reports distributions, missingness,
-lag-one/daily/weekly correlation and a chronological comparison of constant,
-daily-harmonic and daily-plus-weekly-harmonic models. Fit the first 70% of training,
-evaluate the last 30%; weekly fitting needs 21 days in the inner training subset.
-Negative holdout R² means worse than the fitted constant. These are exploratory
-comparisons, not multiple-testing-corrected significance tests. Annual behaviour
-cannot be validated from 90 days.
-
-Keep the six original downstream Rx features unchanged. Add nine channels:
-upstream Rx; two loss proxies (OLT Tx minus ONT Rx and ONT Tx minus OLT Rx);
-four directional FEC corrected/uncorrectable fractions; two temperatures.
-For each channel, fit a daily reference per entity on training only, subtract it,
-and divide by residual MAD times 1.4826. Scale floors are 0.05 dB for power/loss,
-0.1 °C for temperature, and 0.05 transformed units for FEC. These floors are explicit
-numerical assumptions. Do not apply CoV to temperature or signed dB loss.
-
-FEC fractions use matching interval totals and `log1p(fraction / 1e-6)` before
-reference fitting. The 1e-6 reference is a numerical choice, not an error threshold.
-Zero totals and invalid fractions remain missing. Since synthetic FEC derives from
-optical power, improvements may reflect constructed dependence, not new field
-information. BER proxies are intentionally excluded from the feature matrix.
-
-Each extra standardised channel contributes a rolling mean (level), rolling
-population standard deviation (variability), and EWMA first derivative per hour.
-The derivative requires a full warmup; missing samples or time gaps reset all
-three summaries. Negative upstream Rx movement and positive loss/FEC movement
-can indicate degradation; Isolation Forest treats both tails as unusual.
-Temperature is context, and benign temperature changes must be tested separately.
-
-Compute all 33 candidate features once, using training-only references. Fit and
-calibrate five forests separately on their nested column subsets. Keep the original
-statistical Rx detector as a shared comparator, reported once. Combined scores are
-the maximum only when both tiers are available. All policies share the same time
-splits, fault truth, Rx-based warning opportunities and incident matching rules.
-Record score coverage alongside event metrics. Rank by budget feasibility, early
-recall, nuisance workload, then fewer features for exact ties. This does not imply
-statistical superiority when differences are small. All-failing candidates still
-produce a clearly flagged experimental selection, not deployment approval.
-
-Persist one selected forest, its exact feature list and the fitted entity references.
-The full canonical development file is fingerprinted with the source data/model.
-Final evaluation replays prior history with frozen references, uses only the chosen
-candidate and keeps the one-opening guard. No final-test tuning or point adjustment
-is introduced. Generator physics, fleet size and fault scenarios are unchanged.
-
-
-## Version 8 full development verification
-
-All six local notebooks executed on the default 96-ONT, 90-day dataset. The final
-assessment remains unopened. There are 58 passing tests, including causal-prefix,
-missing-history reset, feature nesting, frozen replay and disposable final-evaluation
-checks. The full five-set fitting/tuning notebook took about 585 seconds locally;
-frozen replay took 143 seconds. Run artifacts occupied approximately 628 MB.
-These are machine-specific observations, not runtime guarantees.
-
-Best validation policy per set (46 warning opportunities in every comparison):
-
-| Feature set | Detected / 96 faults | Pre-impact / 46 | Nuisance / 1,000 entity-days |
-|---|---:|---:|---:|
-| Rx only | 95 | 46 | 68.30 |
-| Both Rx directions | 96 | 46 | 68.30 |
-| Add Tx/Rx relationships | 96 | 46 | 70.62 |
-| Add FEC | 96 | 46 | 82.77 |
-| Add temperature | 95 | 46 | 95.50 |
-
-Score coverage was 76.92% for all five best candidates. All used Isolation Forest,
-and none met the nuisance budget of five. The fixed rule selected Rx only on the
-simpler-feature tie-break: both-Rx improved total detected faults by one, but did
-not improve pre-impact recall or nuisance workload. These are tuned synthetic
-validation results, not evidence that extra telemetry is unhelpful in real networks.
-The generator's constructed dependencies and narrow fault family remain material
-limitations. No extra feature set is claimed to improve deployment reliability.
+[etsi]: https://www.etsi.org/deliver/etsi_gs/F5G/001_099/011/01.01.01_60/gs_F5G011v010101p.pdf
+[db]: https://www.nist.gov/pml/special-publication-811/nist-guide-si-chapter-5-units-outside-si
+[g988]: https://www.itu.int/rec/T-REC-G.988
+[g984]: https://www.itu.int/rec/T-REC-G.984.3
+[binomial]: https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.binom.html
+[ar]: https://www.statsmodels.org/stable/tsa.html
+[optical]: https://opg.optica.org/jocn/abstract.cfm?uri=jocn-18-7-674
+[harmonic]: https://otexts.com/fpp3/useful-predictors.html
+[mad]: https://www.itl.nist.gov/div898/handbook/eda/section3/eda35h.htm
+[ols]: https://www.itl.nist.gov/div898/handbook/pmd/section1/pmd141.htm
+[ewma]: https://www.itl.nist.gov/div898/handbook/pmc/section3/pmc314.htm
+[cusum]: https://www.itl.nist.gov/div898/handbook/pmc/section3/pmc323.htm
+[cov]: https://itl.nist.gov/div898/software/dataplot/refman2/auxillar/coefvari.htm
+[acf]: https://www.itl.nist.gov/div898/handbook/eda/section3/eda35c.htm
+[entropy]: https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.entropy.html
+[leakage]: https://scikit-learn.org/stable/common_pitfalls.html
+[iforest]: https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.IsolationForest.html
+[shap]: https://shap.readthedocs.io/en/latest/generated/shap.PermutationExplainer.html
