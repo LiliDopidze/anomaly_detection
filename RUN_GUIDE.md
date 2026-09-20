@@ -7,10 +7,10 @@ downstream Rx alone as the baseline.
 
 ## Local environment
 
-1. Download/extract the current Branch 2 ZIP, or clone:
+1. Download/extract the current main ZIP, or clone:
 
    ```bash
-   git clone --branch codex/branch-2 --single-branch https://github.com/LiliDopidze/anomaly_detection.git
+   git clone --branch main --single-branch https://github.com/LiliDopidze/anomaly_detection.git
    cd anomaly_detection
    ```
 
@@ -160,3 +160,9 @@ The full feature catalogue and source/assumption mapping are in METHOD.md.
 Six-hour optical features require uninterrupted history. Missing readings restart
 that history, which can substantially reduce score coverage. Notebook 02 reports
 coverage, and notebook 04 reports missed faults as well as nuisance alerts.
+
+Notebook 01 also writes `eda/canonical_correlations.csv` and
+`eda/canonical_autocorrelations.csv`: raw and daily-adjusted training relationships,
+per ONT, with paired-observation counts. These inform review, not automatic removal.
+FEC display labels use received/corrected/uncorrectable **blocks**, in each direction;
+stored `*_codewords` columns retain their precise counting unit.

@@ -228,3 +228,79 @@ def canonical_statistics(
                     row["daily_amplitude"] = float(np.hypot(*coefficients[1:]))
         records.append(row)
     return pd.DataFrame(records)
+
+
+def dependence_reports(
+    telemetry: pd.DataFrame, interval_minutes: int
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Training EDA: per-entity relationships before/after daily-pattern removal.
+
+    Pairwise complete observations only; preserve the regular grid for time lags.
+    Residual fits are descriptive, never passed to the detector. No p-value or
+    automatic feature-selection rule is implied by a correlation coefficient.
+    """
+    from .features import daily_design
+
+    correlations, autocorrelations = [], []
+    for entity, group in telemetry.groupby("entity_id"):
+        wide = group.pivot(index="timestamp", columns="metric_name", values="value")
+        grid = pd.date_range(
+            wide.index.min(), wide.index.max(), freq=f"{interval_minutes}min"
+        )
+        wide = wide.reindex(grid)
+        design = daily_design(pd.Series(grid))
+        residual = pd.DataFrame(np.nan, index=grid, columns=wide.columns)
+        for metric in wide:
+            valid = wide[metric].notna()
+            if valid.sum() < 4 or wide.loc[valid, metric].nunique() < 2:
+                continue
+            fit = np.linalg.lstsq(design[valid], wide.loc[valid, metric], rcond=None)[0]
+            values = wide[metric] - design @ fit
+            tolerance = 100 * np.finfo(float).eps * max(1, wide[metric].abs().max())
+            if values.std() > tolerance:
+                residual[metric] = values
+        for view, frame in (("raw", wide), ("daily_residual", residual)):
+            counts = frame.notna().astype(int).T @ frame.notna().astype(int)
+            pearson = frame.corr(method="pearson", min_periods=3)
+            spearman = frame.corr(method="spearman", min_periods=3)
+            for i, left in enumerate(frame.columns):
+                for right in frame.columns[i + 1 :]:
+                    correlations.append(
+                        dict(
+                            entity_id=entity,
+                            view=view,
+                            left=left,
+                            right=right,
+                            paired_observations=int(counts.loc[left, right]),
+                            pearson=pearson.loc[left, right],
+                            spearman=spearman.loc[left, right],
+                        )
+                    )
+            lags = sorted(
+                {
+                    1,
+                    *[
+                        max(1, round(m / interval_minutes))
+                        for m in (30, 60, 360, 720, 1440, 2880, 10080)
+                    ],
+                }
+            )
+            for metric in frame:
+                for lag in lags:
+                    pair = pd.concat([frame[metric], frame[metric].shift(lag)], axis=1)
+                    pair = pair.dropna()
+                    coefficient = np.nan
+                    if len(pair) >= 3 and (pair.nunique() > 1).all():
+                        coefficient = pair.iloc[:, 0].corr(pair.iloc[:, 1])
+                    autocorrelations.append(
+                        dict(
+                            entity_id=entity,
+                            view=view,
+                            metric_name=metric,
+                            lag_intervals=lag,
+                            lag_minutes=lag * interval_minutes,
+                            paired_observations=len(pair),
+                            autocorrelation=coefficient,
+                        )
+                    )
+    return pd.DataFrame(correlations), pd.DataFrame(autocorrelations)

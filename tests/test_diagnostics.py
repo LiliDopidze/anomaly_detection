@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+import pytest
 from optical_anomaly.diagnostics import (
     missingness_report,
     healthy_statistics,
@@ -45,3 +46,29 @@ def test_no_faults_are_a_valid_diagnostic_case(generated_data, generator_config)
     )
     assert faults.empty
     assert "warning_opportunity_proxy" in faults
+
+
+def test_dependence_reports_preserve_time_gaps_and_constant_channels():
+    from optical_anomaly.diagnostics import dependence_reports
+
+    times = pd.date_range("2025-01-01", periods=120, freq="h", tz="UTC")
+    rng = np.random.default_rng(7)
+    x = rng.normal(size=len(times))
+    x[::7] = np.nan
+    frame = pd.DataFrame({"timestamp": times, "a": x, "b": 2 * x, "constant": 3.0})
+    data = frame.melt("timestamp", var_name="metric_name", value_name="value")
+    data["entity_id"] = "A"
+    correlation, acf = dependence_reports(data, 60)
+    ab = correlation.loc[correlation.left.eq("a") & correlation.right.eq("b")]
+    np.testing.assert_allclose(ab.pearson, 1)
+    assert ab.paired_observations.eq(np.isfinite(x).sum()).all()
+    constant = correlation.loc[correlation.right.eq("constant")]
+    assert constant.pearson.isna().all()
+    lag1 = acf.loc[
+        acf.view.eq("raw") & acf.metric_name.eq("a") & acf.lag_intervals.eq(1)
+    ].iloc[0]
+    expected = pd.Series(x)
+    assert lag1.autocorrelation == pytest.approx(expected.autocorr(1))
+    assert (
+        lag1.paired_observations == (expected.notna() & expected.shift().notna()).sum()
+    )

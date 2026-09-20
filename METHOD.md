@@ -77,7 +77,14 @@ conversion before this adapter. The detector checks required measurements after
 adaptation. Validation resamples into right-closed, right-labelled intervals;
 there is no interpolation or forward filling. Invalid readings remain missing.
 
-Canonical training EDA reports distributions, missingness, lag correlations and
+Notebook labels call FEC codewords **blocks**: received, corrected or uncorrectable,
+with upstream/downstream explicit. Stored names retain the precise codeword unit.
+
+Canonical training EDA reports per-ONT Pearson/Spearman measurement correlations
+and selected-lag autocorrelations, before and after daily-pattern removal. Pair
+counts accompany coefficients; constants/insufficient pairs remain NaN. These are
+descriptive diagnostics, not significance tests or automatic feature filters.
+It also reports distributions, missingness and
 chronological daily/weekly seasonal comparisons. Its holdout is inside training.
 The model uses one daily sine/cosine pair fitted on healthy training only, or a
 median baseline when seasonality is disabled. Harmonic regression is established
