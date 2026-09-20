@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
-from .features import FeatureEngineer, FEATURES, daily_design
+from .features import FeatureEngineer, FEATURES, daily_design, rolling_slope
 
 FEATURE_SETS = ("rx_only", "both_rx", "tx_rx", "fec", "temperature")
 CHANNELS = {
@@ -29,11 +29,19 @@ def channels_for(feature_set: str) -> list[str]:
     ]
 
 
+def summaries_for(channel: str) -> tuple[str, ...]:
+    if channel in ("upstream_rx", "downstream_loss", "upstream_loss"):
+        return SUMMARIES + ("regression_slope", "long_level", "short_minus_long")
+    if "fec" in channel:
+        return SUMMARIES + ("error_interval_fraction",)
+    return SUMMARIES
+
+
 def columns_for(feature_set: str) -> list[str]:
     return FEATURES + [
         f"{channel}_{summary}"
         for channel in channels_for(feature_set)
-        for summary in SUMMARIES
+        for summary in summaries_for(channel)
     ]
 
 
@@ -118,7 +126,7 @@ class MultivariateFeatures:
             for name in channels_for(self.feature_set):
                 reference = self.references.get((entity, name))
                 if reference is None or name not in group:
-                    for summary in SUMMARIES:
+                    for summary in summaries_for(name):
                         result[f"{name}_{summary}"] = np.nan
                     continue
                 coefficients, scale = reference
@@ -126,7 +134,11 @@ class MultivariateFeatures:
                     group[name] - daily_design(group.timestamp) @ coefficients
                 ) / scale
                 result = pd.concat(
-                    [result, self._summaries(residual, group.timestamp, name)], axis=1
+                    [
+                        result,
+                        self._summaries(residual, group.timestamp, name, group[name]),
+                    ],
+                    axis=1,
                 )
             additions.append(result)
         extra = pd.concat(additions, ignore_index=True)
@@ -135,10 +147,16 @@ class MultivariateFeatures:
         )
 
     def _summaries(
-        self, residual: pd.Series, times: pd.Series, name: str
+        self,
+        residual: pd.Series,
+        times: pd.Series,
+        name: str,
+        measurement: pd.Series | None = None,
     ) -> pd.DataFrame:
         output = pd.DataFrame(
-            np.nan, index=residual.index, columns=[f"{name}_{s}" for s in SUMMARIES]
+            np.nan,
+            index=residual.index,
+            columns=[f"{name}_{s}" for s in summaries_for(name)],
         )
         step = pd.Timedelta(minutes=self.baseline.interval_minutes)
         gaps = times.diff().ne(step)
@@ -160,4 +178,30 @@ class MultivariateFeatures:
             .droplevel(0)
             .sort_index()
         )
+        if "long_level" in summaries_for(name):
+            output[f"{name}_long_level"] = (
+                grouped.rolling(self.baseline.long_window)
+                .mean()
+                .droplevel(0)
+                .sort_index()
+            )
+            output[f"{name}_short_minus_long"] = (
+                output[f"{name}_level"] - output[f"{name}_long_level"]
+            )
+            output[f"{name}_regression_slope"] = grouped.transform(
+                lambda x: rolling_slope(
+                    x, self.baseline.window, self.baseline.interval_minutes / 60
+                )
+            )
+        if "error_interval_fraction" in summaries_for(name):
+            if measurement is None:
+                raise ValueError("FEC summaries require uncentred measurements")
+            present = measurement.gt(0).astype(float).where(measurement.notna())
+            output[f"{name}_error_interval_fraction"] = (
+                present.groupby(segments)
+                .rolling(self.baseline.window)
+                .mean()
+                .droplevel(0)
+                .sort_index()
+            )
         return output

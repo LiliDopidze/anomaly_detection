@@ -38,13 +38,13 @@ downstream Rx alone as the baseline.
 3. Install and check:
 
    ```bash
-   python -m pip install -e ".[dev]"
+   python -m pip install -e ".[dev,explain]"
    python -m pytest
    ```
 
 4. Open `configs/config.yaml`. Defaults are 96 entities, 90 days, five-minute
-   intervals and `output: outputs/optical_v8`. To run another experiment, use a
-   fresh output folder, such as `outputs/optical_v8_run02`.
+   intervals and `output: outputs/optical_v9`. To run another experiment, use a
+   fresh output folder, such as `outputs/optical_v9_run02`.
 
 5. Start Jupyter with the installed environment:
 
@@ -53,7 +53,7 @@ downstream Rx alone as the baseline.
    python -m notebook
    ```
 
-   Select **Python (optical anomaly)** inside each notebook. Run 00–05 in order:
+   Select **Python (optical anomaly)** inside each notebook. Run 00–06 in order:
 
    | Notebook | Purpose |
    |---|---|
@@ -63,6 +63,7 @@ downstream Rx alone as the baseline.
    | `03_detector_tuning.ipynb` | Compare five telemetry sets; fit/calibrate detectors and tune incident persistence |
    | `04_evaluation.ipynb` | Review validation errors; final assessment defaults off |
    | `05_end_to_end_demo.ipynb` | Verify saved-model replay; optional stress tests |
+   | `06_feature_importance.ipynb` | Global and local SHAP; correlation review; no feature removal |
 
 Without notebooks, the complete development run is:
 
@@ -72,9 +73,9 @@ python -c "from optical_anomaly.pipeline import develop; print(develop('configs/
 
 Run this from the repository root. It refuses to overwrite a fitted model.
 
-**Where local outputs go:** `<repository>/outputs/optical_v8/` by default.
+**Where local outputs go:** `<repository>/outputs/optical_v9/` by default.
 For the current local checkout, that is:
-`/Users/lilidopidze/Documents/Anomaly Detection/outputs/optical_v8/`.
+`/Users/lilidopidze/Documents/Anomaly Detection/outputs/optical_v9/`.
 On Windows or another machine, the prefix is wherever you cloned/extracted the repo.
 An absolute `output` path in the YAML saves directly to that path instead.
 
@@ -88,7 +89,7 @@ An absolute `output` path in the YAML saves directly to that path instead.
 | `generation_checks.json` | Structural and FEC consistency checks |
 | `settings.json`, `manifest.json` | Settings, time splits and frozen fingerprints |
 | `canonical_development.parquet` | Adapted and validated long telemetry; final period excluded |
-| `development_features.parquet` | All 33 candidate features, excluding final-period observations |
+| `development_features.parquet` | All 52 candidate features, excluding final-period observations |
 | `feature_set_comparison.csv` | Best validation policy per feature set |
 | `validation_scores.parquet` | Normalised anomaly scores for validation |
 | `validation_comparison.csv` | Candidate incident policies and operational metrics |
@@ -130,9 +131,9 @@ history. The five-set synthetic comparison requires the full mapping. Standalone
 company experiments can still use the original FeatureEngineer and detector classes.
 
 For an existing run made before this multivariate change, set a fresh `output` in
-`configs/config.yaml` before running notebooks 00–05.
+`configs/config.yaml` before running notebooks 00–06.
 Preserve old run directories; their frozen code fingerprints intentionally differ.
-Old completed runs cannot be upgraded in place. The new default is `outputs/optical_v8`.
+Old completed runs cannot be upgraded in place. The new default is `outputs/optical_v9`.
 
 ## Reading the comparison
 
@@ -146,3 +147,16 @@ candidate. The `feature_set` and exact feature columns are stored in `manifest.j
 The expanded canonical table and five model comparisons take more disk space and
 runtime than v7. Keep the standard run for development; use fewer ONTs for an
 installation smoke test, clearly separated from performance experiments.
+
+## Feature explanations
+
+Notebook 06 saves `explanations/<feature_set>/` inside the configured output:
+`importance.csv`, global and high-score SHAP tables, feature samples, score
+reconstruction checks, correlations and sampling metadata. All five fitted forests
+remain in `model.joblib` for review. SHAP explains raw Isolation Forest scores,
+not incident decisions or physical causes; it never removes features.
+The full feature catalogue and source/assumption mapping are in METHOD.md.
+
+Six-hour optical features require uninterrupted history. Missing readings restart
+that history, which can substantially reduce score coverage. Notebook 02 reports
+coverage, and notebook 04 reports missed faults as well as nuisance alerts.

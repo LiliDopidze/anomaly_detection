@@ -6,7 +6,21 @@ import pandas as pd
 from .validation import require_downstream_rx
 from .mathematics import coefficient_of_variation, lag_one, entropy, negative_cusum
 
-FEATURES = ["cov", "autocorrelation", "cusum", "entropy", "acceleration", "slope"]
+EXPERIMENTAL_FEATURES = ["cov", "autocorrelation", "entropy", "acceleration"]
+FEATURES = [
+    "cov",
+    "autocorrelation",
+    "cusum",
+    "entropy",
+    "acceleration",
+    "slope",
+    "level",
+    "variability",
+    "regression_slope",
+    "long_level",
+    "short_minus_long",
+    "below_baseline_fraction",
+]
 
 
 def daily_design(times: pd.Series) -> np.ndarray:
@@ -18,6 +32,7 @@ def daily_design(times: pd.Series) -> np.ndarray:
 @dataclass
 class FeatureEngineer:
     window: int = 12
+    long_window_hours: float = 6.0
     interval_minutes: int = 5
     smoothing_hours: float = 1.0
     allowance: float = 0.25
@@ -26,9 +41,15 @@ class FeatureEngineer:
         default_factory=dict, init=False
     )
 
+    @property
+    def long_window(self) -> int:
+        return int(np.ceil(self.long_window_hours * 60 / self.interval_minutes))
+
     def fit(self, telemetry: pd.DataFrame) -> "FeatureEngineer":
         if self.window < 3 or self.interval_minutes <= 0 or self.smoothing_hours <= 0:
             raise ValueError("Need window >=3 and positive cadence/smoothing")
+        if self.long_window < self.window:
+            raise ValueError("Long window must be at least the short window")
         if self.allowance < 0:
             raise ValueError("CUSUM allowance must be nonnegative")
         require_downstream_rx(telemetry)
@@ -87,6 +108,17 @@ class FeatureEngineer:
             if x.isna().any():
                 continue
             window = x.rolling(self.window, min_periods=self.window)
+            output.loc[indices, "level"] = window.mean()
+            output.loc[indices, "variability"] = window.std(ddof=0)
+            output.loc[indices, "regression_slope"] = rolling_slope(
+                x, self.window, self.interval_minutes / 60
+            )
+            long_mean = x.rolling(self.long_window).mean()
+            output.loc[indices, "long_level"] = long_mean
+            output.loc[indices, "short_minus_long"] = window.mean() - long_mean
+            output.loc[indices, "below_baseline_fraction"] = (
+                x.lt(0).astype(float).rolling(self.window).mean()
+            )
             # Linear normalised power prevents overflow without changing its CoV.
             linear = 10 ** ((group.loc[indices, "value"] - coefficients[0]) / 10)
             output.loc[indices, "cov"] = linear.rolling(self.window).apply(
@@ -111,3 +143,11 @@ class FeatureEngineer:
                 x.diff().diff().div(dt**2).ewm(alpha=alpha, adjust=False).mean()
             )
         return output
+
+
+def rolling_slope(values: pd.Series, window: int, step_hours: float) -> pd.Series:
+    """Least-squares slope per hour on a complete, equally spaced past window."""
+    time = np.arange(window, dtype=float) * step_hours
+    centred = time - time.mean()
+    weights = centred / (centred @ centred)
+    return values.rolling(window).apply(lambda x: float(x @ weights), raw=True)

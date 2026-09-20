@@ -184,8 +184,12 @@ def develop(config_path: str | Path) -> Path:
         run / "feature_set_comparison.csv", index=False
     )
     keys = ["detector", "high", "low", "opening_intervals", "closing_intervals"]
-    policy = json.loads(comparison.iloc[0][keys].to_json())
-    feature_set = str(comparison.iloc[0].feature_set)
+    # Telemetry scope is explicit. Comparison and importance never drop features.
+    feature_set = settings.get("model", {}).get("feature_set", "temperature")
+    if feature_set not in FEATURE_SETS:
+        raise ValueError(f"Unknown configured feature set: {feature_set}")
+    selected = comparison.loc[comparison.feature_set.eq(feature_set)].iloc[0]
+    policy = json.loads(selected[keys].to_json())
     forest = forests[feature_set]
     validation_scores = score_detectors(features, statistical, forest).loc[
         masks["validation"]
@@ -195,6 +199,7 @@ def develop(config_path: str | Path) -> Path:
         "feature_set": feature_set,
         "statistical": statistical,
         "forest": forest,
+        "forests": forests,
         "policy": policy,
         "split": split,
         "interval": config.interval_minutes,
@@ -237,7 +242,9 @@ def _save_development(
         "feature_set": model["feature_set"],
         "feature_columns": model["forest"].feature_columns,
         "meets_validation_workload_budget": bool(
-            comparison.iloc[0].meets_workload_budget
+            comparison.loc[comparison.feature_set.eq(model["feature_set"])]
+            .iloc[0]
+            .meets_workload_budget
         ),
         "split_boundaries": [
             str(t)
@@ -255,6 +262,7 @@ def _save_development(
                 "ground_truth.parquet",
                 "topology.parquet",
                 "model.joblib",
+                "development_features.parquet",
                 "canonical_development.parquet",
             )
         },
