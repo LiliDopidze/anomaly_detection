@@ -6,11 +6,10 @@ import json
 import joblib
 import pandas as pd
 import yaml
-from .sources import synthetic_adapter
-from .validation import DataValidator
 from .generator import GeneratorConfig, generate, make_topology
 from .optics import validate_generated
-from .features import FeatureEngineer
+from .multivariate import FEATURE_SETS, columns_for
+from .workflow import prepare_canonical, feature_data, run_split
 from .detectors import StatisticalDetector, IsolationForestDetector
 from .incidents import IncidentManager
 from .evaluation import Evaluator
@@ -33,7 +32,9 @@ def score_detectors(
     scores = features[["timestamp", "entity_id"]].copy()
     scores["statistical"] = statistical.score(features)
     scores["isolation_forest"] = forest.score(features)
-    scores["combined"] = scores[["statistical", "isolation_forest"]].max(axis=1)
+    scores["combined"] = scores[["statistical", "isolation_forest"]].max(
+        axis=1, skipna=False
+    )
     return scores
 
 
@@ -78,6 +79,7 @@ def tune(
                     split.calibration_end,
                     split.validation_end,
                 )
+                metrics["score_coverage"] = float(scores[detector].notna().mean())
                 rows.append({**policy, **metrics})
     table = pd.DataFrame(rows)
     table["meets_workload_budget"] = table.nuisance_per_1000_entity_days.le(
@@ -131,50 +133,66 @@ def develop(config_path: str | Path) -> Path:
         raise FileExistsError("Model already fitted; choose a new output folder")
     settings = json.loads((run / "settings.json").read_text())
     config = GeneratorConfig(**settings["generator"])
-    native = pd.read_parquet(
-        run / "telemetry.parquet", columns=["time", "device", "rx_dbm"]
-    )
-    truth = pd.read_parquet(run / "ground_truth.parquet")
-    start = native.time.min()
-    boundaries = [
-        start + pd.Timedelta(days=config.days * f) for f in settings["splits"]
-    ]
-    split = TemporalSplit(*boundaries)
-    # Do not even adapt final-period measurements during development.
-    telemetry = DataValidator(f"{config.interval_minutes}min").transform(
-        synthetic_adapter(["rx_dbm"]).transform(
-            native.loc[native.time < split.validation_end]
-        )
-    )
-    train = telemetry.loc[telemetry.timestamp < split.train_end]
-    engineer = FeatureEngineer(
-        interval_minutes=config.interval_minutes, **settings["features"]
-    ).fit(train)
-    features = engineer.transform(telemetry)
+    prepare_canonical(run)
+    split = run_split(settings)
+    features, telemetry, engineers = feature_data(run, settings)
     masks = split.masks(features.timestamp)
-    statistical = StatisticalDetector().calibrate(features.loc[masks["calibration"]])
-    forest = (
-        IsolationForestDetector()
-        .fit(features.loc[masks["train"]])
-        .calibrate(features.loc[masks["calibration"]])
-    )
-    scores = score_detectors(features, statistical, forest)
-    validation_scores = scores.loc[masks["validation"]]
-    # Cut labels before validation boundary, including repair-crossing events separately.
+    truth = pd.read_parquet(run / "ground_truth.parquet")
     validation_truth = truth.loc[truth.onset_time < split.validation_end]
-    comparison = tune(
-        validation_scores,
-        validation_truth,
-        telemetry,
-        split,
-        settings["incidents"],
-        config.interval_minutes,
+    statistical = StatisticalDetector().calibrate(features.loc[masks["calibration"]])
+    comparisons, forests = [], {}
+    for order, feature_set in enumerate(FEATURE_SETS):
+        forest = IsolationForestDetector(feature_columns=columns_for(feature_set))
+        forest.fit(features.loc[masks["train"]])
+        forest.calibrate(features.loc[masks["calibration"]])
+        scores = score_detectors(features, statistical, forest)
+        table = tune(
+            scores.loc[masks["validation"]],
+            validation_truth,
+            telemetry,
+            split,
+            settings["incidents"],
+            config.interval_minutes,
+        )
+        # The unchanged statistical comparator belongs to the Rx-only baseline.
+        if feature_set != "rx_only":
+            table = table.loc[table.detector.ne("statistical")].copy()
+        table["feature_set"] = feature_set
+        table["feature_count"] = len(columns_for(feature_set))
+        table["complexity_order"] = order
+        comparisons.append(table)
+        forests[feature_set] = forest
+    comparison = (
+        pd.concat(comparisons, ignore_index=True)
+        .sort_values(
+            [
+                "meets_workload_budget",
+                "pre_impact_recall",
+                "nuisance_per_1000_entity_days",
+                "complexity_order",
+                "detector",
+                "opening_intervals",
+                "closing_intervals",
+            ],
+            ascending=[False, False, True, True, True, True, True],
+            na_position="last",
+        )
+        .reset_index(drop=True)
     )
     comparison.to_csv(run / "validation_comparison.csv", index=False)
+    comparison.groupby("feature_set", sort=False).head(1).to_csv(
+        run / "feature_set_comparison.csv", index=False
+    )
     keys = ["detector", "high", "low", "opening_intervals", "closing_intervals"]
     policy = json.loads(comparison.iloc[0][keys].to_json())
+    feature_set = str(comparison.iloc[0].feature_set)
+    forest = forests[feature_set]
+    validation_scores = score_detectors(features, statistical, forest).loc[
+        masks["validation"]
+    ]
     model = {
-        "engineer": engineer,
+        "engineers": engineers,
+        "feature_set": feature_set,
         "statistical": statistical,
         "forest": forest,
         "policy": policy,
@@ -216,6 +234,8 @@ def _save_development(
     manifest = {
         "settings": settings,
         "policy": policy,
+        "feature_set": model["feature_set"],
+        "feature_columns": model["forest"].feature_columns,
         "meets_validation_workload_budget": bool(
             comparison.iloc[0].meets_workload_budget
         ),
@@ -235,6 +255,7 @@ def _save_development(
                 "ground_truth.parquet",
                 "topology.parquet",
                 "model.joblib",
+                "canonical_development.parquet",
             )
         },
         "code": {p.name: digest(p) for p in Path(__file__).parent.glob("*.py")},
@@ -257,13 +278,9 @@ def final_evaluation(run: str | Path) -> dict:
         json.dump({"opened_at": str(pd.Timestamp.now(tz="UTC"))}, stream)
     # Load only trusted, locally generated joblib files.
     model = joblib.load(run / "model.joblib")
-    native = pd.read_parquet(
-        run / "telemetry.parquet", columns=["time", "device", "rx_dbm"]
+    features, telemetry, _ = feature_data(
+        run, manifest["settings"], model["engineers"], final=True
     )
-    telemetry = DataValidator(f"{model['interval']}min").transform(
-        synthetic_adapter(["rx_dbm"]).transform(native)
-    )
-    features = model["engineer"].transform(telemetry)
     scores = score_detectors(features, model["statistical"], model["forest"])
     split = model["split"]
     test = scores.loc[split.masks(scores.timestamp)["test"]]

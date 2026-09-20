@@ -18,7 +18,8 @@ jupyter notebook
 
 For local analysis, run the notebooks in order:
 
-1. `01_generator_eda.ipynb`: inspect and qualify native synthetic data, then preview canonical adaptation.
+0. `00_generate_and_diagnose.ipynb`: generate and inspect native data; check structure, missingness and development faults.
+1. `01_canonical_eda.ipynb`: adapt, validate and inspect distributions, seasonality and relationships.
 2. `02_feature_distributions.ipynb`: inspect causal features and missingness.
 3. `03_detector_tuning.ipynb`: fit both tiers and tune incident persistence.
 4. `04_evaluation.ipynb`: inspect misses and workload; final assessment defaults off.
@@ -52,7 +53,7 @@ filesystem changes. Load joblib model files only from trusted sources.
 
 ```text
 configs/config.yaml                 # One readable experiment configuration
-notebooks/                          # Five ordered data-science notebooks
+notebooks/                          # Six ordered local data-science notebooks
 src/optical_anomaly/
     generator.py                    # Expanded telemetry, static topology and fault truth
     optics.py                       # GPON-inspired directional FEC and invariants
@@ -63,6 +64,8 @@ src/optical_anomaly/
     splitting.py                    # TemporalSplit: train/calibration/validation/test
     mathematics.py                  # Small independently tested formulas
     features.py                     # FeatureEngineer: normalisation and shape features
+    multivariate.py                 # Five nested telemetry feature sets
+    workflow.py                     # Canonical storage and per-ONT feature replay
     detectors.py                    # StatisticalDetector and IsolationForestDetector
     incidents.py                    # IncidentManager: persistent hysteresis state
     evaluation.py                   # Evaluator: one-to-one matching and metrics
@@ -84,6 +87,8 @@ Generated artifacts live under the configured output directory, ignored by Git:
 
 - `telemetry.parquet`: 96 ONTs × 90 days × five-minute samples by default
   (2,488,320 rows; 14 measurement columns plus time/device).
+- `canonical_development.parquet`: adapted/validated long telemetry before the final period.
+- `feature_set_comparison.csv`: best validation policy for each telemetry set.
 - `ground_truth.parquet`: separate onset, visibility, impact and repair labels.
 - `topology.parquet`: static `entity_id`, `olt_id`, `pon_port_id`, `splitter_id` mapping.
 - `generation_checks.json`: data consistency and FEC count checks.
@@ -122,9 +127,9 @@ The `develop` convenience function is specifically for the synthetic experiment.
 
 The generator includes downstream/upstream Rx, ONT/OLT Tx, ONT/OLT temperatures,
 two pre-FEC BER proxies, and corrected/uncorrectable/total FEC interval counts in
-each direction. The adapter recognises all 14 measurements. The baseline model
-still uses downstream Rx; extra measurements are available in EDA for future
-feature comparisons. Topology is context only. Operational events, voltage,
+each direction. The adapter recognises all 14 measurements. The pipeline compares
+Rx-only, both Rx directions, Tx/Rx relationships, FEC, and temperature cumulatively.
+BER proxies are inspected but not added as redundant model inputs. Topology is context only. Operational events, voltage,
 bias current, traffic and topology-based incident logic are not added.
 
 The canonical schema is `timestamp, entity_id, metric_name, value`. Validation
@@ -143,20 +148,23 @@ Tests own their configuration and do not require your current working directory
 to be the repository root. See [RUN_GUIDE.md](RUN_GUIDE.md) for Windows/macOS setup,
 notebook order, output interpretation and rerunning an experiment.
 
-Default local outputs are under `<repository>/outputs/optical_v7/`.
+Default local outputs are under `<repository>/outputs/optical_v8/`.
 All outputs stay outside Git. See [RUN_GUIDE.md](RUN_GUIDE.md) for exact commands.
 
 ### Inspect first, then adapt
 
-Notebook 01 reports dataset size, the measurement dictionary, topology, per-ONT
-missingness and gap lengths, distributions, daily patterns, residual statistics,
-and development fault durations, warning opportunities and effect sizes. Full-data
+Notebook 00 reports dataset size, the measurement dictionary, topology, per-ONT
+missingness and gap lengths, distributions, and development fault durations,
+warning opportunities and effect sizes, plus generator-specific statistical
+qualification. Notebook 01 adds canonical seasonality,
+residual statistics and cross-measurement EDA. Full-data
 checks are structural only; detailed final-test inspection is excluded. CSV reports
 and structural checks are saved under `<configured output>/eda/`.
 
 `adapter.py` defines canonical semantics without synthetic column defaults.
 `sources.py` supplies the synthetic mapping; for a subset use
-`synthetic_adapter(["rx_dbm"])`. Every explicitly mapped column must exist.
+`synthetic_adapter(["rx_dbm"])` for the standalone Rx baseline. The five-set
+synthetic experiment uses the full mapping. Every explicitly mapped column must exist.
 Company mappings declare names, units and gauge/interval-count semantics. Cumulative
 counters must be converted with reset and gap handling before adaptation. The
 adapter accepts temperature-only data; the downstream baseline separately requires
@@ -165,3 +173,32 @@ usable Rx data, and fitting checks the amount of baseline history.
 After updating an existing checkout, choose a **new output folder** before fitting
 again. Existing models and final-test manifests remain tied to their original code;
 do not overwrite their hashes or reuse them as a new experiment.
+
+## Five controlled telemetry comparisons
+
+| Feature set | Cumulative inputs | Feature count |
+|---|---|---|
+| `rx_only` | Original downstream Rx shape features | 6 |
+| `both_rx` | Add upstream Rx | 9 |
+| `tx_rx` | Add downstream and upstream Tx minus Rx loss proxies | 15 |
+| `fec` | Add directional corrected and uncorrectable FEC fractions | 27 |
+| `temperature` | Add ONT and OLT optical-module temperatures | 33 |
+
+Every added channel contributes rolling standardised level, EWMA slope and rolling
+variability. References are fitted per ONT on training data only. Fixed FEC log
+transforms and precision floors are explicit modelling assumptions in METHOD.md.
+Unseen entities abstain in the feature classes; missing required channels produce
+missing scores, never healthy imputation. The synthetic fitting workflow requires
+all measurements needed to compare all five sets.
+
+The statistical Rx baseline is unchanged. Each feature set has its own Isolation
+Forest and score calibration; combined scores require both tiers to be available.
+Validation compares early recall, nuisance workload, delay and coverage. Exact
+performance ties prefer the simpler feature set. A failed nuisance budget is
+flagged, even when an experimental best candidate is saved. Only that frozen
+candidate is eligible for the final assessment; final results are not used to
+choose among telemetry sets.
+
+Notebook 01 saves canonical training statistics under `eda/`, including daily/weekly
+lag correlations and chronological seasonality comparisons. Notebook 02 illustrates
+all feature groups on one training ONT; notebook 03 runs the full fleet comparison.

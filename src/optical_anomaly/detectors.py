@@ -50,11 +50,12 @@ class StatisticalDetector:
 @dataclass
 class IsolationForestDetector:
     seed: int = 42
+    feature_columns: list[str] = field(default_factory=lambda: FEATURES.copy())
     forest: IsolationForest = field(init=False)
     normalizer: ScoreNormalizer = field(default_factory=ScoreNormalizer)
 
     def fit(self, features: pd.DataFrame) -> "IsolationForestDetector":
-        complete = features[FEATURES].dropna()
+        complete = features[self.feature_columns].dropna()
         if len(complete) < 100:
             raise ValueError("Need 100 complete training rows")
         self.forest = IsolationForest(
@@ -66,11 +67,11 @@ class IsolationForestDetector:
         return self
 
     def raw_score(self, features: pd.DataFrame) -> pd.Series:
-        valid = features[FEATURES].notna().all(axis=1)
+        valid = features[self.feature_columns].notna().all(axis=1)
         scores = pd.Series(np.nan, index=features.index)
         if valid.any():
             scores.loc[valid] = -self.forest.score_samples(
-                features.loc[valid, FEATURES]
+                features.loc[valid, self.feature_columns]
             )
         return scores
 

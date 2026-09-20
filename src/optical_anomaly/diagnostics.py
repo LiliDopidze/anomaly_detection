@@ -150,3 +150,81 @@ def fault_contrasts(native: pd.DataFrame, faults: pd.DataFrame) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(records)
+
+
+def canonical_statistics(
+    telemetry: pd.DataFrame, interval_minutes: int
+) -> pd.DataFrame:
+    """Healthy canonical EDA with a chronological seasonal holdout.
+
+    Compare constant, daily, and daily+weekly regression within the supplied
+    training period. R2 here measures holdout improvement over a fitted constant,
+    not a significance test. No missing values are interpolated.
+    """
+    records = []
+    for (entity, metric), group in telemetry.groupby(["entity_id", "metric_name"]):
+        group = group.sort_values("timestamp")
+        series = group.set_index("timestamp").value
+        step = pd.Timedelta(minutes=interval_minutes)
+        grid = pd.date_range(series.index.min(), series.index.max(), freq=step)
+        series = series.reindex(grid)
+        days = (series.index - series.index[0]).total_seconds().to_numpy() / 86400
+        values = series.to_numpy()
+        finite = np.isfinite(values)
+        cut = days[-1] * 0.7
+        train, test = finite & (days < cut), finite & (days >= cut)
+        row = {
+            "entity_id": entity,
+            "metric_name": metric,
+            "observed": int(finite.sum()),
+            "missing_fraction": 1 - finite.mean(),
+            "mean": series.mean(),
+            "std": series.std(),
+            "minimum": series.min(),
+            "maximum": series.max(),
+            "lag1": series.autocorr(1) if series.nunique() > 1 else np.nan,
+            "lag_daily": (
+                series.autocorr(max(1, round(1440 / interval_minutes)))
+                if series.nunique() > 1
+                else np.nan
+            ),
+            "lag_weekly": (
+                series.autocorr(max(1, round(10080 / interval_minutes)))
+                if days[-1] >= 14 and series.nunique() > 1
+                else np.nan
+            ),
+        }
+        row.update(
+            daily_amplitude=np.nan,
+            daily_holdout_r2=np.nan,
+            daily_weekly_holdout_r2=np.nan,
+        )
+        if train.sum() >= 100 and test.sum() >= 30:
+            phase = 2 * np.pi * days
+            design = np.column_stack(
+                [
+                    np.ones(len(days)),
+                    np.sin(phase),
+                    np.cos(phase),
+                    np.sin(phase / 7),
+                    np.cos(phase / 7),
+                ]
+            )
+            denominator = np.mean((values[test] - values[train].mean()) ** 2)
+            for columns, key in [
+                (3, "daily_holdout_r2"),
+                (5, "daily_weekly_holdout_r2"),
+            ]:
+                if columns == 5 and cut < 21:
+                    continue
+                coefficients = np.linalg.lstsq(
+                    design[train, :columns], values[train], rcond=None
+                )[0]
+                errors = values[test] - design[test, :columns] @ coefficients
+                row[key] = (
+                    1 - np.mean(errors**2) / denominator if denominator > 0 else np.nan
+                )
+                if columns == 3:
+                    row["daily_amplitude"] = float(np.hypot(*coefficients[1:]))
+        records.append(row)
+    return pd.DataFrame(records)
