@@ -22,7 +22,7 @@ and defaults to saving results in your Google Drive. Use a CPU runtime.
 
 For local analysis, run the notebooks in order:
 
-1. `01_generator_eda.ipynb`: generate and inspect baseline telemetry.
+1. `01_generator_eda.ipynb`: inspect and qualify native synthetic data, then preview canonical adaptation.
 2. `02_feature_distributions.ipynb`: inspect causal features and missingness.
 3. `03_detector_tuning.ipynb`: fit both tiers and tune incident persistence.
 4. `04_evaluation.ipynb`: inspect misses and workload; final assessment defaults off.
@@ -60,7 +60,9 @@ notebooks/                          # Five ordered data-science notebooks
 src/optical_anomaly/
     generator.py                    # Expanded telemetry, static topology and fault truth
     optics.py                       # GPON-inspired directional FEC and invariants
-    adapter.py                      # TelemetryAdapter: names, units, timezone
+    adapter.py                      # Canonical definitions and explicit adaptation
+    sources.py                      # Synthetic source mapping
+    diagnostics.py                  # Native-data EDA and qualification checks
     validation.py                   # DataValidator: causal resampling, explicit gaps
     splitting.py                    # TemporalSplit: train/calibration/validation/test
     mathematics.py                  # Small independently tested formulas
@@ -103,16 +105,18 @@ Map your native DataFrame explicitly; BER is optional:
 
 ```python
 from optical_anomaly.adapter import TelemetryAdapter
-from optical_anomaly.validation import DataValidator
+from optical_anomaly.validation import DataValidator, require_downstream_rx
 
 adapter = TelemetryAdapter(
     timestamp_column="sample_time",
     entity_column="device_id",
     metrics={"received_power": "rx_power_dbm"},
     units={"rx_power_dbm": "dBm"},
+    kinds={"rx_power_dbm": "gauge"},
     timezone="Europe/London",
 )
 telemetry = DataValidator("5min").transform(adapter.transform(native))
+require_downstream_rx(telemetry)
 ```
 
 Then use the stage classes with reviewed local chronological periods: fit
@@ -147,3 +151,23 @@ Default local outputs are under `<repository>/outputs/optical_v7/`. The Colab
 starter saves to `/content/drive/MyDrive/anomaly_detection/<RUN_NAME>/` with
 `SAVE_TO_DRIVE=True`, or `/content/anomaly_detection/outputs/<RUN_NAME>/` otherwise.
 All outputs stay outside Git. See [RUN_GUIDE.md](RUN_GUIDE.md) for exact commands.
+
+### Inspect first, then adapt
+
+Notebook 01 reports dataset size, the measurement dictionary, topology, per-ONT
+missingness and gap lengths, distributions, daily patterns, residual statistics,
+and development fault durations, warning opportunities and effect sizes. Full-data
+checks are structural only; detailed final-test inspection is excluded. CSV reports
+and structural checks are saved under `<configured output>/eda/`.
+
+`adapter.py` defines canonical semantics without synthetic column defaults.
+`sources.py` supplies the synthetic mapping; for a subset use
+`synthetic_adapter(["rx_dbm"])`. Every explicitly mapped column must exist.
+Company mappings declare names, units and gauge/interval-count semantics. Cumulative
+counters must be converted with reset and gap handling before adaptation. The
+adapter accepts temperature-only data; the downstream baseline separately requires
+usable Rx data, and fitting checks the amount of baseline history.
+
+After updating an existing checkout, choose a **new output folder** before fitting
+again. Existing models and final-test manifests remain tied to their original code;
+do not overwrite their hashes or reuse them as a new experiment.

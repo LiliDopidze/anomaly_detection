@@ -1,41 +1,68 @@
 """Explicit source mapping into the four-column long telemetry schema."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Literal
 import numpy as np
 import pandas as pd
 
 
-# Canonical units and native names. Counts are interval totals, not cumulative.
-METRICS = {
-    "rx_dbm": ("rx_power_dbm", "dBm"),
-    "upstream_rx_dbm": ("upstream_rx_power_dbm", "dBm"),
-    "ont_tx_dbm": ("ont_tx_power_dbm", "dBm"),
-    "olt_tx_dbm": ("olt_tx_power_dbm", "dBm"),
-    "ont_temperature_c": ("ont_temperature_c", "C"),
-    "olt_temperature_c": ("olt_temperature_c", "C"),
-    "ber": ("ber", "ratio"),
-    "upstream_ber": ("upstream_ber", "ratio"),
+@dataclass(frozen=True)
+class MetricDefinition:
+    unit: str
+    kind: Literal["gauge", "interval_count"]
+    description: str
+
+
+CANONICAL_METRICS = {
+    "rx_power_dbm": MetricDefinition("dBm", "gauge", "Downstream Rx at ONT"),
+    "upstream_rx_power_dbm": MetricDefinition(
+        "dBm", "gauge", "Upstream Rx at OLT per ONT"
+    ),
+    "ont_tx_power_dbm": MetricDefinition("dBm", "gauge", "ONT transmit power"),
+    "olt_tx_power_dbm": MetricDefinition(
+        "dBm", "gauge", "Shared OLT port transmit power"
+    ),
+    "ont_temperature_c": MetricDefinition("C", "gauge", "ONT temperature"),
+    "olt_temperature_c": MetricDefinition("C", "gauge", "Shared OLT port temperature"),
+    "ber": MetricDefinition("ratio", "gauge", "Downstream pre-FEC BER"),
+    "upstream_ber": MetricDefinition("ratio", "gauge", "Upstream pre-FEC BER"),
 }
 for direction in ("downstream", "upstream"):
     for kind in ("corrected", "uncorrectable", "total"):
         name = f"{direction}_fec_{kind}_codewords"
-        METRICS[name] = (name, "interval_count")
-CANONICAL_UNITS = dict(METRICS.values())
+        CANONICAL_METRICS[name] = MetricDefinition(
+            "interval_count",
+            "interval_count",
+            f"{direction.title()} {kind} codewords in preceding reporting interval",
+        )
+CANONICAL_UNITS = {name: item.unit for name, item in CANONICAL_METRICS.items()}
 
 
 @dataclass
 class TelemetryAdapter:
-    timestamp_column: str = "time"
-    entity_column: str = "device"
-    metrics: dict[str, str] = field(
-        default_factory=lambda: {
-            source: metric for source, (metric, _) in METRICS.items()
-        }
-    )
-    units: dict[str, str] = field(default_factory=lambda: CANONICAL_UNITS.copy())
+    """No source-specific defaults or inference of units/counter semantics.
+
+    Units and kinds are keyed by canonical name. All mapped columns are required;
+    omit unavailable optional measurements from the mapping. Invalid values become
+    missing, never imputed. Interval counts must already cover known intervals.
+    """
+
+    metrics: dict[str, str]
+    units: dict[str, str]
+    kinds: dict[str, str]
+    timestamp_column: str = "timestamp"
+    entity_column: str = "entity_id"
     timezone: str = "UTC"
 
     def transform(self, native: pd.DataFrame) -> pd.DataFrame:
+        if not self.metrics:
+            raise ValueError("Declare at least one source measurement")
+        required = {self.timestamp_column, self.entity_column, *self.metrics}
+        missing = required.difference(native.columns)
+        if missing:
+            raise ValueError(f"Missing mapped columns: {sorted(missing)}")
+        if len(set(self.metrics.values())) != len(self.metrics):
+            raise ValueError("Map each canonical measurement only once")
         times = pd.to_datetime(native[self.timestamp_column], errors="raise")
         if times.isna().any():
             raise ValueError("Missing timestamps")
@@ -48,10 +75,14 @@ class TelemetryAdapter:
             raise ValueError("Missing entity identifiers")
         frames = []
         for source, metric in self.metrics.items():
-            if source not in native and source in METRICS and metric != "rx_power_dbm":
-                continue
             if metric not in CANONICAL_UNITS:
                 raise ValueError(f"Unsupported metric: {metric}")
+            definition = CANONICAL_METRICS[metric]
+            if self.kinds.get(metric) != definition.kind:
+                raise ValueError(
+                    f"Declare {definition.kind} for {metric}; cumulative counters "
+                    "need explicit reset-aware conversion before adaptation"
+                )
             values = pd.to_numeric(native[source], errors="raise").astype(float)
             unit = self.units.get(metric)
             if CANONICAL_UNITS[metric] == "dBm" and unit in {"mW", "W"}:

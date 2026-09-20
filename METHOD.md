@@ -258,3 +258,30 @@ and validate against representative operator measurements and incidents. A bound
 streaming feature implementation, durable operational state, monitoring and shadow
 operation are still needed for deployment. Add these only against concrete operating
 requirements; the current library does not pretend they already exist.
+
+## Native-data qualification before adaptation
+
+Notebook 01 checks native telemetry before any unit conversion or resampling. The
+full dataset receives structural checks only. Development data supplies missingness,
+gaps, distributions, fault contrasts and warning-opportunity screens; the final
+period is excluded from those reports. Measurements are distinguished from engineered
+features. Qualification is a review step, not a claim of operator-level validity.
+
+For healthy downstream telemetry, subtract Rx from measured OLT Tx and fit a daily
+harmonic per ONT. The remaining path-loss residual has expected variance
+`noise_db**2 + sensor_noise_db**2` and lag-one correlation
+`exp(-dt / correlation_hours) * noise_db**2 / expected_variance`, apart from rounding
+and finite-sample harmonic estimation. Diagnostic bands are 25% for variance,
+0.1 absolute for correlation, and max(0.05 dB, 20%) for daily amplitude. These are
+explicit screening assumptions, not standards or formal confidence intervals.
+Missing samples are not compressed when estimating adjacent-sample correlation.
+Fault-versus-preceding-day contrasts expose very easy faults and potential
+missingness shortcuts; they do not prove independence or causal effects.
+
+Canonical definitions describe units and gauge/interval-count semantics. The
+synthetic generator is one explicit source mapping, separate from the generic
+adapter. All mapped columns are required; unknown units or counter semantics fail.
+Invalid numeric observations become missing. Cumulative counters require an explicit
+upstream conversion; no reset behaviour is inferred. Detector requirements are
+checked after adaptation. This separates input portability from demonstrated
+cross-company detection performance.

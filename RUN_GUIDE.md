@@ -122,7 +122,7 @@ local workflow below. No Drive connection or authorisation is needed locally.
 
    | Notebook | Purpose |
    |---|---|
-   | `01_generator_eda.ipynb` | Generate data; inspect topology, powers, temperatures, FEC ratios, missingness and seasonality |
+   | `01_generator_eda.ipynb` | Inspect native data and qualification checks; review development faults; then preview canonical adaptation |
    | `02_feature_distributions.ipynb` | Inspect the baseline detector's causal Rx features and coverage |
    | `03_detector_tuning.ipynb` | Fit/calibrate detectors and tune incident persistence |
    | `04_evaluation.ipynb` | Review validation errors; final assessment defaults off |
@@ -175,3 +175,23 @@ prepared data can be reused; completed models are not overwritten. Frozen old
 models deliberately reject changed code at final assessment. Do not edit their
 fingerprints to bypass this protection. Inspecting the same final data under a
 new folder name does not make it independent evidence.
+
+## Native-data qualification and source mappings
+
+Run notebook 01 before feature engineering. It writes reports to
+`<configured output>/eda/`: measurement dictionary, development missingness and
+distributions, healthy statistical diagnostics, development fault summaries and
+contrasts, structural checks, and a small canonical preview. It does not write a
+second full copy of the long-format dataset.
+
+For company data, follow the explicit mapping example in README: both `units` and
+`kinds` are required and keyed by canonical measurement name. Optional measurements
+are omitted from the mapping, not silently ignored when an expected column is absent.
+Gauge-only or temperature-only inputs can adapt successfully, but cannot run the
+current detector without usable downstream Rx. Training also needs sufficient healthy
+history. The synthetic convenience pipeline uses `synthetic_adapter(["rx_dbm"])`.
+
+For an existing run made before this adapter change, set a fresh `output` in
+`configs/config.yaml` (or a fresh Colab `RUN_NAME`) before running notebooks 02–05.
+Preserve old run directories; their frozen code fingerprints intentionally differ.
+Notebook 01 may inspect the existing generated data without retraining its model.

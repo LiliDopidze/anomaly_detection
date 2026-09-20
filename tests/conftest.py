@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from optical_anomaly.generator import GeneratorConfig, generate, stationary_noise
-from optical_anomaly.adapter import TelemetryAdapter
+from optical_anomaly.sources import synthetic_adapter
 from optical_anomaly.validation import DataValidator
 
 
@@ -41,7 +41,7 @@ def clean_telemetry():
             + rng.normal(0, 0.08, len(times)),
         }
     )
-    adapter = TelemetryAdapter(metrics={"rx_dbm": "rx_power_dbm"})
+    adapter = synthetic_adapter(["rx_dbm"])
     return DataValidator().transform(adapter.transform(native))
 
 

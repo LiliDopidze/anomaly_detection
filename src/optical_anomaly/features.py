@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
+from .validation import require_downstream_rx
 from .mathematics import coefficient_of_variation, lag_one, entropy, negative_cusum
 
 FEATURES = ["cov", "autocorrelation", "cusum", "entropy", "acceleration", "slope"]
@@ -30,6 +31,7 @@ class FeatureEngineer:
             raise ValueError("Need window >=3 and positive cadence/smoothing")
         if self.allowance < 0:
             raise ValueError("CUSUM allowance must be nonnegative")
+        require_downstream_rx(telemetry)
         self.references.clear()
         for entity, group in telemetry.loc[
             telemetry.metric_name.eq("rx_power_dbm")
