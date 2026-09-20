@@ -16,10 +16,6 @@ python -m pip install -e ".[dev]"
 jupyter notebook
 ```
 
-For **Google Colab**, open [00_colab_start.ipynb](notebooks/00_colab_start.ipynb)
-and follow its setup and output-location cells. It runs the development pipeline
-and defaults to saving results in your Google Drive. Use a CPU runtime.
-
 For local analysis, run the notebooks in order:
 
 1. `01_generator_eda.ipynb`: inspect and qualify native synthetic data, then preview canonical adaptation.
@@ -147,9 +143,7 @@ Tests own their configuration and do not require your current working directory
 to be the repository root. See [RUN_GUIDE.md](RUN_GUIDE.md) for Windows/macOS setup,
 notebook order, output interpretation and rerunning an experiment.
 
-Default local outputs are under `<repository>/outputs/optical_v7/`. The Colab
-starter saves to `/content/drive/MyDrive/anomaly_detection/<RUN_NAME>/` with
-`SAVE_TO_DRIVE=True`, or `/content/anomaly_detection/outputs/<RUN_NAME>/` otherwise.
+Default local outputs are under `<repository>/outputs/optical_v7/`.
 All outputs stay outside Git. See [RUN_GUIDE.md](RUN_GUIDE.md) for exact commands.
 
 ### Inspect first, then adapt
