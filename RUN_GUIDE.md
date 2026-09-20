@@ -1,144 +1,177 @@
-# Run the optical anomaly detector
+# Run locally or in Google Colab
 
-## 1. Get the current Branch 2 code
+The default experiment generates **96 ONTs × 90 days × five-minute samples**:
+2,488,320 rows. No dataset download is needed. The generator emits 14 measurements,
+separate ground truth and a simple topology table. The current detector remains
+the downstream-Rx baseline; added signals are available for EDA.
 
-Download and extract the Branch 2 ZIP, or clone it:
+## Google Colab: the simplest route
 
-```bash
-git clone --branch codex/branch-2 --single-branch https://github.com/LiliDopidze/anomaly_detection.git
-cd anomaly_detection
+1. Open `notebooks/00_colab_start.ipynb` from Branch 2 in Colab. You can use Colab's
+   **File → Open notebook → GitHub**, paste the repository URL below, select
+   `codex/branch-2`, and choose that notebook. Alternatively upload the downloaded
+   `.ipynb` file to Colab.
+
+   Repository: https://github.com/LiliDopidze/anomaly_detection
+
+2. Use a **CPU runtime**. GPU hardware is not used by this pipeline.
+
+3. Run the first code cell. It clones Branch 2 into `/content/anomaly_detection`
+   and installs the project. It reuses an existing checkout rather than silently
+   overwriting it; start a fresh runtime to obtain newer code cleanly.
+
+4. In the output-location cell, set:
+
+   ```python
+   SAVE_TO_DRIVE = True
+   RUN_NAME = "optical_v7_run01"
+   SMALL_SMOKE_RUN = False
+   ```
+
+   Approve the Drive mount when Colab asks. Set `SMALL_SMOKE_RUN=True` only for a
+   quick installation check (8 ONTs, 14 days). Leave it False for the full dataset.
+
+5. Run the remaining cells in order. They generate/check data, fit the model,
+   evaluate validation candidates, show training examples and list output files.
+   The full run takes several minutes; actual time depends on runtime resources.
+
+6. Keep `OPEN_FINAL_TEST=False` while developing. Only enable it once the model
+   and settings are fixed and you deliberately want to inspect final performance.
+
+**Where Colab outputs go:**
+
+| Choice | Exact output folder |
+|---|---|
+| `SAVE_TO_DRIVE=True` | `/content/drive/MyDrive/anomaly_detection/optical_v7_run01/` |
+| `SAVE_TO_DRIVE=False` | `/content/anomaly_detection/outputs/optical_v7_run01/` |
+| Smoke run | Same location, with `_smoke` appended to the run name |
+
+With Drive enabled, open Google Drive → My Drive → anomaly_detection → your run
+folder to find the files. The configuration used by the notebook is temporarily
+written to `/content/optical_run.yaml`; a copy of its settings is saved permanently
+in the run folder as `settings.json`.
+
+Files under `/content` can disappear when Colab recycles the runtime. Drive-mounted
+files persist independently of that runtime. Colab resources are not guaranteed:
+see [Google's Colab FAQ](https://research.google.com/colaboratory/faq.html).
+If memory is constrained, reduce entities/days explicitly; do not silently
+interpret a smoke run as the full experiment.
+
+To download a run without Drive, execute this additional Colab cell:
+
+```python
+import shutil
+from google.colab import files
+
+archive = shutil.make_archive("/content/optical_results", "zip", root_dir=RUN)
+files.download(archive)
 ```
 
-For an extracted ZIP, open a terminal in the extracted directory containing
-`pyproject.toml`, `configs`, `src` and `notebooks`.
+The Colab starter is an end-to-end route. Notebooks 01–05 provide the more detailed
+local workflow below. No Drive connection or authorisation is needed locally.
 
-## 2. Create a Python environment
+## Local environment
 
-Python 3.10 or newer is required; this workflow was tested with Python 3.12.
+1. Download/extract the current Branch 2 ZIP, or clone:
 
-Windows PowerShell:
+   ```bash
+   git clone --branch codex/branch-2 --single-branch https://github.com/LiliDopidze/anomaly_detection.git
+   cd anomaly_detection
+   ```
 
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
+   For a ZIP, open a terminal inside the extracted folder containing `pyproject.toml`.
 
-If PowerShell blocks activation, use `.\.venv\Scripts\python.exe` instead of
-`python` in the commands below; changing execution policy is unnecessary.
+2. Create an environment (Python 3.10+; tested with 3.12).
 
-macOS/Linux:
+   Windows PowerShell:
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
+   ```powershell
+   py -3.12 -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   ```
 
-Install the project and notebook/test dependencies from the repository root:
+   If activation is blocked, use `.\.venv\Scripts\python.exe` instead of `python`
+   below; changing PowerShell execution policy is unnecessary.
 
-```bash
-python -m pip install -e ".[dev]"
-python -c "import optical_anomaly; print(optical_anomaly.__file__)"
-python -m pytest
-```
+   macOS/Linux:
 
-The import should point into this checkout's `src/optical_anomaly` directory.
-Editable installation is convenient for development; it is not proof that every
-production packaging/dependency issue has been tested. The suite no longer alters
-`sys.path`, and its integration configuration is independent of the user's YAML.
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
 
-## 3. Review the configuration
+3. Install and check:
 
-Open `configs/config.yaml`. The default generates:
+   ```bash
+   python -m pip install -e ".[dev]"
+   python -m pytest
+   ```
 
-- 24 synthetic ONTs, 28 days, one sample every five minutes.
-- Received optical power (`rx_dbm`, in dBm).
-- Simulated bit error ratio (`ber`, dimensionless).
-- Two fault scenarios per entity: random walk, exponential attenuation or variance
-  shift, distributed across validation/test periods.
-- Daily seasonality, correlated Gaussian noise, sensor noise and missing polls.
+4. Open `configs/config.yaml`. Defaults are 96 entities, 90 days, five-minute
+   intervals and `output: outputs/optical_v7`. To run another experiment, use a
+   fresh output folder, such as `outputs/optical_v7_run02`.
 
-Source rows contain `time`, `device`, `rx_dbm`, `ber`. The adapter converts these
-to `timestamp`, `entity_id`, `metric_name`, `value` in long format.
+5. Start Jupyter with the installed environment:
 
-**Only Rx power currently drives the model.** BER is available for EDA; its
-relationship to optical margin is illustrative, not a calibrated receiver curve.
-Tx power, upstream Rx, FEC/CRC counters, temperature, traffic and topology are not
-currently generated by this version.
+   ```bash
+   python -m ipykernel install --user --name optical-anomaly --display-name "Python (optical anomaly)"
+   python -m notebook
+   ```
 
-Ground truth is separate: `fault_id`, `entity_id`, `fault_type`, `onset_time`,
-`observable_onset_time`, `impact_time` and `end_time`. It never enters the feature
-matrix. Impact means latent Rx crosses a hypothetical -27 dBm threshold; it is not
-a measured customer SLA.
+   Select **Python (optical anomaly)** inside each notebook. Run 01–05 in order:
 
-The default output is `outputs/optical_v6`. If that folder already contains a
-previous experiment, choose a new path, for example:
+   | Notebook | Purpose |
+   |---|---|
+   | `01_generator_eda.ipynb` | Generate data; inspect topology, powers, temperatures, FEC ratios, missingness and seasonality |
+   | `02_feature_distributions.ipynb` | Inspect the baseline detector's causal Rx features and coverage |
+   | `03_detector_tuning.ipynb` | Fit/calibrate detectors and tune incident persistence |
+   | `04_evaluation.ipynb` | Review validation errors; final assessment defaults off |
+   | `05_end_to_end_demo.ipynb` | Verify saved-model replay; optional stress tests |
 
-```yaml
-output: outputs/optical_v6_run02
-```
+   **Do not run notebook 00 locally**: its setup is specifically for Colab.
 
-Do this when changing configuration or code. Frozen old models deliberately reject
-code changes at final assessment. Do not edit their fingerprints to bypass the
-check or overwrite their results. No dataset download is required.
-
-## 4. Start Jupyter using this environment
-
-Register an identifiable kernel and open the notebooks:
-
-```bash
-python -m ipykernel install --user --name optical-anomaly --display-name "Python (optical anomaly)"
-python -m notebook
-```
-
-In each notebook, select **Python (optical anomaly)**. This avoids accidentally
-running a different Python environment that lacks the installed dependencies.
-Run cells from top to bottom using **Run All**.
-
-## 5. Run the notebooks in order
-
-| Notebook | Action | What to inspect |
-|---|---|---|
-| `01_generator_eda.ipynb` | Generate or reuse matching synthetic data | Rx traces, daily profiles, missingness |
-| `02_feature_distributions.ipynb` | Fit training-only references and compute features | CoV, correlation, CUSUM, entropy, derivatives and coverage |
-| `03_detector_tuning.ipynb` | Fit/calibrate detectors and tune N/M on validation | Recall, nuisance workload, chosen policy and score coverage |
-| `04_evaluation.ipynb` | Review misses and per-fault results | Warning opportunities, delay and duplicates |
-| `05_end_to_end_demo.ipynb` | Replay saved model and demonstrate adaptation | Exact score reproducibility and incident output |
-
-Leave `OPEN_FINAL_TEST = False` in notebook 4 during development.
-Leave `RUN_STRESS = False` in notebook 5 for the first run. Enabling stress tests
-creates additional scenarios and takes longer; choose new output paths to rerun.
-
-A green execution result does not mean the model meets the operational target.
-The current default validation run fails its nuisance-workload budget. Missing
-scores also need attention; they do not mean the network is healthy.
-
-## 6. Find the results
-
-Under the configured output folder:
-
-- `telemetry.parquet`: generated measurements.
-- `ground_truth.parquet`: separate fault labels.
-- `validation_comparison.csv`: candidate policies and operational metrics.
-- `validation_faults.csv`: matched/missed faults and warning opportunities.
-- `validation_incidents.csv`: discrete incidents and their emission times.
-- `validation_scores.parquet`: continuous anomaly ranks, not fault probabilities.
-- `model.joblib`, `settings.json`, `manifest.json`: frozen model and provenance.
-
-To generate, fit and evaluate validation without notebooks, run from the repository
-root after installing the package:
+Without notebooks, the complete development run is:
 
 ```bash
 python -c "from optical_anomaly.pipeline import develop; print(develop('configs/config.yaml'))"
 ```
 
-This intentionally refuses to overwrite an already fitted run. Notebook 3 can
-instead display that run's saved results.
+Run this from the repository root. It refuses to overwrite a fitted model.
 
-## 7. Open final assessment only after development decisions are fixed
+**Where local outputs go:** `<repository>/outputs/optical_v7/` by default.
+For the current local checkout, that is:
+`/Users/lilidopidze/Documents/Anomaly Detection/outputs/optical_v7/`.
+On Windows or another machine, the prefix is wherever you cloned/extracted the repo.
+An absolute `output` path in the YAML saves directly to that path instead.
 
-Set `OPEN_FINAL_TEST = True` in notebook 4 and execute that cell once. It uses the
-frozen model and incident policy, writes final metrics/incidents/fault outcomes,
-and creates `FINAL_OPENED.json` to prevent accidental repeat use.
+## Output files in either environment
 
-Do not tune against those results and still call the same period unseen. A new
-folder alone does not make previously inspected data independent evidence.
+| File | Contents |
+|---|---|
+| `telemetry.parquet` | Time/device plus downstream/upstream Rx, ONT/OLT Tx, ONT/OLT temperature, two BER proxies and six FEC interval counts |
+| `topology.parquet` | `entity_id`, `olt_id`, `pon_port_id`, `splitter_id`; static mapping only |
+| `ground_truth.parquet` | Fault ID/type, entity, onset, observable onset, impact and repair/end |
+| `generation_checks.json` | Structural and FEC consistency checks |
+| `settings.json`, `manifest.json` | Settings, time splits and frozen fingerprints |
+| `development_features.parquet` | Baseline Rx features, excluding final-period observations |
+| `validation_scores.parquet` | Normalised anomaly scores for validation |
+| `validation_comparison.csv` | Candidate incident policies and operational metrics |
+| `validation_incidents.csv`, `validation_faults.csv` | Discrete incidents and matched/missed faults |
+| `model.joblib` | Fitted feature references, detectors and chosen policy |
+
+`test_metrics.json`, `test_incidents.csv`, `test_faults.csv` and `FINAL_OPENED.json`
+are created only when you explicitly open final assessment. Generated files are
+ignored by Git; cloning the repository does not download earlier results.
+
+Topology is extra context only: no operational-event table, automatic localisation
+or topology-based incident grouping is added. FEC fields are interval counts, not
+cumulative counters. BER and receiver thresholds are modelling assumptions, not
+validated vendor measurements. Synthetic checks do not certify field performance.
+
+## Reruns and updates
+
+Use a new run name/output folder after changing configuration or code. Matching
+prepared data can be reused; completed models are not overwritten. Frozen old
+models deliberately reject changed code at final assessment. Do not edit their
+fingerprints to bypass this protection. Inspecting the same final data under a
+new folder name does not make it independent evidence.

@@ -5,16 +5,34 @@ import numpy as np
 import pandas as pd
 
 
+# Canonical units and native names. Counts are interval totals, not cumulative.
+METRICS = {
+    "rx_dbm": ("rx_power_dbm", "dBm"),
+    "upstream_rx_dbm": ("upstream_rx_power_dbm", "dBm"),
+    "ont_tx_dbm": ("ont_tx_power_dbm", "dBm"),
+    "olt_tx_dbm": ("olt_tx_power_dbm", "dBm"),
+    "ont_temperature_c": ("ont_temperature_c", "C"),
+    "olt_temperature_c": ("olt_temperature_c", "C"),
+    "ber": ("ber", "ratio"),
+    "upstream_ber": ("upstream_ber", "ratio"),
+}
+for direction in ("downstream", "upstream"):
+    for kind in ("corrected", "uncorrectable", "total"):
+        name = f"{direction}_fec_{kind}_codewords"
+        METRICS[name] = (name, "interval_count")
+CANONICAL_UNITS = dict(METRICS.values())
+
+
 @dataclass
 class TelemetryAdapter:
     timestamp_column: str = "time"
     entity_column: str = "device"
     metrics: dict[str, str] = field(
-        default_factory=lambda: {"rx_dbm": "rx_power_dbm", "ber": "ber"}
+        default_factory=lambda: {
+            source: metric for source, (metric, _) in METRICS.items()
+        }
     )
-    units: dict[str, str] = field(
-        default_factory=lambda: {"rx_power_dbm": "dBm", "ber": "ratio"}
-    )
+    units: dict[str, str] = field(default_factory=lambda: CANONICAL_UNITS.copy())
     timezone: str = "UTC"
 
     def transform(self, native: pd.DataFrame) -> pd.DataFrame:
@@ -30,19 +48,23 @@ class TelemetryAdapter:
             raise ValueError("Missing entity identifiers")
         frames = []
         for source, metric in self.metrics.items():
-            if metric not in {"rx_power_dbm", "ber"}:
+            if source not in native and source in METRICS and metric != "rx_power_dbm":
+                continue
+            if metric not in CANONICAL_UNITS:
                 raise ValueError(f"Unsupported metric: {metric}")
             values = pd.to_numeric(native[source], errors="raise").astype(float)
             unit = self.units.get(metric)
-            if metric == "rx_power_dbm" and unit in {"mW", "W"}:
+            if CANONICAL_UNITS[metric] == "dBm" and unit in {"mW", "W"}:
                 values = 10 * np.log10(
                     values.where(values > 0) * (1000 if unit == "W" else 1)
                 )
-            elif unit != {"rx_power_dbm": "dBm", "ber": "ratio"}[metric]:
+            elif unit != CANONICAL_UNITS[metric]:
                 raise ValueError(f"Declare supported units for {metric}")
             values = values.where(np.isfinite(values))
-            if metric == "ber":
+            if CANONICAL_UNITS[metric] == "ratio":
                 values = values.where(values.between(0, 1))
+            if CANONICAL_UNITS[metric] == "interval_count":
+                values = values.where((values >= 0) & (values == np.floor(values)))
             frames.append(
                 pd.DataFrame(
                     {

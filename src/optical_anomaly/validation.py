@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import pandas as pd
+from .adapter import CANONICAL_UNITS
 
 
 @dataclass(frozen=True)
@@ -20,9 +21,12 @@ class DataValidator:
         frames = []
         for (entity, metric), group in telemetry.groupby(keys[:2], sort=True):
             series = group.sort_values("timestamp").set_index("timestamp").value
-            sampled = series.resample(
-                self.interval, closed="right", label="right"
-            ).mean()
+            bins = series.resample(self.interval, closed="right", label="right")
+            sampled = (
+                bins.sum(min_count=1)
+                if CANONICAL_UNITS.get(metric) == "interval_count"
+                else bins.mean()
+            )
             frame = sampled.rename("value").reset_index()
             frame["entity_id"], frame["metric_name"] = entity, metric
             frame["observed"] = sampled.notna().to_numpy()

@@ -8,7 +8,8 @@ import pandas as pd
 import yaml
 from .adapter import TelemetryAdapter
 from .validation import DataValidator
-from .generator import GeneratorConfig, generate
+from .generator import GeneratorConfig, generate, make_topology
+from .optics import validate_generated
 from .features import FeatureEngineer
 from .detectors import StatisticalDetector, IsolationForestDetector
 from .incidents import IncidentManager
@@ -17,7 +18,11 @@ from .splitting import TemporalSplit
 
 
 def digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    hasher = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 def score_detectors(
@@ -110,6 +115,10 @@ def prepare(config_path: str | Path) -> Path:
         return run
     run.mkdir(parents=True)
     native, truth = generate(config)
+    topology = make_topology(config)
+    report = validate_generated(native, truth, topology)
+    topology.to_parquet(run / "topology.parquet", index=False)
+    (run / "generation_checks.json").write_text(json.dumps(report, indent=2))
     native.to_parquet(run / "telemetry.parquet", index=False)
     truth.to_parquet(run / "ground_truth.parquet", index=False)
     (run / "settings.json").write_text(json.dumps(settings, indent=2))
@@ -122,7 +131,9 @@ def develop(config_path: str | Path) -> Path:
         raise FileExistsError("Model already fitted; choose a new output folder")
     settings = json.loads((run / "settings.json").read_text())
     config = GeneratorConfig(**settings["generator"])
-    native = pd.read_parquet(run / "telemetry.parquet")
+    native = pd.read_parquet(
+        run / "telemetry.parquet", columns=["time", "device", "rx_dbm"]
+    )
     truth = pd.read_parquet(run / "ground_truth.parquet")
     start = native.time.min()
     boundaries = [
@@ -217,7 +228,12 @@ def _save_development(
         ],
         "files": {
             name: digest(run / name)
-            for name in ("telemetry.parquet", "ground_truth.parquet", "model.joblib")
+            for name in (
+                "telemetry.parquet",
+                "ground_truth.parquet",
+                "topology.parquet",
+                "model.joblib",
+            )
         },
         "code": {p.name: digest(p) for p in Path(__file__).parent.glob("*.py")},
     }
@@ -239,7 +255,9 @@ def final_evaluation(run: str | Path) -> dict:
         json.dump({"opened_at": str(pd.Timestamp.now(tz="UTC"))}, stream)
     # Load only trusted, locally generated joblib files.
     model = joblib.load(run / "model.joblib")
-    native = pd.read_parquet(run / "telemetry.parquet")
+    native = pd.read_parquet(
+        run / "telemetry.parquet", columns=["time", "device", "rx_dbm"]
+    )
     telemetry = DataValidator(f"{model['interval']}min").transform(
         TelemetryAdapter().transform(native)
     )
