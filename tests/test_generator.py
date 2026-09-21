@@ -36,3 +36,49 @@ def test_collection_does_not_change_impact(generator_config, generated_data):
     _, truth = generated_data
     _, missing = generate(replace(generator_config, missing_probability=0.3))
     pd.testing.assert_series_equal(truth.impact_time, missing.impact_time)
+
+
+@pytest.mark.parametrize(
+    "values, intervals, expected",
+    [
+        ([True, True], 3, None),
+        ([False, True, True, True], 3, 3),
+        ([True, False, True, True, True], 3, 4),
+        ([True], 1, 0),
+    ],
+)
+def test_impact_confirmation_is_not_backdated(values, intervals, expected):
+    from optical_anomaly.generator import first_persistent_crossing
+
+    assert first_persistent_crossing(np.array(values), intervals) == expected
+
+
+def test_variance_shift_has_no_claimed_observable_onset(generated_data):
+    _, truth = generated_data
+    variance = truth.loc[truth.fault_type.eq("variance_shift")]
+    assert len(variance) > 0
+    assert variance.observable_onset_time.isna().all()
+
+
+def test_impact_persistence_on_known_latent_path(monkeypatch):
+    import optical_anomaly.generator as module
+
+    config = module.GeneratorConfig(entities=1, days=8)
+    times = pd.date_range("2025-01-01", periods=8 * 288, freq="5min", tz="UTC")
+    optics = {
+        "rx_dbm": np.full(len(times), -26.0),
+        "upstream_rx_dbm": np.full(len(times), -20.0),
+    }
+    monkeypatch.setattr(
+        module, "fault_signature", lambda kind, size, dt, rng: np.full(size, -10.0)
+    )
+    truth = module._inject_fault(
+        config,
+        0,
+        0,
+        times,
+        optics,
+        np.zeros(len(times), dtype=bool),
+        np.random.default_rng(7),
+    )
+    assert truth["impact_time"] == truth["onset_time"] + pd.Timedelta(minutes=10)

@@ -9,8 +9,17 @@ SYNTHETIC_METRICS = {
     "upstream_rx_dbm": "upstream_rx_power_dbm",
     "ont_tx_dbm": "ont_tx_power_dbm",
     "olt_tx_dbm": "olt_tx_power_dbm",
-    **{name: name for name in CANONICAL_METRICS if not name.endswith("power_dbm")},
+    "ont_temperature_c": "ont_temperature_c",
+    "olt_temperature_c": "olt_temperature_c",
+    **{
+        f"{direction}_fec_{kind}_codewords": f"{direction}_fec_{kind}_codewords"
+        for direction in ("downstream", "upstream")
+        for kind in ("corrected", "uncorrectable", "total")
+    },
 }
+
+
+POWER_ONLY = ("rx_dbm", "upstream_rx_dbm", "ont_tx_dbm", "olt_tx_dbm")
 
 
 def synthetic_adapter(sources: Iterable[str] | None = None) -> TelemetryAdapter:

@@ -82,9 +82,13 @@ class Evaluator:
                 and pd.notna(fault.impact_time)
                 and alert.start_time < fault.impact_time
             )
+            variance_shift = fault.fault_type == "variance_shift"
+            delay_reference = (
+                fault.onset_time if variance_shift else fault.observable_onset_time
+            )
             delay = (
-                (alert.start_time - fault.observable_onset_time).total_seconds() / 60
-                if alert is not None and pd.notna(fault.observable_onset_time)
+                (alert.start_time - delay_reference).total_seconds() / 60
+                if alert is not None and pd.notna(delay_reference)
                 else np.nan
             )
             outcomes.append(
@@ -95,6 +99,9 @@ class Evaluator:
                     "opportunity": opportunity,
                     "pre_impact": early,
                     "delay_minutes": delay,
+                    "delay_reference": (
+                        "onset_time" if variance_shift else "observable_onset_time"
+                    ),
                 }
             )
         outcomes = pd.DataFrame(
@@ -106,6 +113,7 @@ class Evaluator:
                 "opportunity",
                 "pre_impact",
                 "delay_minutes",
+                "delay_reference",
             ],
         )
         return outcomes
@@ -154,6 +162,12 @@ class Evaluator:
         days = len(available) * self.interval_minutes / 1440
         opportunities = int(outcomes.opportunity.sum())
         early = int((outcomes.opportunity & outcomes.pre_impact).sum())
+        observable_delays = outcomes.loc[
+            outcomes.delay_reference.eq("observable_onset_time"), "delay_minutes"
+        ]
+        variance_delays = outcomes.loc[
+            outcomes.delay_reference.eq("onset_time"), "delay_minutes"
+        ]
         metrics = {
             "faults": len(faults),
             "detected": len(matches),
@@ -169,8 +183,13 @@ class Evaluator:
             "monitored_entity_days": days,
             "observation_coverage": float(available.value.notna().mean()),
             "median_detection_delay_minutes": (
-                float(outcomes.delay_minutes.median())
-                if outcomes.delay_minutes.notna().any()
+                float(observable_delays.median())
+                if observable_delays.notna().any()
+                else None
+            ),
+            "median_variance_onset_delay_minutes": (
+                float(variance_delays.median())
+                if variance_delays.notna().any()
                 else None
             ),
             "incidents": len(alerts),

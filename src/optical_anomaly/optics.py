@@ -41,10 +41,12 @@ def fec_counts(
 def error_telemetry(
     downstream: np.ndarray,
     upstream: np.ndarray,
-    thresholds: tuple[float, float],
+    receiver_references: tuple[float, float],
     interval_minutes: int,
     port_entities: int,
     seed: np.random.SeedSequence,
+    receiver_offset_halfwidth_db: float = 1.5,
+    log10_noise_sd: float = 0.15,
 ) -> dict[str, np.ndarray]:
     """Interval-ending counts; full downstream coding, equal upstream allocations.
 
@@ -57,19 +59,31 @@ def error_telemetry(
     utilisation = 0.5 + 0.2 * np.sin(2 * np.pi * hour / 24)
     result = {}
     for direction, power, threshold, rate, allocation in (
-        ("downstream", downstream, thresholds[0], 2.48832e9, np.ones(n)),
-        ("upstream", upstream, thresholds[1], 1.24416e9, utilisation / port_entities),
+        ("downstream", downstream, receiver_references[0], 2.48832e9, np.ones(n)),
+        (
+            "upstream",
+            upstream,
+            receiver_references[1],
+            1.24416e9,
+            utilisation / port_entities,
+        ),
     ):
         # Assumed pre-FEC response: not a standard-mandated sensitivity curve.
-        ber = 10 ** np.clip(-5 - (power - threshold), -12, -1)
+        reference = threshold + rng.uniform(
+            -receiver_offset_halfwidth_db, receiver_offset_halfwidth_db
+        )
+        ber = 10 ** np.clip(-5 - (power - reference), -12, -1)
         total = np.floor(rate * interval_minutes * 60 * allocation / (255 * 8)).astype(
             np.int64
         )
         # Piecewise-constant physical state over the PRECEDING interval.
         # A change at t first affects the interval count reported at t + dt.
-        interval_ber = np.r_[ber[0], ber[:-1]]
+        interval_ber = np.clip(
+            np.r_[ber[0], ber[:-1]] * 10 ** rng.normal(0, log10_noise_sd, n),
+            0,
+            0.1,
+        )
         corrected, uncorrectable = fec_counts(interval_ber, total, rng)
-        result["ber" if direction == "downstream" else "upstream_ber"] = ber
         for name, values in (
             ("corrected", corrected),
             ("uncorrectable", uncorrectable),
@@ -110,10 +124,26 @@ def validate_generated(
         checks[f"{direction}_nonnegative_integer_counts"] = bool(
             ((counts >= 0) & (counts == np.floor(counts))).all().all()
         )
-    checks["bounded_ber"] = all(
-        native[column].dropna().between(0, 1).all()
-        for column in ("ber", "upstream_ber")
+    checks["no_label_leaking_columns"] = not bool(
+        {"ber", "upstream_ber"}.intersection(native.columns)
     )
+    ordered = truth.sort_values(["entity_id", "onset_time"])
+    previous_end = ordered.groupby("entity_id").end_time.shift()
+    checks["faults_do_not_overlap"] = bool(
+        (ordered.onset_time.loc[previous_end.notna()] >= previous_end.dropna()).all()
+    )
+    visible = truth.dropna(subset=["observable_onset_time"])
+    checks["observable_inside_fault"] = bool(
+        (
+            (visible.observable_onset_time >= visible.onset_time)
+            & (visible.observable_onset_time < visible.end_time)
+        ).all()
+    )
+    step = native.time.sort_values().drop_duplicates().diff().dropna().min()
+    baseline_end = native.time.min() + 0.55 * (
+        native.time.max() + step - native.time.min()
+    )
+    checks["baseline_fault_free"] = bool((truth.onset_time >= baseline_end).all())
     if not all(checks.values()):
         raise ValueError(
             f"Synthetic invariant failures: {[k for k, ok in checks.items() if not ok]}"

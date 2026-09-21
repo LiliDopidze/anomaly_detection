@@ -88,7 +88,7 @@ splits; past-only rolling history can cross a boundary without future leakage.
 Generated artifacts live under the configured output directory, ignored by Git:
 
 - `telemetry.parquet`: 96 ONTs × 90 days × five-minute samples by default
-  (2,488,320 rows; 14 measurement columns plus time/device).
+  (2,488,320 rows; 12 measurement columns plus time/device).
 - `canonical_development.parquet`: adapted/validated long telemetry before the final period.
 - `feature_set_comparison.csv`: best validation policy for each telemetry set.
 - `ground_truth.parquet`: separate onset, visibility, impact and repair labels.
@@ -128,10 +128,10 @@ detectors on a later mostly normal period; tune incident rules on validation.
 The `develop` convenience function is specifically for the synthetic experiment.
 
 The generator includes downstream/upstream Rx, ONT/OLT Tx, ONT/OLT temperatures,
-two pre-FEC BER proxies, and corrected/uncorrectable/total FEC interval counts in
-each direction. The adapter recognises all 14 measurements. The pipeline compares
+corrected/uncorrectable/total FEC interval counts in
+each direction. The adapter recognises all 12 measurements. The pipeline compares
 Rx-only, both Rx directions, Tx/Rx relationships, FEC, and temperature cumulatively.
-BER proxies are inspected but not added as redundant model inputs. Topology is context only. Operational events, voltage,
+BER is internal to the simulation and is not exported or used as a feature. Topology is context only. Operational events, voltage,
 bias current, traffic and topology-based incident logic are not added.
 
 The canonical schema is `timestamp, entity_id, metric_name, value`. Validation
@@ -150,7 +150,7 @@ Tests own their configuration and do not require your current working directory
 to be the repository root. See [RUN_GUIDE.md](RUN_GUIDE.md) for Windows/macOS setup,
 notebook order, output interpretation and rerunning an experiment.
 
-Default local outputs are under `<repository>/outputs/optical_v9/`.
+Default local outputs are under `<repository>/outputs/optical_v10/`.
 All outputs stay outside Git. See [RUN_GUIDE.md](RUN_GUIDE.md) for exact commands.
 
 ### Inspect first, then adapt
@@ -223,3 +223,11 @@ autocorrelations, both raw and after daily-pattern removal, alongside seasonalit
 Reports include paired counts and are saved under `eda/`. No cutoff drops features.
 FEC display labels use received/corrected/uncorrectable blocks, with upstream and
 downstream explicit; a block means one FEC codeword per reporting interval.
+
+Version 10 removes exported BER, separates receiver parameters from impact-label
+thresholds and removes the OLT temperature ramp. Impact requires three consecutive
+low-power readings and is dated at the confirming reading; it remains a proxy,
+not verified customer-service loss. Receiver offsets and FEC dispersion are explicit
+simulation assumptions. Variance-shift delay is reported from physical onset,
+separately from observable-onset delay. Use a fresh output folder; do not compare
+old/new results as the same benchmark or reuse old fitted models with new code.

@@ -1,7 +1,7 @@
 # Run locally
 
 The default experiment generates **96 ONTs × 90 days × five-minute samples**:
-2,488,320 rows. No dataset download is needed. The generator emits 14 measurements,
+2,488,320 rows. No dataset download is needed. The generator emits 12 measurements,
 separate ground truth and a simple topology table. The pipeline compares five cumulative telemetry feature sets, retaining
 downstream Rx alone as the baseline.
 
@@ -43,8 +43,8 @@ downstream Rx alone as the baseline.
    ```
 
 4. Open `configs/config.yaml`. Defaults are 96 entities, 90 days, five-minute
-   intervals and `output: outputs/optical_v9`. To run another experiment, use a
-   fresh output folder, such as `outputs/optical_v9_run02`.
+   intervals and `output: outputs/optical_v10`. To run another experiment, use a
+   fresh output folder, such as `outputs/optical_v10_run02`.
 
 5. Start Jupyter with the installed environment:
 
@@ -73,9 +73,9 @@ python -c "from optical_anomaly.pipeline import develop; print(develop('configs/
 
 Run this from the repository root. It refuses to overwrite a fitted model.
 
-**Where local outputs go:** `<repository>/outputs/optical_v9/` by default.
+**Where local outputs go:** `<repository>/outputs/optical_v10/` by default.
 For the current local checkout, that is:
-`/Users/lilidopidze/Documents/Anomaly Detection/outputs/optical_v9/`.
+`/Users/lilidopidze/Documents/Anomaly Detection/outputs/optical_v10/`.
 On Windows or another machine, the prefix is wherever you cloned/extracted the repo.
 An absolute `output` path in the YAML saves directly to that path instead.
 
@@ -83,7 +83,7 @@ An absolute `output` path in the YAML saves directly to that path instead.
 
 | File | Contents |
 |---|---|
-| `telemetry.parquet` | Time/device plus downstream/upstream Rx, ONT/OLT Tx, ONT/OLT temperature, two BER proxies and six FEC interval counts |
+| `telemetry.parquet` | Time/device plus downstream/upstream Rx, ONT/OLT Tx, ONT/OLT temperature, six FEC interval counts |
 | `topology.parquet` | `entity_id`, `olt_id`, `pon_port_id`, `splitter_id`; static mapping only |
 | `ground_truth.parquet` | Fault ID/type, entity, onset, observable onset, impact and repair/end |
 | `generation_checks.json` | Structural and FEC consistency checks |
@@ -133,7 +133,7 @@ company experiments can still use the original FeatureEngineer and detector clas
 For an existing run made before this multivariate change, set a fresh `output` in
 `configs/config.yaml` before running notebooks 00–06.
 Preserve old run directories; their frozen code fingerprints intentionally differ.
-Old completed runs cannot be upgraded in place. The new default is `outputs/optical_v9`.
+Old completed runs cannot be upgraded in place. The new default is `outputs/optical_v10`.
 
 ## Reading the comparison
 
@@ -166,3 +166,11 @@ Notebook 01 also writes `eda/canonical_correlations.csv` and
 per ONT, with paired-observation counts. These inform review, not automatic removal.
 FEC display labels use received/corrected/uncorrectable **blocks**, in each direction;
 stored `*_codewords` columns retain their precise counting unit.
+
+Version 10 removes exported BER, separates receiver parameters from impact-label
+thresholds and removes the OLT temperature ramp. Impact requires three consecutive
+low-power readings and is dated at the confirming reading; it remains a proxy,
+not verified customer-service loss. Receiver offsets and FEC dispersion are explicit
+simulation assumptions. Variance-shift delay is reported from physical onset,
+separately from observable-onset delay. Use a fresh output folder; do not compare
+old/new results as the same benchmark or reuse old fitted models with new code.

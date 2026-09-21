@@ -21,8 +21,8 @@ fault log; labels and topology identifiers never enter the feature matrix.
 |---|---|---|
 | `rx_dbm`, `upstream_rx_dbm` | Directional receive power: transmitter power minus path loss. Downstream path loss starts uniformly between 23 and 27 dB; upstream adds an assumed 0.4–1.2 dB offset. Both paths share normal fluctuations and injected loss. | Optical measurement categories: [ETSI F5G 011, §§8.3–8.4][etsi]. Subtraction follows the logarithmic power definition [NIST][db]. Ranges and cross-direction dependence are simulation assumptions. |
 | `ont_tx_dbm`, `olt_tx_dbm` | Nominal 2/3 dBm; small thermal response and stationary residuals. OLT Tx is shared by ONTs on a port. Tx does not change in response to a simulated path fault. | Monitored quantities: [ETSI][etsi]. Nominal levels and thermal coefficients 0.008/0.005 dB/°C are uncalibrated assumptions, not vendor specifications. |
-| `ont_temperature_c`, `olt_temperature_c` | Baselines 38/35°C, daily amplitudes 3/2°C and correlated residuals. OLT temperature is shared per port and includes an assumed slow annual component. | Temperature monitoring: [ETSI][etsi]. Waveform, ranges and time constants are assumptions. Ninety days cannot identify an annual cycle. |
-| `ber`, `upstream_ber` | Illustrative pre-FEC probability `10**clip(-5-(latent_rx-impact_limit), -12, -1)`. Used to generate errors, not supplied to the detector. | Error monitoring context: [G.988][g988]. This receiver curve is an explicit assumption; it is not an optical receiver calibration. |
+| `ont_temperature_c`, `olt_temperature_c` | Baselines 38/35°C, daily amplitudes 3/2°C and correlated residuals. OLT temperature is shared per port with no annual ramp. | Temperature monitoring: [ETSI][etsi]. Waveform, ranges and time constants are assumptions. Ninety days cannot identify an annual cycle. |
+| Internal BER (not exported) | Assumed probability `10**clip(-5-(latent_rx-receiver_reference), -12, -1)`. Receiver references are separate from impact thresholds, with per-ONT/direction offsets Uniform(-1.5, 1.5) dB. Prior-interval BER is multiplied by lognormal dispersion with log10 SD 0.15, then clipped to [0, 0.1]. | Error monitoring context: [G.988][g988]. Curve, offsets and dispersion are uncalibrated assumptions; they remove direct threshold coupling, not all synthetic shortcuts. |
 | `{downstream,upstream}_fec_total_codewords` | Received codeword opportunities during the preceding interval, using 255-byte codewords and GPON line rates. Upstream capacity is divided among port members. | Coding/rate context: [G.984.3][g984]. Always-on coding, equal upstream allocation and omitted framing overhead are simplifications. |
 | `{downstream,upstream}_fec_corrected_codewords` | For bit error probability p, symbol error probability is `q=1-(1-p)^8`. Sample codewords with 1–8 erroneous symbols. | RS(255,239) correction capability: [G.984.3][g984]; binomial probability calculation [SciPy][binomial]. Independent bit errors and ideal decoding are assumptions. |
 | `{downstream,upstream}_fec_uncorrectable_codewords` | Sample codewords with more than eight erroneous symbols jointly with corrected/clean categories. Corrected + uncorrectable cannot exceed total. | Same coding basis. These are illustrative interval counters, not measured BER, cumulative counters or an XGS-PON LDPC model. |
@@ -46,7 +46,9 @@ walks (-0.15 dB/hour, diffusion 0.06 dB/sqrt(hour)); accelerating attenuation
 `-0.2-0.35*expm1(min(hours/12,3))`; and a stationary variance increase to 0.5 dB.
 Severity is multiplied by Uniform(0.4,1.4); duration is lognormal with median
 36 hours and log-SD 0.5, truncated at scenario boundaries. All signatures,
-parameters, timings and the 1.1 upstream fault multiplier are **project assumptions**.
+parameters and timings are **project assumptions**. A separate seeded per-ONT
+Uniform(0.8, 1.4) multiplier relates upstream fault effect to downstream effect;
+this avoids one fleet-wide fixed ratio but still shares the same fault trajectory.
 Optical soft failures motivate the task [San Martín et al., 2026][optical], but
 that study does not establish these PON degradation laws.
 
@@ -57,9 +59,11 @@ FEC counters describe the preceding interval: a state change at t affects the
 report at t+dt. First-interval counts are missing.
 
 Truth records distribution-change onset, observable-onset proxy, hypothetical
-impact and fault end. Observable onset requires an injected effect at least twice
-the configured physical-noise SD and an observed Rx reading. Impact is the first
-latent crossing of -27 dBm downstream or -28 dBm upstream. These are declared
+impact and fault end. For mean-shift scenarios, observable onset requires an injected effect at least
+twice the configured physical-noise SD and an observed Rx reading. Variance shifts
+have no asserted observable-onset proxy. Impact is confirmed at the third
+consecutive latent reading below -27 dBm downstream or -28 dBm upstream
+(either direction at each reading); it is never backdated to the start of the run. These are declared
 scenario thresholds, not universal receiver limits or verified customer impact.
 
 ## Observation, adaptation and EDA
@@ -177,8 +181,10 @@ and emission inside the physical fault interval. No point adjustment is used.
 Pre-impact recall counts early matched faults among those with a declared warning
 opportunity: observable onset and three observed Rx intervals before impact minus
 30 minutes. Nuisance counts unmatched and duplicate incidents per 1,000 scheduled
-entity-days. Delay uses actual alert emission minus observable onset; misses and
-coverage are reported separately. These opportunity/matching definitions are
+entity-days. Mean-shift delay uses alert emission minus observable onset. Variance-shift delay
+uses physical onset with an explicit `delay_reference` and a separate aggregate
+metric; it does not enter the observable-delay median. Misses and coverage are
+reported separately. These opportunity/matching definitions are
 project evaluation decisions, not claims of an industry-wide metric standard.
 Final assessment is explicit, frozen and one-time; notebook defaults leave it shut.
 
@@ -227,3 +233,34 @@ are assumed here.
 [leakage]: https://scikit-learn.org/stable/common_pitfalls.html
 [iforest]: https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.IsolationForest.html
 [shap]: https://shap.readthedocs.io/en/latest/generated/shap.PermutationExplainer.html
+
+## Generator review: remaining benchmark limits
+
+The v10 export contains 12 measurements. Validation rejects exported BER, overlapping
+fault intervals and labelled faults in the first 55%; the runner also checks actual
+truth against the configured calibration boundary, including reused datasets. A
+label check cannot prove there is no unlabelled disturbance in the physical data.
+Observable onset can follow impact during missing telemetry; such cases have no
+defensible early-warning opportunity and are not forced into an artificial order.
+
+FEC still depends on latent optical power and can add cleaner evidence than a noisy
+Rx sensor. This is plausible in principle but not quantitatively calibrated here.
+Receiver offsets/dispersion must not be presented as proof of realism. An impact
+label denotes persistent low optical power, not post-FEC service damage. Expected
+uncorrectable counts depend on interval exposure; there is no universal BER at
+which the first uncorrectable block appears.
+
+Fault timing remains concentrated in two blocks; fault types remain linked to
+entity index and every configured ONT receives the configured number of faults.
+Benign disturbances, random prevalence/timing, independent temperature phase and
+shared-port faults need separate scenario design. Existing Gaussian healthy
+periods permit measuring nuisance alerts under that null, not field workload.
+Calibration ranks are not conformal p-values. These changes do not establish
+production readiness or independent early-warning benefit from FEC.
+
+The adapter's `kinds` validates declared semantics, not provenance. It cannot detect
+a caller lying about a cumulative counter or differencing interval totals later.
+The current FEC features divide matching interval counters by total opportunities
+before transforming/differencing the resulting fractions. They do not difference
+raw interval counts. Synthetic mapping is now explicit; generic canonical BER
+definitions remain available for explicitly mapped real measurements.

@@ -11,6 +11,11 @@ generator:
   missing_probability: 0.02
   impact_threshold_dbm: -27.0
   faults_per_entity: 2
+  impact_intervals: 3
+  downstream_receiver_reference_dbm: -27.0
+  upstream_receiver_reference_dbm: -28.0
+  receiver_offset_halfwidth_db: 1.5
+  fec_log10_noise_sd: 0.15
   upstream_impact_threshold_dbm: -28.0
   fault_duration_median_hours: 36.0
   onts_per_splitter: 8
@@ -32,4 +37,4 @@ incidents:
   nuisance_budget_per_1000_days: 5.0
 model:
   feature_set: temperature  # Explicit scope; comparisons do not remove features.
-output: outputs/optical_v9
+output: outputs/optical_v10

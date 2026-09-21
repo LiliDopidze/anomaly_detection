@@ -100,6 +100,12 @@ def tune(
     ).reset_index(drop=True)
 
 
+def check_calibration_truth(truth: pd.DataFrame, calibration_end: pd.Timestamp) -> None:
+    """Validate actual labels, including reused data, before any model fitting."""
+    if truth.onset_time.lt(calibration_end).any():
+        raise ValueError("Training/calibration segment contains labelled faults")
+
+
 def prepare(config_path: str | Path) -> Path:
     """Generate once; preserve existing fixtures only when settings match."""
     settings = yaml.safe_load(Path(config_path).read_text())
@@ -114,9 +120,14 @@ def prepare(config_path: str | Path) -> Path:
         previous = json.loads((run / "settings.json").read_text())
         if previous != settings:
             raise ValueError("Settings changed; choose a new output folder")
+        check_calibration_truth(
+            pd.read_parquet(run / "ground_truth.parquet"),
+            run_split(settings).calibration_end,
+        )
         return run
     run.mkdir(parents=True)
     native, truth = generate(config)
+    check_calibration_truth(truth, run_split(settings).calibration_end)
     topology = make_topology(config)
     report = validate_generated(native, truth, topology)
     topology.to_parquet(run / "topology.parquet", index=False)

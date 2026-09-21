@@ -98,3 +98,44 @@ def test_counter_intervals_do_not_use_future_physical_state():
         baseline["downstream_fec_corrected_codewords"][11:],
         altered["downstream_fec_corrected_codewords"][11:],
     )
+
+
+def test_no_exported_ber_and_label_threshold_does_not_drive_fec(generator_config):
+    from optical_anomaly.sources import SYNTHETIC_METRICS
+
+    data, _ = generate(generator_config)
+    changed, _ = generate(
+        replace(
+            generator_config,
+            impact_threshold_dbm=-24.0,
+            upstream_impact_threshold_dbm=-25.0,
+        )
+    )
+    assert not {"ber", "upstream_ber"}.intersection(data)
+    assert not {"ber", "upstream_ber"}.intersection(SYNTHETIC_METRICS)
+    # Impact thresholds now affect labels only, not any exported measurement.
+    pd.testing.assert_frame_equal(data, changed)
+
+
+def test_fec_dispersion_is_independent_and_optional(generator_config):
+    baseline, _ = generate(replace(generator_config, fec_log10_noise_sd=0))
+    noisy, _ = generate(replace(generator_config, fec_log10_noise_sd=0.5))
+    pd.testing.assert_series_equal(baseline.rx_dbm, noisy.rx_dbm)
+    assert not baseline.downstream_fec_corrected_codewords.equals(
+        noisy.downstream_fec_corrected_codewords
+    )
+
+
+@pytest.mark.parametrize("problem", ["ber", "overlap", "baseline"])
+def test_generated_validation_rejects_broken_contract(
+    problem, generator_config, generated_data
+):
+    data, truth = (x.copy() for x in generated_data)
+    if problem == "ber":
+        data["ber"] = 1e-5
+    elif problem == "overlap":
+        truth = pd.concat([truth, truth.iloc[:1]], ignore_index=True)
+    else:
+        truth.loc[0, "onset_time"] = data.time.min()
+    with pytest.raises(ValueError, match="Synthetic invariant failures"):
+        validate_generated(data, truth, make_topology(generator_config))

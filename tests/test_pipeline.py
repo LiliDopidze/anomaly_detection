@@ -100,3 +100,14 @@ def test_frozen_end_to_end(tmp_path, monkeypatch):
     assert result["monitored_entity_days"] > 0
     with pytest.raises(FileExistsError):
         final_evaluation(run)
+
+
+def test_runner_rejects_contaminated_calibration():
+    from optical_anomaly.pipeline import check_calibration_truth
+
+    end = pd.Timestamp("2025-01-02", tz="UTC")
+    with pytest.raises(ValueError, match="contains labelled faults"):
+        check_calibration_truth(
+            pd.DataFrame({"onset_time": [end - pd.Timedelta(seconds=1)]}), end
+        )
+    check_calibration_truth(pd.DataFrame({"onset_time": [end]}), end)

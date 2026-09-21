@@ -19,3 +19,26 @@ def test_matching_and_operational_denominators(operational_tables):
     overlap.loc[1, "onset_time"] = start + 10 * minute
     overlap.loc[1, "end_time"] = start + 30 * minute
     assert len(match_events(alerts.iloc[:2], overlap)) == 2
+
+
+def test_variance_delay_uses_onset_without_inventing_warning_opportunity(
+    operational_tables,
+):
+    truth, alerts, telemetry = operational_tables
+    truth = truth.iloc[:1].copy()
+    truth["fault_type"] = "variance_shift"
+    truth["observable_onset_time"] = pd.NaT
+    from optical_anomaly.evaluation import Evaluator
+
+    metrics, outcomes = Evaluator().evaluate(
+        alerts.iloc[:1],
+        truth,
+        telemetry,
+        telemetry.timestamp.min(),
+        telemetry.timestamp.max() + pd.Timedelta(minutes=5),
+    )
+    assert outcomes.iloc[0].delay_reference == "onset_time"
+    assert outcomes.iloc[0].delay_minutes == 15
+    assert not outcomes.iloc[0].opportunity
+    assert metrics["median_detection_delay_minutes"] is None
+    assert metrics["median_variance_onset_delay_minutes"] == 15

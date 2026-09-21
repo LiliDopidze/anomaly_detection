@@ -19,6 +19,11 @@ class GeneratorConfig:
     missing_probability: float = 0.02
     impact_threshold_dbm: float = -27.0
     faults_per_entity: int = 2
+    impact_intervals: int = 3
+    downstream_receiver_reference_dbm: float = -27.0
+    upstream_receiver_reference_dbm: float = -28.0
+    receiver_offset_halfwidth_db: float = 1.5
+    fec_log10_noise_sd: float = 0.15
     upstream_impact_threshold_dbm: float = -28.0
     fault_duration_median_hours: float = 36.0
     onts_per_splitter: int = 8
@@ -26,6 +31,19 @@ class GeneratorConfig:
     ports_per_olt: int = 4
 
     def __post_init__(self) -> None:
+        if not isinstance(self.impact_intervals, int) or self.impact_intervals < 1:
+            raise ValueError("impact_intervals must be a positive integer")
+        if min(self.receiver_offset_halfwidth_db, self.fec_log10_noise_sd) < 0:
+            raise ValueError("Receiver spread and FEC dispersion must be nonnegative")
+        if not np.isfinite(
+            [
+                self.downstream_receiver_reference_dbm,
+                self.upstream_receiver_reference_dbm,
+                self.receiver_offset_halfwidth_db,
+                self.fec_log10_noise_sd,
+            ]
+        ).all():
+            raise ValueError("Receiver parameters must be finite")
         if self.days < 8 or self.entities < 1 or self.interval_minutes < 1:
             raise ValueError("Need >=8 days, >=1 entity and a positive interval")
         if self.noise_db <= 0 or self.correlation_hours <= 0:
@@ -94,7 +112,6 @@ def _port_optics(
     rng = np.random.default_rng(np.random.SeedSequence([config.seed, port, 100]))
     hours = np.arange(size) * config.interval_minutes / 60
     temperature = 35 + 2 * np.sin(2 * np.pi * hours / 24)
-    temperature += 4 * np.sin(2 * np.pi * hours / (24 * 365.25))
     temperature += stationary_noise(
         size, 0.5, np.exp(-config.interval_minutes / 360), rng
     )
@@ -130,6 +147,17 @@ def _normal_optics(
     }
 
 
+def first_persistent_crossing(crosses: np.ndarray, intervals: int) -> int | None:
+    """Return the confirming sample, never backdate to the start of the run."""
+    if intervals < 1:
+        raise ValueError("Need at least one confirming interval")
+    if len(crosses) < intervals:
+        return None
+    runs = np.convolve(crosses.astype(int), np.ones(intervals, dtype=int), "valid")
+    starts = np.flatnonzero(runs == intervals)
+    return int(starts[0] + intervals - 1) if len(starts) else None
+
+
 def _inject_fault(
     config: GeneratorConfig,
     entity: int,
@@ -149,24 +177,27 @@ def _inject_fault(
     severity = rng.uniform(0.4, 1.4)
     delta = signature * severity
     optics["rx_dbm"][onset:stop] += delta
-    optics["upstream_rx_dbm"][onset:stop] += 1.1 * delta
+    directional_rng = np.random.default_rng(
+        np.random.SeedSequence([config.seed, entity, 4])
+    )
+    upstream_multiplier = directional_rng.uniform(0.8, 1.4)
+    optics["upstream_rx_dbm"][onset:stop] += upstream_multiplier * delta
     crosses = (optics["rx_dbm"][onset:stop] < config.impact_threshold_dbm) | (
         optics["upstream_rx_dbm"][onset:stop] < config.upstream_impact_threshold_dbm
     )
-    crossings = np.flatnonzero(crosses)
-    effect = (
-        np.abs(delta)
-        if kind != "variance_shift"
-        else np.full(len(delta), 0.5 * severity)
+    confirmed = first_persistent_crossing(crosses, config.impact_intervals)
+    visible = np.flatnonzero(
+        (np.abs(delta) >= 2 * config.noise_db) & ~missing[onset:stop]
     )
-    visible = np.flatnonzero((effect >= 2 * config.noise_db) & ~missing[onset:stop])
+    if kind == "variance_shift":
+        visible = np.array([], dtype=int)
     return {
         "fault_id": f"F-{entity:03d}-{number}",
         "entity_id": f"ONT-{entity:03d}",
         "fault_type": kind,
         "onset_time": times[onset],
         "observable_onset_time": times[onset + visible[0]] if len(visible) else pd.NaT,
-        "impact_time": times[onset + crossings[0]] if len(crossings) else pd.NaT,
+        "impact_time": times[onset + confirmed] if confirmed is not None else pd.NaT,
         "end_time": times[stop],
     }
 
@@ -189,10 +220,15 @@ def _simulate_entity(
     errors = error_telemetry(
         optics["rx_dbm"],
         optics["upstream_rx_dbm"],
-        (config.impact_threshold_dbm, config.upstream_impact_threshold_dbm),
+        (
+            config.downstream_receiver_reference_dbm,
+            config.upstream_receiver_reference_dbm,
+        ),
         config.interval_minutes,
         members,
         np.random.SeedSequence([config.seed, entity, 3]),
+        receiver_offset_halfwidth_db=config.receiver_offset_halfwidth_db,
+        log10_noise_sd=config.fec_log10_noise_sd,
     )
     for name in ("rx_dbm", "upstream_rx_dbm", "ont_tx_dbm"):
         optics[name] = np.round(
@@ -211,7 +247,7 @@ def generate(config: GeneratorConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Separate measurements/truth; first 55% is a declared fault-free baseline.
 
     Fault timings are controlled scenarios, not empirical arrival distributions.
-    Impact is a latent Rx crossing, independent of measurement/collection noise.
+    Impact is a persistent latent Rx crossing, not measured customer-service loss.
     """
     times = pd.date_range(
         "2025-01-01",
