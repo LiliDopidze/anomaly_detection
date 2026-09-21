@@ -22,7 +22,7 @@ fault log; labels and topology identifiers never enter the feature matrix.
 | `rx_dbm`, `upstream_rx_dbm` | Directional receive power: transmitter power minus path loss. Downstream path loss starts uniformly between 23 and 27 dB; upstream adds an assumed 0.4–1.2 dB offset. Both paths share normal fluctuations and injected loss. | Optical measurement categories: [ETSI F5G 011, §§8.3–8.4][etsi]. Subtraction follows the logarithmic power definition [NIST][db]. Ranges and cross-direction dependence are simulation assumptions. |
 | `ont_tx_dbm`, `olt_tx_dbm` | Nominal 2/3 dBm; small thermal response and stationary residuals. OLT Tx is shared by ONTs on a port. Tx does not change in response to a simulated path fault. | Monitored quantities: [ETSI][etsi]. Nominal levels and thermal coefficients 0.008/0.005 dB/°C are uncalibrated assumptions, not vendor specifications. |
 | `ont_temperature_c`, `olt_temperature_c` | Baselines 38/35°C, daily amplitudes 3/2°C and correlated residuals. OLT temperature is shared per port with no annual ramp. | Temperature monitoring: [ETSI][etsi]. Waveform, ranges and time constants are assumptions. Ninety days cannot identify an annual cycle. |
-| Internal BER (not exported) | Assumed probability `10**clip(-5-(latent_rx-receiver_reference), -12, -1)`. Receiver references are separate from impact thresholds, with per-ONT/direction offsets Uniform(-1.5, 1.5) dB. Prior-interval BER is multiplied by lognormal dispersion with log10 SD 0.15, then clipped to [0, 0.1]. | Error monitoring context: [G.988][g988]. Curve, offsets and dispersion are uncalibrated assumptions; they remove direct threshold coupling, not all synthetic shortcuts. |
+| Internal BER (not exported) | Assumed probability `10**clip(-5-(latent_rx-receiver_reference), -12, -1)`. Receiver references are separate from impact thresholds, with per-ONT/direction offsets Uniform(-1.5, 1.5) dB. Prior-interval BER is multiplied by lognormal dispersion with log10 SD 0.15, then clipped to [0, 0.1]. | Error monitoring context: [G.988][g988]. Curve, offsets and dispersion are uncalibrated assumptions; receiver behaviour is independent of label thresholds but remains synthetic. |
 | `{downstream,upstream}_fec_total_codewords` | Received codeword opportunities during the preceding interval, using 255-byte codewords and GPON line rates. Upstream capacity is divided among port members. | Coding/rate context: [G.984.3][g984]. Always-on coding, equal upstream allocation and omitted framing overhead are simplifications. |
 | `{downstream,upstream}_fec_corrected_codewords` | For bit error probability p, symbol error probability is `q=1-(1-p)^8`. Sample codewords with 1–8 erroneous symbols. | RS(255,239) correction capability: [G.984.3][g984]; binomial probability calculation [SciPy][binomial]. Independent bit errors and ideal decoding are assumptions. |
 | `{downstream,upstream}_fec_uncorrectable_codewords` | Sample codewords with more than eight erroneous symbols jointly with corrected/clean categories. Corrected + uncorrectable cannot exceed total. | Same coding basis. These are illustrative interval counters, not measured BER, cumulative counters or an XGS-PON LDPC model. |
@@ -105,11 +105,12 @@ Ordinary least-squares seasonal fitting itself is not robust to contaminated
 training. A representative reviewed local baseline remains necessary.
 
 Short windows contain 12 readings (one hour at default cadence). Long optical
-windows contain `ceil(6 hours/cadence)` readings. Six hours is a development
+windows contain up to `ceil(6 hours/cadence)` readings. Six hours is a development
 choice, not a standard. Windows end at the current decision; CUSUM's reference
 ends one reading earlier. Missing values or time gaps reset temporal state.
-Long-window features require complete uninterrupted history: report the resulting
-coverage and misses, particularly with frequent missing polls.
+Long-window features require at least 12 contiguous readings and use available
+history up to the six-hour limit. Report coverage and misses, particularly with
+frequent missing polls.
 
 | Feature suffix/name | Definition and application | Source or assumption |
 |---|---|---|
@@ -117,8 +118,8 @@ coverage and misses, particularly with frequent missing polls.
 | `variability` | Short-window population SD of z on the same channels. | Same optical precedent; no standard optical warning threshold is implied. |
 | `slope` | EWMA of first differences of z divided by elapsed hours. Same ten channels. Alpha=`1-exp(-dt/smoothing_hours)`, default one hour. | [NIST EWMA][ewma] supplies the smoothing basis. Applying it to optical derivatives is our modelling choice. |
 | `regression_slope` | Least-squares slope of z against elapsed hours inside the short window. Downstream/upstream Rx and both loss channels. | [NIST least squares][ols]. Its early-warning value must be measured locally. |
-| `long_level` | Six-hour mean of z for the four optical channels above. | Established mean statistic; chosen time scale is an assumption. |
-| `short_minus_long` | Short-window mean minus six-hour mean for those four channels. | Proposed multi-scale contrast. No claim that this exact formulation is an established PON standard. |
+| `long_level` | Mean of z over up to six hours of contiguous history, requiring the short-window count for the four optical channels above. | Established mean statistic; chosen time scale is an assumption. |
+| `short_minus_long` | Short-window mean minus the available long-window mean for those four channels. | Proposed multi-scale contrast. No claim that this exact formulation is an established PON standard. |
 | `below_baseline_fraction` | Fraction of short-window downstream Rx residuals below zero. Zero means the fitted expected value, not a fault threshold. | Proposed persistence summary; no feature-selection threshold. |
 | `cusum` | Downstream Rx `max(0, previous + prior_short_mean - z - 0.25)`. | [NIST CUSUM][cusum] motivates accumulation. Rolling reference and allowance are adaptations; the reference can absorb slow degradation. |
 | `cov` | Short-window SD/absolute mean of downstream **linear** optical power. | [NIST CoV][cov] requires a ratio scale. Retained experimental feature; never computed on dBm or Celsius. |
@@ -175,12 +176,17 @@ above high open at the Nth decision; M below low close. Equality triggers neithe
 Current high/low 0.99/0.8 and N={2,3,6}, M={3,6} are development choices requiring
 operator calibration. They are not feature-retention thresholds. Missing scores
 reset confirmation; extended gaps close administratively, not as confirmed repair.
+The independent incident gap timeout defaults to six hours. Validation tables
+report score coverage and telemetry-gap closures alongside workload.
 
 Evaluation deterministically matches incidents one-to-one with faults by entity
 and emission inside the physical fault interval. No point adjustment is used.
 Pre-impact recall counts early matched faults among those with a declared warning
 opportunity: observable onset and three observed Rx intervals before impact minus
-30 minutes. Nuisance counts unmatched and duplicate incidents per 1,000 scheduled
+30 minutes. Variance shifts use physical onset as an explicit synthetic opportunity
+proxy. Results include separate observable-onset and physical-onset denominators,
+numerators and recall; the pooled recall includes both. Physical onset is not proof
+of immediate detectability. Nuisance counts unmatched and duplicate incidents per 1,000 scheduled
 entity-days. Mean-shift delay uses alert emission minus observable onset. Variance-shift delay
 uses physical onset with an explicit `delay_reference` and a separate aggregate
 metric; it does not enter the observable-delay median. Misses and coverage are
@@ -233,5 +239,3 @@ are assumed here.
 [leakage]: https://scikit-learn.org/stable/common_pitfalls.html
 [iforest]: https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.IsolationForest.html
 [shap]: https://shap.readthedocs.io/en/latest/generated/shap.PermutationExplainer.html
-
-

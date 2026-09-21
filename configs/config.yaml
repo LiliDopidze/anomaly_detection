@@ -30,6 +30,7 @@ features:
 # Train / score calibration / validation / final test fractions.
 splits: [0.4, 0.55, 0.75, 1.0]
 incidents:
+  max_gap_hours: 6.0
   high: 0.99
   low: 0.8
   opening_candidates: [2, 3, 6]
@@ -37,4 +38,4 @@ incidents:
   nuisance_budget_per_1000_days: 5.0
 model:
   feature_set: temperature  # Explicit scope; comparisons do not remove features.
-output: outputs/optical_v10
+output: outputs/optical_v11

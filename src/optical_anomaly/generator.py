@@ -82,7 +82,7 @@ def fault_signature(
         increments = rng.normal(-0.15 * step_hours, 0.06 * np.sqrt(step_hours), size)
         return -0.2 + np.cumsum(increments)
     if kind == "exponential":
-        # Accelerating attenuation in dB; zero-free initial loss fixes onset.
+        # Accelerating attenuation in dB; positive initial loss defines onset.
         return -0.2 - 0.35 * np.expm1(np.minimum(elapsed / 12, 3))
     if kind == "variance_shift":
         return stationary_noise(size, 0.5, np.exp(-step_hours / 0.5), rng)

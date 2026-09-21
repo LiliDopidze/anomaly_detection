@@ -113,7 +113,9 @@ class FeatureEngineer:
             output.loc[indices, "regression_slope"] = rolling_slope(
                 x, self.window, self.interval_minutes / 60
             )
-            long_mean = x.rolling(self.long_window).mean()
+            long_mean = x.rolling(
+                self.long_window, min_periods=self.window
+            ).mean()
             output.loc[indices, "long_level"] = long_mean
             output.loc[indices, "short_minus_long"] = window.mean() - long_mean
             output.loc[indices, "below_baseline_fraction"] = (

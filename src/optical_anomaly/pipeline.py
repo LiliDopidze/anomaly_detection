@@ -48,6 +48,7 @@ def incidents_for(scores: pd.DataFrame, policy: dict, interval: int) -> pd.DataF
         opening_intervals=policy["opening_intervals"],
         closing_intervals=policy["closing_intervals"],
         interval_minutes=interval,
+        max_gap_hours=policy.get("max_gap_hours", 6.0),
     ).process(values)
 
 
@@ -70,6 +71,7 @@ def tune(
                     "low": settings["low"],
                     "opening_intervals": opening,
                     "closing_intervals": closing,
+                    "max_gap_hours": settings.get("max_gap_hours", 6.0),
                 }
                 alerts = incidents_for(scores, policy, interval)
                 metrics, _ = evaluator.evaluate(
@@ -80,6 +82,9 @@ def tune(
                     split.validation_end,
                 )
                 metrics["score_coverage"] = float(scores[detector].notna().mean())
+                metrics["telemetry_gap_closures"] = int(
+                    alerts.reason.eq("telemetry_gap").sum()
+                )
                 rows.append({**policy, **metrics})
     table = pd.DataFrame(rows)
     table["meets_workload_budget"] = table.nuisance_per_1000_entity_days.le(
@@ -194,7 +199,10 @@ def develop(config_path: str | Path) -> Path:
     comparison.groupby("feature_set", sort=False).head(1).to_csv(
         run / "feature_set_comparison.csv", index=False
     )
-    keys = ["detector", "high", "low", "opening_intervals", "closing_intervals"]
+    keys = [
+        "detector", "high", "low", "opening_intervals", "closing_intervals",
+        "max_gap_hours",
+    ]
     # Telemetry scope is explicit. Comparison and importance never drop features.
     feature_set = settings.get("model", {}).get("feature_set", "temperature")
     if feature_set not in FEATURE_SETS:

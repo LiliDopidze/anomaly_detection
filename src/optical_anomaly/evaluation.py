@@ -40,13 +40,18 @@ class Evaluator:
     opportunity_intervals: int = 3
 
     def _opportunity(self, fault: pd.Series, available: pd.DataFrame) -> bool:
-        """Observable precursor and consecutive telemetry; never detector success."""
-        if pd.isna(fault.impact_time) or pd.isna(fault.observable_onset_time):
+        """Consecutive telemetry after the declared reference, before the deadline."""
+        reference = (
+            fault.onset_time
+            if fault.fault_type == "variance_shift"
+            else fault.observable_onset_time
+        )
+        if pd.isna(fault.impact_time) or pd.isna(reference):
             return False
         deadline = fault.impact_time - pd.Timedelta(minutes=self.minimum_lead_minutes)
         rows = available.loc[
             available.entity_id.eq(fault.entity_id)
-            & available.timestamp.ge(fault.observable_onset_time)
+            & available.timestamp.ge(reference)
             & available.timestamp.le(deadline)
         ].sort_values("timestamp")
         count, previous = 0, None
@@ -97,6 +102,9 @@ class Evaluator:
                     "fault_type": fault.fault_type,
                     "detected": alert is not None,
                     "opportunity": opportunity,
+                    "opportunity_reference": (
+                        "onset_time" if variance_shift else "observable_onset_time"
+                    ),
                     "pre_impact": early,
                     "delay_minutes": delay,
                     "delay_reference": (
@@ -111,6 +119,7 @@ class Evaluator:
                 "fault_type",
                 "detected",
                 "opportunity",
+                "opportunity_reference",
                 "pre_impact",
                 "delay_minutes",
                 "delay_reference",
@@ -196,6 +205,16 @@ class Evaluator:
             "boundary_incidents": excluded,
             "boundary_faults": len(boundary),
         }
+        for reference, prefix in (
+            ("observable_onset_time", "observable"),
+            ("onset_time", "physical_onset"),
+        ):
+            eligible = outcomes.opportunity & outcomes.opportunity_reference.eq(reference)
+            count = int(eligible.sum())
+            detected = int((eligible & outcomes.pre_impact).sum())
+            metrics[f"{prefix}_warning_opportunities"] = count
+            metrics[f"{prefix}_pre_impact_detected"] = detected
+            metrics[f"{prefix}_pre_impact_recall"] = detected / count if count else None
         return metrics
 
     def evaluate(

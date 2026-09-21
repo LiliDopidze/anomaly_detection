@@ -180,7 +180,9 @@ class MultivariateFeatures:
         )
         if "long_level" in summaries_for(name):
             output[f"{name}_long_level"] = (
-                grouped.rolling(self.baseline.long_window)
+                grouped.rolling(
+                    self.baseline.long_window, min_periods=self.baseline.window
+                )
                 .mean()
                 .droplevel(0)
                 .sort_index()

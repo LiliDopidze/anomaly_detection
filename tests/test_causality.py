@@ -67,6 +67,12 @@ def test_feature_causality_offset_invariance_and_missing_warmup(clean_telemetry)
     warming_up = result.timestamp.between(missing_time, recovery_time, inclusive="left")
     assert result.loc[warming_up, "cusum"].isna().all()
     assert result.loc[result.timestamp.eq(recovery_time), "cusum"].notna().all()
+    assert result.loc[result.timestamp.eq(recovery_time), FEATURES].notna().all().all()
+    first_window_end = missing_time + pd.Timedelta(
+        minutes=engineer.window * engineer.interval_minutes
+    )
+    actual = result.loc[result.timestamp.eq(first_window_end)].iloc[0]
+    assert actual.long_level == pytest.approx(actual.level)
 
 
 def test_unknown_entities_abstain(clean_telemetry):

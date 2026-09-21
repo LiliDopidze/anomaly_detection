@@ -150,7 +150,7 @@ Tests own their configuration and do not require your current working directory
 to be the repository root. See [RUN_GUIDE.md](RUN_GUIDE.md) for Windows/macOS setup,
 notebook order, output interpretation and rerunning an experiment.
 
-Default local outputs are under `<repository>/outputs/optical_v10/`.
+Default local outputs are under `<repository>/outputs/optical_v11/`.
 All outputs stay outside Git. See [RUN_GUIDE.md](RUN_GUIDE.md) for exact commands.
 
 ### Inspect first, then adapt
@@ -224,8 +224,8 @@ Reports include paired counts and are saved under `eda/`. No cutoff drops featur
 FEC display labels use received/corrected/uncorrectable blocks, with upstream and
 downstream explicit; a block means one FEC codeword per reporting interval.
 
-Version 10 removes exported BER, separates receiver parameters from impact-label
-thresholds and removes the OLT temperature ramp. Impact requires three consecutive
+The generator exports power, temperature and FEC measurements. Receiver
+parameters are independent of impact-label thresholds. Impact requires three consecutive
 low-power readings and is dated at the confirming reading; it remains a proxy,
 not verified customer-service loss. Receiver offsets and FEC dispersion are explicit
 simulation assumptions. Variance-shift delay is reported from physical onset,

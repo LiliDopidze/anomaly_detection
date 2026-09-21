@@ -131,7 +131,10 @@ def test_long_optical_windows_and_regression_have_physical_time_units():
     times = pd.Series(pd.date_range("2025-01-01", periods=100, freq="5min"))
     values = pd.Series(2 + 3 * np.arange(100) / 12)
     result = model._summaries(values, times, "upstream_rx")
-    assert result.upstream_rx_long_level.iloc[:71].isna().all()
+    assert result.upstream_rx_long_level.iloc[:11].isna().all()
+    assert result.upstream_rx_long_level.iloc[11] == pytest.approx(
+        values.iloc[:12].mean()
+    )
     assert result.upstream_rx_long_level.iloc[71] == pytest.approx(
         values.iloc[:72].mean()
     )
@@ -140,7 +143,10 @@ def test_long_optical_windows_and_regression_have_physical_time_units():
     assert result.upstream_rx_short_minus_long.iloc[71] == pytest.approx(expected)
     values.iloc[80] = np.nan
     broken = model._summaries(values, times, "upstream_rx")
-    assert broken.upstream_rx_long_level.iloc[80:].isna().all()
+    assert broken.upstream_rx_long_level.iloc[80:92].isna().all()
+    assert broken.upstream_rx_long_level.iloc[92] == pytest.approx(
+        values.iloc[81:93].mean()
+    )
 
 
 def test_fec_error_frequency_uses_uncentred_counts_and_preserves_unknowns():
