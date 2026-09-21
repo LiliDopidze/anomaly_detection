@@ -1,6 +1,8 @@
 """Checks for matching."""
 
 import pandas as pd
+import numpy as np
+import pytest
 from optical_anomaly.evaluation import Evaluator, match_events
 
 
@@ -60,3 +62,59 @@ def test_variance_without_impact_has_no_warning_opportunity(operational_tables):
     )
     assert not outcomes.iloc[0].opportunity
     assert metrics["pre_impact_recall"] is None
+
+
+@pytest.mark.parametrize("lead_minutes", [-1, 0, 29, 30, 31])
+def test_warning_deadline_is_distinct_from_pre_impact(operational_tables, lead_minutes):
+    truth, alerts, telemetry = operational_tables
+    truth, alerts = truth.iloc[:1].copy(), alerts.iloc[:1].copy()
+    alerts["start_time"] = truth.impact_time.iloc[0] - pd.Timedelta(
+        minutes=lead_minutes
+    )
+    metrics, outcomes = Evaluator(minimum_lead_minutes=30).evaluate(
+        alerts, truth, telemetry, telemetry.timestamp.min(),
+        telemetry.timestamp.max() + pd.Timedelta(minutes=5),
+    )
+    assert metrics["pre_impact_recall"] == int(lead_minutes > 0)
+    assert metrics["minimum_lead_recall"] == int(lead_minutes >= 30)
+    assert outcomes.iloc[0].lead_minutes == lead_minutes
+
+
+def test_missing_opportunity_still_counts_as_missed_impact(operational_tables):
+    truth, alerts, telemetry = operational_tables
+    telemetry = telemetry.copy()
+    telemetry["value"] = np.nan
+    metrics, outcomes = Evaluator().evaluate(
+        alerts.iloc[:0], truth, telemetry, telemetry.timestamp.min(),
+        telemetry.timestamp.max() + pd.Timedelta(minutes=5),
+    )
+    assert metrics["warning_opportunities"] == 0
+    assert metrics["faults_without_warning_opportunity"] == 2
+    assert metrics["pre_impact_recall"] is None
+    assert metrics["pre_impact_recall_all_impacting"] == 0
+    assert metrics["impacting_faults"] == metrics["missed"] == 2
+    assert metrics["observation_coverage"] == 0
+    assert not outcomes.detected.any()
+
+
+def test_matching_is_order_independent(operational_tables):
+    truth, alerts, _ = operational_tables
+    assert match_events(alerts, truth) == match_events(
+        alerts.iloc[::-1], truth.iloc[::-1]
+    )
+
+
+def test_duplicate_incident_ids_cannot_hide_workload(operational_tables):
+    truth, alerts, _ = operational_tables
+    with pytest.raises(ValueError, match="unique, nonmissing incident_id"):
+        match_events(pd.concat([alerts, alerts.iloc[:1]]), truth)
+
+
+def test_duplicate_monitoring_rows_cannot_inflate_exposure(operational_tables):
+    truth, alerts, telemetry = operational_tables
+    with pytest.raises(ValueError, match="Duplicate monitoring"):
+        Evaluator().evaluate(
+            alerts, truth, pd.concat([telemetry, telemetry.iloc[:1]]),
+            telemetry.timestamp.min(),
+            telemetry.timestamp.max() + pd.Timedelta(minutes=5),
+        )

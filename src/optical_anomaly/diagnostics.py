@@ -5,6 +5,38 @@ import pandas as pd
 from .generator import GeneratorConfig
 
 
+def observation_quality(
+    telemetry: pd.DataFrame, interval_minutes: int, window: int = 12
+) -> pd.DataFrame:
+    """Causal downstream poll diagnostics, kept outside optical model features.
+
+    Input is the validated regular grid. Missingness is not itself an optical
+    fault label; these indicators explain abstention and feature warm-up.
+    """
+    frames = []
+    for _, group in telemetry.loc[
+        telemetry.metric_name.eq("rx_power_dbm")
+    ].groupby("entity_id"):
+        group = group.sort_values("timestamp").reset_index(drop=True)
+        observed = pd.Series(np.isfinite(group.value), index=group.index)
+        gaps = group.timestamp.diff().ne(pd.Timedelta(minutes=interval_minutes))
+        consecutive = observed.astype(int).groupby((~observed | gaps).cumsum()).cumsum()
+        result = group[["entity_id", "timestamp"]].copy()
+        result["current_observed"] = observed
+        result["recent_observed_fraction"] = observed.rolling(window).mean()
+        result["missing_run_intervals"] = (~observed).groupby(
+            (observed | gaps).cumsum()
+        ).cumsum()
+        # Carry only the last timestamp for age calculation, never sensor values.
+        last_observation = group.timestamp.where(observed).ffill()
+        result["minutes_since_observation"] = (
+            group.timestamp - last_observation
+        ).dt.total_seconds() / 60
+        result["contiguous_history_hours"] = consecutive * interval_minutes / 60
+        frames.append(result)
+    return pd.concat(frames, ignore_index=True)
+
+
 def missingness_report(native: pd.DataFrame) -> pd.DataFrame:
     """Per-device measurement counts and longest missing run on supplied rows.
 
@@ -39,6 +71,7 @@ def healthy_statistics(healthy: pd.DataFrame, config: GeneratorConfig) -> pd.Dat
     Missing rows remain in place when estimating adjacent-sample correlation.
     Tolerances are diagnostic bands, not hypothesis-test confidence intervals.
     """
+    # Model identity: independent physical and sensor variances add.
     expected_var = config.noise_db**2 + config.sensor_noise_db**2
     phi = np.exp(-config.interval_minutes / (60 * config.correlation_hours))
     expected_rho = phi * config.noise_db**2 / expected_var
@@ -50,7 +83,7 @@ def healthy_statistics(healthy: pd.DataFrame, config: GeneratorConfig) -> pd.Dat
         design = np.column_stack([np.ones(len(group)), np.sin(phase), np.cos(phase)])
         path_loss = (group.olt_tx_dbm - group.rx_dbm).to_numpy()
         valid = np.isfinite(path_loss)
-        if valid.sum() < 100:
+        if valid.sum() < 100:  # Assumption: diagnostic sample floor, not a standard.
             continue
         coefficients = np.linalg.lstsq(design[valid], path_loss[valid], rcond=None)[0]
         residual = pd.Series(path_loss - design @ coefficients)
@@ -68,6 +101,7 @@ def healthy_statistics(healthy: pd.DataFrame, config: GeneratorConfig) -> pd.Dat
                 "expected_variance": expected_var,
                 "residual_lag1": rho,
                 "expected_lag1": expected_rho,
+                # Assumptions: screens for this generator, not confidence bounds.
                 "amplitude_in_band": abs(amplitude - config.daily_amplitude_db)
                 <= max(0.05, config.daily_amplitude_db * 0.2),
                 "variance_in_band": abs(variance / expected_var - 1) <= 0.25,
@@ -82,11 +116,14 @@ def development_faults(
     native: pd.DataFrame,
     end: pd.Timestamp,
     interval_minutes: int,
+    minimum_lead_minutes: float = 30,
+    opportunity_intervals: int = 3,
 ) -> pd.DataFrame:
     """Only faults fully inside development; report conservative warning windows.
 
-    Opportunity proxy requires 3 consecutive observed Rx polls and 30 minutes
-    before impact. This is a data diagnostic, not detector recall.
+    Defaults require 3 consecutive observed Rx polls and 30 minutes before impact.
+    These are operational assumptions. This proxy excludes variance-only faults;
+    evaluation reports their physical-onset opportunity separately.
     """
     faults = truth.loc[(truth.onset_time < end) & (truth.end_time <= end)].copy()
     for column in ("onset_time", "end_time", "observable_onset_time", "impact_time"):
@@ -103,18 +140,14 @@ def development_faults(
         view = native.loc[
             native.device.eq(fault.entity_id)
             & native.time.ge(fault.observable_onset_time)
-            & native.time.le(fault.impact_time - pd.Timedelta(minutes=30))
+            & native.time.le(
+                fault.impact_time - pd.Timedelta(minutes=minimum_lead_minutes)
+            )
         ].sort_values("time")
         observed = view.rx_dbm.notna()
-        consecutive = view.time.diff().eq(step)
-        available = (
-            observed
-            & observed.shift(1, fill_value=False)
-            & observed.shift(2, fill_value=False)
-            & consecutive
-            & consecutive.shift(1, fill_value=False)
-        )
-        opportunities.append(bool(available.any()))
+        breaks = ~observed | view.time.diff().ne(step)
+        run_lengths = observed.astype(int).groupby(breaks.cumsum()).cumsum()
+        opportunities.append(bool(run_lengths.ge(opportunity_intervals).any()))
     faults["warning_opportunity_proxy"] = opportunities
     return faults
 
@@ -171,7 +204,7 @@ def canonical_statistics(
         days = (series.index - series.index[0]).total_seconds().to_numpy() / 86400
         values = series.to_numpy()
         finite = np.isfinite(values)
-        cut = days[-1] * 0.7
+        cut = days[-1] * 0.7  # Assumption: 70/30 split inside training-only EDA.
         train, test = finite & (days < cut), finite & (days >= cut)
         row = {
             "entity_id": entity,
@@ -199,6 +232,7 @@ def canonical_statistics(
             daily_holdout_r2=np.nan,
             daily_weekly_holdout_r2=np.nan,
         )
+        # Assumptions: sample floors; harmonic method is METHOD.md [harmonic].
         if train.sum() >= 100 and test.sum() >= 30:
             phase = 2 * np.pi * days
             design = np.column_stack(
@@ -215,7 +249,7 @@ def canonical_statistics(
                 (3, "daily_holdout_r2"),
                 (5, "daily_weekly_holdout_r2"),
             ]:
-                if columns == 5 and cut < 21:
+                if columns == 5 and cut < 21:  # Assumption: three weekly cycles.
                     continue
                 coefficients = np.linalg.lstsq(
                     design[train, :columns], values[train], rcond=None

@@ -20,6 +20,7 @@ class EntityState:
 
 @dataclass
 class IncidentManager:
+    # Assumptions: operational policy candidates, not telecom-standard limits.
     high: float = 0.99
     low: float = 0.8
     opening_intervals: int = 3
@@ -62,6 +63,7 @@ class IncidentManager:
                 if state.previous is not None:
                     if time <= state.previous:
                         raise ValueError("Replay/overlapping chunks are not allowed")
+                    # Assumption: allow half an interval of timestamp jitter.
                     if time - state.previous > pd.Timedelta(
                         minutes=self.interval_minutes * 1.5
                     ):
@@ -87,6 +89,7 @@ class IncidentManager:
                 if state.status == "CLOSED":
                     state.high_count = state.high_count + 1 if score > self.high else 0
                     if state.high_count >= self.opening_intervals:
+                        # Timestamp the actual alert; never backdate by N intervals.
                         state.status, state.start, state.max_score = "OPEN", time, score
                         state.number += 1
                 else:

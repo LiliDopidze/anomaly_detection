@@ -1,4 +1,8 @@
-"""Event-level operational evaluation. Point adjustment is never performed."""
+"""Event-level operational evaluation. Point adjustment is never performed.
+
+Source: Kim et al. (AAAI 2022), https://doi.org/10.1609/aaai.v36i7.20680.
+One-to-one matching and lead-time requirements are explicit operational choices.
+"""
 
 from dataclasses import dataclass
 import numpy as np
@@ -7,6 +11,9 @@ import pandas as pd
 
 def match_events(incidents: pd.DataFrame, faults: pd.DataFrame) -> dict[str, str]:
     """Deterministic maximum-cardinality one-to-one interval/entity matching."""
+    for table, key in ((incidents, "incident_id"), (faults, "fault_id")):
+        if table[key].isna().any() or table[key].duplicated().any():
+            raise ValueError(f"Expected unique, nonmissing {key} values")
     choices = {}
     for alert in incidents.sort_values(["start_time", "incident_id"]).itertuples():
         eligible = faults.loc[
@@ -36,8 +43,15 @@ def match_events(incidents: pd.DataFrame, faults: pd.DataFrame) -> dict[str, str
 @dataclass(frozen=True)
 class Evaluator:
     interval_minutes: int = 5
+    # Assumptions: fixed operational targets, declared before validation/test.
     minimum_lead_minutes: int = 30
     opportunity_intervals: int = 3
+
+    def __post_init__(self) -> None:
+        if self.interval_minutes <= 0 or self.opportunity_intervals < 1:
+            raise ValueError("Cadence and opportunity intervals must be positive")
+        if self.minimum_lead_minutes < 0:
+            raise ValueError("Minimum lead time must be nonnegative")
 
     def _opportunity(self, fault: pd.Series, available: pd.DataFrame) -> bool:
         """Consecutive telemetry after the declared reference, before the deadline."""
@@ -56,11 +70,12 @@ class Evaluator:
         ].sort_values("timestamp")
         count, previous = 0, None
         for row in rows.itertuples():
+            # Assumption: same half-interval jitter tolerance as incident debounce.
             gap = previous is not None and row.timestamp - previous > pd.Timedelta(
                 minutes=self.interval_minutes * 1.5
             )
-            count = 0 if gap or pd.isna(row.value) else count
-            if pd.notna(row.value):
+            count = 0 if gap or not np.isfinite(row.value) else count
+            if np.isfinite(row.value):
                 count += 1
             if count >= self.opportunity_intervals:
                 return True
@@ -87,6 +102,11 @@ class Evaluator:
                 and pd.notna(fault.impact_time)
                 and alert.start_time < fault.impact_time
             )
+            lead = (
+                (fault.impact_time - alert.start_time).total_seconds() / 60
+                if alert is not None and pd.notna(fault.impact_time)
+                else np.nan
+            )
             variance_shift = fault.fault_type == "variance_shift"
             delay_reference = (
                 fault.onset_time if variance_shift else fault.observable_onset_time
@@ -106,6 +126,9 @@ class Evaluator:
                         "onset_time" if variance_shift else "observable_onset_time"
                     ),
                     "pre_impact": early,
+                    "impacting": pd.notna(fault.impact_time),
+                    "lead_minutes": lead,
+                    "minimum_lead": early and lead >= self.minimum_lead_minutes,
                     "delay_minutes": delay,
                     "delay_reference": (
                         "onset_time" if variance_shift else "observable_onset_time"
@@ -121,6 +144,9 @@ class Evaluator:
                 "opportunity",
                 "opportunity_reference",
                 "pre_impact",
+                "impacting",
+                "lead_minutes",
+                "minimum_lead",
                 "delay_minutes",
                 "delay_reference",
             ],
@@ -171,6 +197,9 @@ class Evaluator:
         days = len(available) * self.interval_minutes / 1440
         opportunities = int(outcomes.opportunity.sum())
         early = int((outcomes.opportunity & outcomes.pre_impact).sum())
+        timely = int((outcomes.opportunity & outcomes.minimum_lead).sum())
+        impacting = int(outcomes.impacting.sum())
+        all_early = int((outcomes.impacting & outcomes.pre_impact).sum())
         observable_delays = outcomes.loc[
             outcomes.delay_reference.eq("observable_onset_time"), "delay_minutes"
         ]
@@ -182,15 +211,26 @@ class Evaluator:
             "detected": len(matches),
             "missed": len(faults) - len(matches),
             "warning_opportunities": opportunities,
+            "faults_without_warning_opportunity": len(outcomes) - opportunities,
             "pre_impact_detected": early,
             "pre_impact_recall": early / opportunities if opportunities else None,
+            "minimum_lead_minutes": self.minimum_lead_minutes,
+            "minimum_lead_detected": timely,
+            "minimum_lead_recall": timely / opportunities if opportunities else None,
+            "impacting_faults": impacting,
+            # Missing telemetry cannot hide failed warnings in this denominator.
+            "pre_impact_recall_all_impacting": (
+                all_early / impacting if impacting else None
+            ),
             "unmatched_incidents": unmatched,
             "duplicate_incidents": duplicate,
             "nuisance_per_1000_entity_days": (
                 1000 * (unmatched + duplicate) / days if days else None
             ),
             "monitored_entity_days": days,
-            "observation_coverage": float(available.value.notna().mean()),
+            "observation_coverage": (
+                float(np.isfinite(available.value).mean()) if len(available) else None
+            ),
             "median_detection_delay_minutes": (
                 float(observable_delays.median())
                 if observable_delays.notna().any()
@@ -225,6 +265,8 @@ class Evaluator:
         start: pd.Timestamp,
         end: pd.Timestamp,
     ) -> tuple[dict, pd.DataFrame]:
+        if start >= end:
+            raise ValueError("Evaluation end must be after start")
         alerts = incidents.loc[
             incidents.start_time.ge(start) & incidents.start_time.lt(end)
         ].copy()
@@ -241,6 +283,8 @@ class Evaluator:
             & telemetry.timestamp.ge(start)
             & telemetry.timestamp.lt(end)
         ]
+        if available.duplicated(["entity_id", "timestamp"]).any():
+            raise ValueError("Duplicate monitoring entity/timestamp records")
         outcomes = self._outcomes(faults, by_id, matches, available)
         metrics = self._metrics(outcomes, available, faults, alerts, boundary, matches)
         return metrics, outcomes

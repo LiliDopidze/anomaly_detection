@@ -46,3 +46,20 @@ def test_degenerate_windows(values, expected):
         entropy(values, np.array([-np.inf, 0.5, np.inf])),
     )
     np.testing.assert_allclose(actual, expected, equal_nan=True)
+
+
+@pytest.mark.parametrize("allowance", [-0.1, np.nan, np.inf])
+def test_cusum_rejects_invalid_allowance(allowance):
+    with pytest.raises(ValueError, match="allowance"):
+        negative_cusum(np.zeros(3), np.zeros(3), allowance)
+
+
+def test_cusum_rejects_mismatched_targets_and_resets_at_missing():
+    with pytest.raises(ValueError, match="equal-length"):
+        negative_cusum(np.zeros(3), np.zeros(2), 0.25)
+    values = np.array([-1.0, -1.0, np.nan, -1.0])
+    np.testing.assert_allclose(
+        negative_cusum(values, np.zeros(4), 0.25),
+        [0.75, 1.5, np.nan, 0.75],
+        equal_nan=True,
+    )

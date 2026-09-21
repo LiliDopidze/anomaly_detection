@@ -1,41 +1,45 @@
-# Simulation assumptions, not fitted operator statistics.
+# Source keys below resolve in METHOD.md. Standards support measurement/coding
+# definitions, not the uncalibrated numerical distributions marked Assumption.
 generator:
-  seed: 42
-  entities: 96
-  days: 90
-  interval_minutes: 5
-  noise_db: 0.08
-  sensor_noise_db: 0.04
-  correlation_hours: 0.5
-  daily_amplitude_db: 0.25
-  missing_probability: 0.02
-  impact_threshold_dbm: -27.0
-  faults_per_entity: 2
-  impact_intervals: 3
-  downstream_receiver_reference_dbm: -27.0
-  upstream_receiver_reference_dbm: -28.0
-  receiver_offset_halfwidth_db: 1.5
-  fec_log10_noise_sd: 0.15
-  upstream_impact_threshold_dbm: -28.0
-  fault_duration_median_hours: 36.0
-  onts_per_splitter: 8
-  splitters_per_port: 2
-  ports_per_olt: 4
+  seed: 42  # Reproducibility choice; evaluate multiple seeds.
+  entities: 96  # Assumption: scenario size, not a representative operator fleet.
+  days: 90  # Assumption: observation length; no annual seasonal inference.
+  interval_minutes: 5  # Assumption: poll cadence; verify equipment capability.
+  noise_db: 0.08  # Assumption: stationary physical path-loss SD, in dB.
+  sensor_noise_db: 0.04  # Assumption: independent Gaussian readout-noise SD.
+  correlation_hours: 0.5  # Assumption: decay time; [ar] supports AR form only.
+  daily_amplitude_db: 0.25  # Assumption: daily loss amplitude, not PON standard.
+  missing_probability: 0.02  # Assumption: independent missed-poll probability.
+  impact_threshold_dbm: -27.0  # Assumption: impact proxy, not receiver limit.
+  faults_per_entity: 2  # Assumption: controlled cases, not field failure rate.
+  impact_intervals: 3  # Assumption: persistence in the impact label.
+  downstream_receiver_reference_dbm: -27.0  # Assumption: BER-curve anchor.
+  upstream_receiver_reference_dbm: -28.0  # Assumption: BER-curve anchor.
+  receiver_offset_halfwidth_db: 1.5  # Assumption: uniform receiver variation.
+  fec_log10_noise_sd: 0.15  # Assumption: error dispersion in log10 space.
+  upstream_impact_threshold_dbm: -28.0  # Assumption: impact proxy only.
+  fault_duration_median_hours: 36.0  # Assumption: lognormal duration median.
+  onts_per_splitter: 8  # Assumption: scenario membership; loss is aggregate.
+  splitters_per_port: 2  # Assumption: topology, not a required split ratio.
+  ports_per_olt: 4  # Assumption: OLT capacity, not an industry-wide value.
 features:
-  window: 12
-  long_window_hours: 6.0
-  smoothing_hours: 1.0
-  allowance: 0.25
-  seasonal: true
+  window: 12  # Assumption: one hour at five-minute cadence.
+  long_window_hours: 6.0  # Assumption: second scale for sustained changes.
+  smoothing_hours: 1.0  # Assumption: EWMA time constant; method: [ewma].
+  allowance: 0.25  # Assumption: CUSUM reference allowance; method: [cusum].
+  seasonal: true  # Assumption: fit daily terms; verify with training EDA.
 # Train / score calibration / validation / final test fractions.
-splits: [0.4, 0.55, 0.75, 1.0]
+splits: [0.4, 0.55, 0.75, 1.0]  # Assumed boundaries; temporal rule: [leakage].
 incidents:
-  max_gap_hours: 6.0
-  high: 0.99
-  low: 0.8
-  opening_candidates: [2, 3, 6]
-  closing_candidates: [3, 6]
-  nuisance_budget_per_1000_days: 5.0
+  max_gap_hours: 6.0  # Assumption: administrative timeout, not confirmed repair.
+  high: 0.99  # Assumption: rank cutoff; combined scores are not calibrated ranks.
+  low: 0.8  # Assumption: recovery percentile; below high provides hysteresis.
+  opening_candidates: [2, 3, 6]  # Assumption: candidate debounce intervals.
+  closing_candidates: [3, 6]  # Assumption: candidate recovery intervals.
+  nuisance_budget_per_1000_days: 5.0  # Assumption: operator workload target.
+evaluation:
+  opportunity_intervals: 3  # Assumption: operator-calibrated opportunity policy.
+  minimum_lead_minutes: 30.0  # Assumption: operator-calibrated warning target.
 model:
   feature_set: temperature  # Explicit scope; comparisons do not remove features.
-output: outputs/optical_v11
+output: outputs/optical_v12

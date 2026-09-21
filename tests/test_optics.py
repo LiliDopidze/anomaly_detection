@@ -22,6 +22,19 @@ def test_fec_probability_and_count_conservation():
     assert ((c >= 0) & (u >= 0) & (c + u <= total)).all()
 
 
+@pytest.mark.parametrize("ber", [[-1e-5], [1.01], [np.nan], [np.inf]])
+def test_fec_probability_rejects_invalid_ber(ber):
+    with pytest.raises(ValueError, match="finite probabilities"):
+        fec_probabilities(np.array(ber))
+
+
+def test_fec_probability_extremes_are_well_defined():
+    with np.errstate(all="raise"):
+        corrected, uncorrectable = fec_probabilities(np.array([0.0, 1.0]))
+    np.testing.assert_array_equal(corrected, [0, 0])
+    np.testing.assert_array_equal(uncorrectable, [0, 1])
+
+
 def test_topology_and_generated_invariants(generator_config, generated_data):
     data, truth = generated_data
     topology = make_topology(generator_config)

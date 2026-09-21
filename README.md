@@ -94,13 +94,14 @@ Generated artifacts live under the configured output directory, ignored by Git:
 - `ground_truth.parquet`: separate onset, visibility, impact and repair labels.
 - `topology.parquet`: static `entity_id`, `olt_id`, `pon_port_id`, `splitter_id` mapping.
 - `generation_checks.json`: data consistency and FEC count checks.
-- `settings.json`, `manifest.json`: settings, boundaries and frozen fingerprints.
+- `config.yaml`, `settings.json`, `manifest.json`: commented assumptions, settings,
+  boundaries and frozen fingerprints.
 - `development_features.parquet`, `validation_scores.parquet`: development evidence.
 - `validation_comparison.csv`, `validation_incidents.csv`, `validation_faults.csv`.
 - `model.joblib`: feature references, both detectors and the chosen incident policy.
 
 Test outputs appear only after explicitly opening final assessment. Previous
-implementations remain in Git history; Branch `main` is unchanged.
+implementations remain in Git history.
 
 ## Company data
 
@@ -135,7 +136,7 @@ BER is internal to the simulation and is not exported or used as a feature. Topo
 bias current, traffic and topology-based incident logic are not added.
 
 The canonical schema is `timestamp, entity_id, metric_name, value`. Validation
-adds `observed`; the feature stage uses Rx power. Company-specific assumptions
+adds `observed`; the full feature stage uses the declared optical, FEC and temperature channels. Company-specific assumptions
 include units, timezone, cadence, representative healthy history, daily seasonality,
 measurement precision, impact definition and acceptable workload. Company agnostic
 means portable mathematics plus local calibration, not universal thresholds.
@@ -147,11 +148,11 @@ Upsert incidents by `incident_id`, and persist the manager if restarting a proce
 
 Run the focused checks with `python -m pytest` after the editable installation.
 Tests own their configuration and do not require your current working directory
-to be the repository root. See [RUN_GUIDE.md](RUN_GUIDE.md) for Windows/macOS setup,
-notebook order, output interpretation and rerunning an experiment.
+to be the repository root. Notebook order and installation commands are above.
 
-Default local outputs are under `<repository>/outputs/optical_v11/`.
-All outputs stay outside Git. See [RUN_GUIDE.md](RUN_GUIDE.md) for exact commands.
+Default local outputs are under `<repository>/outputs/optical_v12/`.
+All outputs stay outside Git. Start Jupyter from the repository root using the
+Python environment where you installed this package.
 
 ### Inspect first, then adapt
 
@@ -214,9 +215,10 @@ remain in `model.joblib` for review. SHAP explains raw Isolation Forest scores,
 not incident decisions or physical causes; it never removes features.
 The full feature catalogue and source/assumption mapping are in METHOD.md.
 
-Six-hour optical features require uninterrupted history. Missing readings restart
-that history, which can substantially reduce score coverage. Notebook 02 reports
-coverage, and notebook 04 reports missed faults as well as nuisance alerts.
+Long optical features use 12 to 72 contiguous samples at the default cadence,
+not an unconditional six-hour window. Missing readings restart that history.
+Notebook 02 reports observation quality, actual contiguous history and feature
+availability; notebook 04 reports missed faults as well as nuisance alerts.
 
 Notebook 01 includes per-ONT Pearson/Spearman correlations and selected-lag
 autocorrelations, both raw and after daily-pattern removal, alongside seasonality.
@@ -231,3 +233,25 @@ not verified customer-service loss. Receiver offsets and FEC dispersion are expl
 simulation assumptions. Variance-shift delay is reported from physical onset,
 separately from observable-onset delay. Use a fresh output folder; do not compare
 old/new results as the same benchmark or reuse old fitted models with new code.
+
+## Evidence and warning-time interpretation
+
+Every generator and feature parameter is labelled beside the code as a source-backed
+method or a simulation/operational assumption. Full references and the review of the
+supplied feature assessment are in [METHOD.md](METHOD.md). Standards establish
+measurement semantics and GPON coding; they do not establish our stochastic parameters.
+The original commented configuration is copied into each generated run.
+
+`pre_impact_recall` measures any alert before impact. `minimum_lead_recall` also
+requires the lead time in `evaluation.minimum_lead_minutes` (default 30 minutes).
+Validation chooses the incident policy using workload feasibility, then this
+minimum-lead metric. The results retain literal pre-impact recall, recall across
+all impacted faults, misses and coverage so exclusions remain visible.
+
+Daily references require two calendar days and identifiable daily phases as a
+minimum; meaningful field calibration generally needs more representative history.
+The `temperature` feature-set key means **full model including temperature**.
+Observation-quality diagnostics are separate from optical model inputs.
+
+After this update, use the new `outputs/optical_v12` directory and regenerate from
+notebook 00. Previously fitted models are tied to their original code and data.

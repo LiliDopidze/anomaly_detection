@@ -87,6 +87,42 @@ def test_relationships_and_zero_denominator(canonical):
     assert measurement_channels(zero).downstream_fec_corrected.isna().all()
 
 
+def test_feature_merge_rejects_ambiguous_names(canonical, monkeypatch):
+    model = MultivariateFeatures(baseline_for(canonical)).fit(canonical)
+    original = model.baseline.transform(canonical)
+    monkeypatch.setattr(
+        model.baseline, "transform",
+        lambda _: original.assign(upstream_rx_level=0.0),
+    )
+    with pytest.raises(ValueError, match="Overlapping feature names"):
+        model.transform(canonical)
+
+
+@pytest.mark.parametrize("direction", ["downstream", "upstream"])
+def test_fec_counts_require_joint_conservation(direction):
+    table = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2025-01-01", periods=3, freq="5min"),
+            "entity_id": "A",
+            f"{direction}_fec_total_codewords": [100, 100, 100],
+            f"{direction}_fec_corrected_codewords": [80, 80, 80],
+            f"{direction}_fec_uncorrectable_codewords": [30, 20, np.nan],
+        }
+    ).melt(
+        id_vars=["entity_id", "timestamp"],
+        var_name="metric_name",
+        value_name="value",
+    )
+    result = measurement_channels(table)
+    corrected = result[f"{direction}_fec_corrected"]
+    uncorrectable = result[f"{direction}_fec_uncorrectable"]
+    assert pd.isna(corrected.iloc[0]) and pd.isna(uncorrectable.iloc[0])
+    assert corrected.iloc[1] == pytest.approx(np.log1p(0.8 / 1e-6))
+    assert uncorrectable.iloc[1] == pytest.approx(np.log1p(0.2 / 1e-6))
+    assert corrected.iloc[2] == pytest.approx(np.log1p(0.8 / 1e-6))
+    assert pd.isna(uncorrectable.iloc[2])
+
+
 def test_daily_eda_detects_known_cycle_without_imputation():
     times = pd.date_range("2025-01-01", periods=40 * 24, freq="h", tz="UTC")
     values = 5 + 2 * np.sin(2 * np.pi * np.arange(len(times)) / 24)

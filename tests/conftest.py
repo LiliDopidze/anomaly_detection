@@ -29,7 +29,7 @@ def stationary_sample():
 @pytest.fixture
 def clean_telemetry():
     # A small feature fixture, independent of generator event placement.
-    times = pd.date_range("2025-01-01", periods=2 * 24 * 12, freq="5min", tz="UTC")
+    times = pd.date_range("2025-01-01", periods=3 * 24 * 12, freq="5min", tz="UTC")
     hours = np.arange(len(times)) / 12
     rng = np.random.default_rng(7)
     native = pd.DataFrame(

@@ -13,6 +13,7 @@ class MetricDefinition:
     description: str
 
 
+# Source: ETSI GS F5G 011 §§8.3–8.4; definitions, not synthetic distributions.
 CANONICAL_METRICS = {
     "rx_power_dbm": MetricDefinition("dBm", "gauge", "Downstream Rx at ONT"),
     "upstream_rx_power_dbm": MetricDefinition(
@@ -29,6 +30,8 @@ CANONICAL_METRICS = {
 }
 for direction in ("downstream", "upstream"):
     for kind in ("corrected", "uncorrectable", "total"):
+        # Source: ITU-T G.989.3 Table 14-1. Total means ALL received codewords.
+        # ETSI's upstream-FEC-total-block instead counts errored blocks only.
         name = f"{direction}_fec_{kind}_codewords"
         CANONICAL_METRICS[name] = MetricDefinition(
             "interval_count",

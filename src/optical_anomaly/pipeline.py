@@ -59,9 +59,11 @@ def tune(
     split: TemporalSplit,
     settings: dict,
     interval: int,
+    evaluation_settings: dict | None = None,
 ) -> pd.DataFrame:
     rows = []
-    evaluator = Evaluator(interval_minutes=interval)
+    # Assumption: one shared warning-opportunity policy for every candidate.
+    evaluator = Evaluator(interval_minutes=interval, **(evaluation_settings or {}))
     for detector in ("statistical", "isolation_forest", "combined"):
         for opening in settings["opening_candidates"]:
             for closing in settings["closing_candidates"]:
@@ -90,11 +92,11 @@ def tune(
     table["meets_workload_budget"] = table.nuisance_per_1000_entity_days.le(
         settings["nuisance_budget_per_1000_days"]
     )
-    # Fixed selection rule: feasible workload first, early recall, then workload.
+    # Assumption: workload feasibility, actionable warning, then nuisance burden.
     return table.sort_values(
         [
             "meets_workload_budget",
-            "pre_impact_recall",
+            "minimum_lead_recall",
             "nuisance_per_1000_entity_days",
             "detector",
             "opening_intervals",
@@ -113,7 +115,8 @@ def check_calibration_truth(truth: pd.DataFrame, calibration_end: pd.Timestamp) 
 
 def prepare(config_path: str | Path) -> Path:
     """Generate once; preserve existing fixtures only when settings match."""
-    settings = yaml.safe_load(Path(config_path).read_text())
+    config_text = Path(config_path).read_text()
+    settings = yaml.safe_load(config_text)
     config = GeneratorConfig(**settings["generator"])
     fractions = settings["splits"]
     if len(fractions) != 4 or not (
@@ -135,11 +138,15 @@ def prepare(config_path: str | Path) -> Path:
     check_calibration_truth(truth, run_split(settings).calibration_end)
     topology = make_topology(config)
     report = validate_generated(native, truth, topology)
+    if not all(report["checks"].values()):
+        raise ValueError("Generated data failed structural qualification")
     topology.to_parquet(run / "topology.parquet", index=False)
     (run / "generation_checks.json").write_text(json.dumps(report, indent=2))
     native.to_parquet(run / "telemetry.parquet", index=False)
     truth.to_parquet(run / "ground_truth.parquet", index=False)
     (run / "settings.json").write_text(json.dumps(settings, indent=2))
+    # Preserve inline evidence and assumptions; JSON does not retain comments.
+    (run / "config.yaml").write_text(config_text)
     return run
 
 
@@ -169,6 +176,7 @@ def develop(config_path: str | Path) -> Path:
             split,
             settings["incidents"],
             config.interval_minutes,
+            settings.get("evaluation", {}),
         )
         # The unchanged statistical comparator belongs to the Rx-only baseline.
         if feature_set != "rx_only":
@@ -183,7 +191,7 @@ def develop(config_path: str | Path) -> Path:
         .sort_values(
             [
                 "meets_workload_budget",
-                "pre_impact_recall",
+                "minimum_lead_recall",
                 "nuisance_per_1000_entity_days",
                 "complexity_order",
                 "detector",
@@ -250,7 +258,8 @@ def _save_development(
     features.to_parquet(run / "development_features.parquet", index=False)
     validation_scores.to_parquet(run / "validation_scores.parquet", index=False)
     alerts = incidents_for(validation_scores, policy, model["interval"])
-    _, outcomes = Evaluator(model["interval"]).evaluate(
+    evaluator = Evaluator(model["interval"], **settings.get("evaluation", {}))
+    _, outcomes = evaluator.evaluate(
         alerts, validation_truth, telemetry, split.calibration_end, split.validation_end
     )
     alerts.to_csv(run / "validation_incidents.csv", index=False)
@@ -260,6 +269,7 @@ def _save_development(
         "policy": policy,
         "feature_set": model["feature_set"],
         "feature_columns": model["forest"].feature_columns,
+        "selection_metric": "minimum_lead_recall",
         "meets_validation_workload_budget": bool(
             comparison.loc[comparison.feature_set.eq(model["feature_set"])]
             .iloc[0]
@@ -283,6 +293,8 @@ def _save_development(
                 "model.joblib",
                 "development_features.parquet",
                 "canonical_development.parquet",
+                "config.yaml",
+                "settings.json",
             )
         },
         "code": {p.name: digest(p) for p in Path(__file__).parent.glob("*.py")},
@@ -313,7 +325,10 @@ def final_evaluation(run: str | Path) -> dict:
     test = scores.loc[split.masks(scores.timestamp)["test"]]
     alerts = incidents_for(test, model["policy"], model["interval"])
     truth = pd.read_parquet(run / "ground_truth.parquet")
-    metrics, faults = Evaluator(model["interval"]).evaluate(
+    evaluator = Evaluator(
+        model["interval"], **manifest["settings"].get("evaluation", {})
+    )
+    metrics, faults = evaluator.evaluate(
         alerts, truth, telemetry, split.validation_end, split.test_end
     )
     metrics["score_coverage"] = float(test[model["policy"]["detector"]].notna().mean())

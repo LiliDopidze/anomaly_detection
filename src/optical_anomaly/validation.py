@@ -8,6 +8,7 @@ from .adapter import CANONICAL_METRICS
 
 @dataclass(frozen=True)
 class DataValidator:
+    # Assumption: polling grid; ETSI F5G 011 does not mandate one universal cadence.
     interval: str = "5min"
 
     def transform(self, telemetry: pd.DataFrame) -> pd.DataFrame:
@@ -24,6 +25,7 @@ class DataValidator:
             if metric not in CANONICAL_METRICS:
                 raise ValueError(f"Unsupported metric: {metric}")
             series = group.sort_values("timestamp").set_index("timestamp").value
+            # Design: reports at t use only values timestamped at or before t.
             bins = series.resample(self.interval, closed="right", label="right")
             sampled = (
                 bins.sum(min_count=1)

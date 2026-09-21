@@ -1,9 +1,12 @@
-"""Nested telemetry feature sets with training-only, per-entity references."""
+"""Nested telemetry features; source IDs resolve in METHOD.md, Sources."""
 
 from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
-from .features import FeatureEngineer, FEATURES, daily_design, rolling_slope
+from .features import (
+    FeatureEngineer, FEATURES, daily_design, rolling_slope,
+    seasonal_history_available,
+)
 
 FEATURE_SETS = ("rx_only", "both_rx", "tx_rx", "fec", "temperature")
 CHANNELS = {
@@ -58,6 +61,7 @@ def measurement_channels(telemetry: pd.DataFrame) -> pd.DataFrame:
     result = pd.DataFrame(index=wide.index)
     definitions = {
         "upstream_rx": ("upstream_rx_power_dbm",),
+        # Sources: [db], [etsi]. Synchronous Tx-Rx is an approximate loss in dB.
         "downstream_loss": ("olt_tx_power_dbm", "rx_power_dbm"),
         "upstream_loss": ("ont_tx_power_dbm", "upstream_rx_power_dbm"),
         "ont_temperature": ("ont_temperature_c",),
@@ -70,11 +74,18 @@ def measurement_channels(telemetry: pd.DataFrame) -> pd.DataFrame:
                 result[name] = result[name] - wide[inputs[1]]
     for direction in ("downstream", "upstream"):
         total = f"{direction}_fec_total_codewords"
+        corrected = f"{direction}_fec_corrected_codewords"
+        uncorrectable = f"{direction}_fec_uncorrectable_codewords"
+        # Source: [g988]; canonical categories are disjoint received codewords.
+        inconsistent = pd.Series(False, index=wide.index)
+        if all(name in wide for name in (total, corrected, uncorrectable)):
+            inconsistent = (wide[corrected] + wide[uncorrectable]).gt(wide[total])
         for kind in ("corrected", "uncorrectable"):
             numerator = f"{direction}_fec_{kind}_codewords"
             if total in wide and numerator in wide:
                 fraction = wide[numerator] / wide[total].where(wide[total] > 0)
-                fraction = fraction.where(fraction.between(0, 1))
+                fraction = fraction.where(fraction.between(0, 1) & ~inconsistent)
+                # Assumption: log reference 1e-6 is scaling, not an alarm threshold.
                 result[f"{direction}_fec_{kind}"] = np.log1p(fraction / 1e-6)
     return result.reset_index()
 
@@ -85,7 +96,9 @@ class MultivariateFeatures:
 
     baseline: FeatureEngineer
     feature_set: str = "temperature"
-    references: dict = field(default_factory=dict, init=False)
+    references: dict[tuple[str, str], tuple[np.ndarray, float]] = field(
+        default_factory=dict, init=False
+    )
 
     def fit(self, telemetry: pd.DataFrame) -> "MultivariateFeatures":
         self.baseline.fit(telemetry)
@@ -98,16 +111,23 @@ class MultivariateFeatures:
             )
         self.references.clear()
         for entity, group in channels.groupby("entity_id"):
+            if self.baseline.seasonal and not seasonal_history_available(
+                group.timestamp, self.baseline.interval_minutes
+            ):
+                raise ValueError(f"Need two days of seasonal history: {entity}")
             for name in selected:
                 clean = group.dropna(subset=[name])
                 if len(clean) < max(100, self.baseline.window * 3):
                     raise ValueError(f"Insufficient training history: {entity}/{name}")
                 design = daily_design(clean.timestamp)
+                if self.baseline.seasonal and np.linalg.matrix_rank(design) < 3:
+                    raise ValueError(f"Unidentifiable daily phases: {entity}/{name}")
+                # Sources: [harmonic], [ols]; training only, never fault labels.
                 coefficients = np.linalg.lstsq(design, clean[name], rcond=None)[0]
                 if not self.baseline.seasonal:
                     coefficients = np.array([clean[name].median(), 0.0, 0.0])
                 residual = clean[name].to_numpy() - design @ coefficients
-                # Explicit precision floors, not learned from validation or faults.
+                # Source: [mad]; numerical floors are assumptions, not standards.
                 floor = 0.1 if "temperature" in name else 0.05
                 scale = max(
                     float(1.4826 * np.median(np.abs(residual - np.median(residual)))),
@@ -142,8 +162,12 @@ class MultivariateFeatures:
                 )
             additions.append(result)
         extra = pd.concat(additions, ignore_index=True)
+        keys = ["entity_id", "timestamp"]
+        overlap = set(features).intersection(extra).difference(keys)
+        if overlap:
+            raise ValueError(f"Overlapping feature names: {sorted(overlap)}")
         return features.merge(
-            extra, on=["entity_id", "timestamp"], how="left", validate="one_to_one"
+            extra, on=keys, how="left", validate="one_to_one"
         )
 
     def _summaries(
@@ -168,8 +192,10 @@ class MultivariateFeatures:
         rolling = grouped.rolling(
             self.baseline.window, min_periods=self.baseline.window
         )
+        # Source: [optical] window summaries; exact windows are our assumptions.
         output[f"{name}_level"] = rolling.mean().droplevel(0).sort_index()
         output[f"{name}_variability"] = rolling.std(ddof=0).droplevel(0).sort_index()
+        # Source: [ewma]; smoothing derivatives is a proposed optical feature.
         derivative = grouped.diff() / (self.baseline.interval_minutes / 60)
         output[f"{name}_slope"] = (
             derivative.groupby(segments)
@@ -179,6 +205,7 @@ class MultivariateFeatures:
             .sort_index()
         )
         if "long_level" in summaries_for(name):
+            # Assumption: available-history long mean, requiring a short window.
             output[f"{name}_long_level"] = (
                 grouped.rolling(
                     self.baseline.long_window, min_periods=self.baseline.window
@@ -198,6 +225,7 @@ class MultivariateFeatures:
         if "error_interval_fraction" in summaries_for(name):
             if measurement is None:
                 raise ValueError("FEC summaries require uncentred measurements")
+            # Assumption: persistence of recorded errors, not mean-centred noise.
             present = measurement.gt(0).astype(float).where(measurement.notna())
             output[f"{name}_error_interval_fraction"] = (
                 present.groupby(segments)

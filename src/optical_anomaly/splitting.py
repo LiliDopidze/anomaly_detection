@@ -26,6 +26,9 @@ class TemporalSplit:
             )
 
     def masks(self, times: pd.Series) -> dict[str, pd.Series]:
+        # Half-open partitions share no observations; past feature history is valid.
+        # Fit all learned references on train only (scikit-learn leakage guidance):
+        # https://scikit-learn.org/stable/common_pitfalls.html#data-leakage
         return {
             "train": times < self.train_end,
             "calibration": (times >= self.train_end) & (times < self.calibration_end),

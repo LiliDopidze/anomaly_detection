@@ -43,12 +43,15 @@ def test_frozen_end_to_end(tmp_path, monkeypatch):
             "closing_candidates": [3, 6],
             "nuisance_budget_per_1000_days": 5.0,
         },
+        "evaluation": {"minimum_lead_minutes": 45, "opportunity_intervals": 2},
         "output": str(tmp_path / "run"),
     }
     monkeypatch.chdir(tmp_path)
     path = tmp_path / "config.yaml"
-    path.write_text(yaml.safe_dump(settings))
+    config_text = "# Assumption: disposable integration scenario.\n" + yaml.safe_dump(settings)
+    path.write_text(config_text)
     run = develop(path)
+    assert (run / "config.yaml").read_text() == config_text
     assert not (run / "FINAL_OPENED.json").exists()
     topology = pd.read_parquet(run / "topology.parquet")
     assert len(topology) == 3
@@ -69,6 +72,9 @@ def test_frozen_end_to_end(tmp_path, monkeypatch):
         "temperature",
     }
     assert comparison.score_coverage.between(0, 1).all()
+    assert comparison.minimum_lead_minutes.eq(45).all()
+    comparable = comparison.dropna(subset=["minimum_lead_recall", "pre_impact_recall"])
+    assert comparable.minimum_lead_recall.le(comparable.pre_impact_recall).all()
     canonical = pd.read_parquet(run / "canonical_development.parquet")
     model = joblib.load(run / "model.joblib")
     assert canonical.timestamp.max() < model["split"].validation_end
@@ -97,6 +103,7 @@ def test_frozen_end_to_end(tmp_path, monkeypatch):
         assert len(pd.read_csv(report / "importance.csv")) == 52
         assert not (run / "FINAL_OPENED.json").exists()
     result = final_evaluation(run)  # Disposable test fixture, not the development run.
+    assert result["minimum_lead_minutes"] == 45
     assert result["monitored_entity_days"] > 0
     with pytest.raises(FileExistsError):
         final_evaluation(run)

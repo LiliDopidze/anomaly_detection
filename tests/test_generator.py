@@ -4,7 +4,7 @@ from dataclasses import replace
 import numpy as np
 import pandas as pd
 import pytest
-from optical_anomaly.generator import generate
+from optical_anomaly.generator import GeneratorConfig, generate, stationary_noise
 
 
 def test_stationary_variance_and_correlation(stationary_sample):
@@ -12,6 +12,37 @@ def test_stationary_variance_and_correlation(stationary_sample):
     assert np.corrcoef(stationary_sample[:-1], stationary_sample[1:])[
         0, 1
     ] == pytest.approx(0.8, abs=0.01)
+
+
+@pytest.mark.parametrize("sigma, phi", [(-0.1, 0.8), (0.1, 1.0), (np.nan, 0.8)])
+def test_stationary_noise_rejects_undefined_parameters(sigma, phi):
+    with pytest.raises(ValueError, match="stationary"):
+        stationary_noise(10, sigma, phi, np.random.default_rng(7))
+
+
+def test_stationary_noise_empty_and_zero_variance():
+    assert stationary_noise(0, 0.2, 0.8, np.random.default_rng(7)).size == 0
+    np.testing.assert_array_equal(
+        stationary_noise(10, 0, 0.8, np.random.default_rng(7)), np.zeros(10)
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"noise_db": np.nan},
+        {"correlation_hours": np.inf},
+        {"daily_amplitude_db": -0.1},
+        {"impact_threshold_dbm": np.nan},
+        {"fault_duration_median_hours": np.inf},
+        {"entities": 1.5},
+        {"interval_minutes": True},
+        {"seed": -1},
+    ],
+)
+def test_generator_rejects_invalid_scenario_parameters(changes):
+    with pytest.raises(ValueError):
+        GeneratorConfig(**changes)
 
 
 def test_reproducible_generation(generator_config, generated_data):

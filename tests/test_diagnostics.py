@@ -24,6 +24,26 @@ def test_missing_run_lengths():
     assert row.missing_fraction == 0.5
 
 
+def test_observation_quality_is_causal_and_preserves_unknown_age():
+    from optical_anomaly.diagnostics import observation_quality
+
+    telemetry = pd.DataFrame({
+        "timestamp": pd.date_range("2025-01-01", periods=6, freq="5min"),
+        "entity_id": "A", "metric_name": "rx_power_dbm",
+        "value": [np.nan, -20, np.nan, np.nan, -20, -20],
+    })
+    result = observation_quality(telemetry, 5, window=3)
+    assert pd.isna(result.minutes_since_observation.iloc[0])
+    assert result.missing_run_intervals.tolist() == [1, 0, 1, 2, 0, 0]
+    assert result.minutes_since_observation.iloc[3] == 10
+    assert result.contiguous_history_hours.iloc[4] == pytest.approx(5 / 60)
+    changed = telemetry.copy()
+    changed.loc[4:, "value"] = np.nan
+    pd.testing.assert_frame_equal(
+        result.iloc[:4], observation_quality(changed, 5, window=3).iloc[:4]
+    )
+
+
 def test_healthy_statistics_and_final_exclusion(generated_data, generator_config):
     native, truth = generated_data
     start = native.time.min()
