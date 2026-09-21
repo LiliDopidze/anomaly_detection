@@ -234,33 +234,4 @@ are assumed here.
 [iforest]: https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.IsolationForest.html
 [shap]: https://shap.readthedocs.io/en/latest/generated/shap.PermutationExplainer.html
 
-## Generator review: remaining benchmark limits
 
-The v10 export contains 12 measurements. Validation rejects exported BER, overlapping
-fault intervals and labelled faults in the first 55%; the runner also checks actual
-truth against the configured calibration boundary, including reused datasets. A
-label check cannot prove there is no unlabelled disturbance in the physical data.
-Observable onset can follow impact during missing telemetry; such cases have no
-defensible early-warning opportunity and are not forced into an artificial order.
-
-FEC still depends on latent optical power and can add cleaner evidence than a noisy
-Rx sensor. This is plausible in principle but not quantitatively calibrated here.
-Receiver offsets/dispersion must not be presented as proof of realism. An impact
-label denotes persistent low optical power, not post-FEC service damage. Expected
-uncorrectable counts depend on interval exposure; there is no universal BER at
-which the first uncorrectable block appears.
-
-Fault timing remains concentrated in two blocks; fault types remain linked to
-entity index and every configured ONT receives the configured number of faults.
-Benign disturbances, random prevalence/timing, independent temperature phase and
-shared-port faults need separate scenario design. Existing Gaussian healthy
-periods permit measuring nuisance alerts under that null, not field workload.
-Calibration ranks are not conformal p-values. These changes do not establish
-production readiness or independent early-warning benefit from FEC.
-
-The adapter's `kinds` validates declared semantics, not provenance. It cannot detect
-a caller lying about a cumulative counter or differencing interval totals later.
-The current FEC features divide matching interval counters by total opportunities
-before transforming/differencing the resulting fractions. They do not difference
-raw interval counts. Synthetic mapping is now explicit; generic canonical BER
-definitions remain available for explicitly mapped real measurements.
