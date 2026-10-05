@@ -54,7 +54,7 @@ class References:
             residual = pd.Series((r-centre)/scale)
             self.diagnostics.append({**diag, "status": "fitted", "kind": kind,
                 "blocked_improvement": improvement, "residual_centre": centre, "scale": scale,
-                "lag1": residual.autocorr(1), "q01": residual.quantile(.01), "q99": residual.quantile(.99),
+                "lag1": residual.autocorr(1) if residual.std()>0 else np.nan, "q01": residual.quantile(.01), "q99": residual.quantile(.99),
                 "ols_contamination_robust": False})
         return self
 

@@ -1,0 +1,29 @@
+version: 4
+generator:
+  seed: 42
+  entities: 12
+  days: 28
+  interval_minutes: 5
+split_shares: [0.55, 0.75, 1.0]
+features:
+  short: 12
+  long: 72
+  half_life_hours: 1.0
+  allowance: 0.25
+  boundary: 2.0
+forest:
+  seed: 42
+  stride: 3
+  minimum_rows: 100
+  minimum_hours: 48
+distance_lengths: [6, 12]
+requirements:
+  recall: 0.95
+  early_recall: 0.95
+  lead_minutes: 30
+  any_coverage: 0.95
+  full_coverage: 0.75
+  workload: 5
+  delay_minutes: 60
+  alarm_fraction: 0.20
+test_status: previously_explored_seed_42_temporal_assessment
