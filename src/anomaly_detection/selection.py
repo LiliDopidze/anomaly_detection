@@ -41,7 +41,7 @@ def choose(table):
 
 def record(candidate,events,scores,truth,expected,start,end,requirements,complexity=1,window_cost=0):
     metrics,ordinary,early=evaluate(events,truth,expected,start,end,requirements['lead_minutes'])
-    availability=coverage(scores,start,end)
+    availability=coverage(scores,start,end,expected)
     feasible=metrics['nuisance_per_1000_entity_days']<=requirements['workload'] and availability['any_coverage']>=requirements['any_coverage'] and availability['full_coverage']>=requirements['full_coverage']
     accepted=feasible and metrics['recall']>=requirements['recall'] and metrics['early_recall']>=requirements['early_recall'] and metrics['median_delay_minutes']<=requirements['delay_minutes'] and metrics['time_in_alarm_fraction']<=requirements['alarm_fraction']
     return dict(candidate=candidate,**metrics,**availability,workload_coverage_feasible=bool(feasible),accepted=bool(accepted),complexity=complexity,window_cost=window_cost)

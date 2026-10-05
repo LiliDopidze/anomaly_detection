@@ -2,6 +2,7 @@
 from pathlib import Path
 from dataclasses import asdict
 import argparse
+import ast
 import hashlib
 import importlib.metadata
 import json
@@ -9,6 +10,7 @@ import platform
 import subprocess
 import time
 import traceback
+import shutil
 import joblib
 import numpy as np
 import pandas as pd
@@ -162,6 +164,59 @@ def save(model,path): joblib.dump(model,path)
 def load(path): return joblib.load(path)  # Only load trusted artifacts.
 
 
+def reuse_development_cache(previous,config_path,output,source_revision):
+    """Copy verified immutable inputs/scores after an evaluation-only correction.
+
+    Never alter the source run. Numerical fitting/scoring sources and function
+    bodies must agree; policies and diagnostics are always recomputed. A caller
+    supplies the actual committed source snapshot, checked against saved hashes.
+    """
+    previous,output=Path(previous),Path(output)
+    if output.exists():raise FileExistsError(output)
+    if not (previous/'DEVELOPMENT_COMPLETE.json').exists():
+        raise ValueError('Only a completed development run can supply a cache')
+    if (previous/'FINAL_OPENED.json').exists():
+        raise ValueError('Cannot use an assessed run to retune the same claim')
+    config=yaml.safe_load(Path(config_path).read_text())
+    inputs=json.loads((previous/'input_manifest.json').read_text())
+    if hashlib.sha256(json.dumps(config,sort_keys=True).encode()).hexdigest()!=inputs['config_hash']:
+        raise ValueError('Different configuration; do not reuse scores')
+    frozen=json.loads((previous/'FROZEN.json').read_text())
+    fitted=json.loads((previous/'fit_manifest.json').read_text())
+    for name,h in {**inputs['files'],**frozen['files'],'fitted.joblib':fitted['fitted_hash']}.items():
+        if digest(previous/name)!=h:raise ValueError(f'Prior artifact changed: {name}')
+    current=provenance();old=frozen['source']['source_hashes']
+    evaluation_only={'src/anomaly_detection/evaluation.py','src/anomaly_detection/selection.py',
+                     'src/anomaly_detection/diagnostics.py','src/anomaly_detection/fixtures.py',
+                     'src/anomaly_detection/pipeline.py'}
+    for name,h in old.items():
+        if name not in evaluation_only and current['source_hashes'].get(name)!=h:
+            raise ValueError(f'Numerical source changed: {name}')
+    root=Path(__file__).resolve().parents[2]
+    code=subprocess.check_output(['git','show',f'{source_revision}:src/anomaly_detection/pipeline.py'],cwd=root,text=True)
+    if hashlib.sha256(code.encode()).hexdigest()!=old['src/anomaly_detection/pipeline.py']:
+        raise ValueError('Revision does not match the recorded runner')
+    def bodies(source):
+        return {n.name:ast.dump(n,include_attributes=False) for n in ast.parse(source).body if isinstance(n,ast.FunctionDef)}
+    before,after=bodies(code),bodies(Path(__file__).read_text())
+    for name in ['prepare','canonical','fit','score','bounds','save','load']:
+        if before[name]!=after[name]:raise ValueError(f'Numerical runner changed: {name}')
+    if frozen['source']['dependencies']!=current['dependencies']:
+        raise ValueError('Dependency versions changed')
+    names=['config.yaml','input_manifest.json','generation_checks.json','native.parquet','truth.parquet',
+           'topology.parquet','schedule.parquet','fitted.joblib']
+    names += [p.name for p in previous.glob('scores_*') if p.suffix in {'.json','.parquet'}]
+    output.mkdir(parents=True)
+    for name in names:shutil.copy2(previous/name,output/name)
+    write_json(output/'cache_lineage.json',dict(previous=str(previous),source_revision=source_revision,
+        previous_frozen_hash=digest(previous/'FROZEN.json'),reason='evaluation correctness audit; no detector changes',
+        files={name:digest(output/name) for name in names},original_fit_manifest=fitted,
+        numerical_functions_verified=['prepare','canonical','fit','score','bounds','save','load']))
+    fitted.update(current)
+    write_json(output/'fit_manifest.json',fitted)
+    return output
+
+
 def develop(config_path,output):
     output,config=prepare(config_path,output)
     if (output/'DEVELOPMENT_COMPLETE.json').exists():
@@ -268,13 +323,18 @@ def assess(output):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=['prepare','develop','assess'])
+    parser.add_argument('command',choices=['prepare','develop','assess','reuse'])
     parser.add_argument('--config',default='configs/industry_agnostic.yaml')
     parser.add_argument('--output',required=True)
+    parser.add_argument('--from-run')
+    parser.add_argument('--source-revision')
     args=parser.parse_args()
     if args.command=='prepare':prepare(args.config,args.output)
     elif args.command=='develop':develop(args.config,args.output)
-    else:assess(args.output)
+    elif args.command=='assess':assess(args.output)
+    else:
+        if not args.from_run or not args.source_revision:parser.error('reuse needs --from-run and --source-revision')
+        reuse_development_cache(args.from_run,args.config,args.output,args.source_revision)
 
 
 if __name__=='__main__':main()

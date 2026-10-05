@@ -51,7 +51,7 @@ def run(output):
             _,policy=policy_grid(part.loc[part.decision_time<train_end],quantiles=(.99,),openings=(1,))[0]
             events,_,_=detect(part,policy)
             metrics,_,_=evaluate(events,truth,expected,train_end,end,lead_minutes=30)
-            results.append(dict(scenario=name,contamination=contamination,route=route,**metrics,**coverage(part,train_end,end)))
+            results.append(dict(scenario=name,contamination=contamination,route=route,**metrics,**coverage(part,train_end,end,expected)))
         selection.append(dict(scenario=name,contamination=contamination,contaminated_row_indices=ids.tolist()))
     table=pd.DataFrame(results);table.to_csv(output/'results.csv',index=False)
     write_json(output/'contamination_rows.json',selection)

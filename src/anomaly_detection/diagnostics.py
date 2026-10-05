@@ -5,7 +5,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from .evaluation import evaluate,coverage,match,timestamp_metrics,paired_block_intervals
+from .evaluation import evaluate,coverage,match,timestamp_metrics,paired_block_intervals,grouping_audit
 from .incidents import detect
 
 
@@ -45,11 +45,21 @@ def report(output,model,scores,truth,expected,start,end,route_table,system_table
         matched=common_scores.loc[common_scores.route.eq(route)]
         e,tr,_=detect(matched,model['policies'][cid])
         m,_,_=evaluate(e,truth,expected,start,end,model['config']['requirements']['lead_minutes'])
-        comparison.append(dict(candidate=cid,**m,**coverage(matched,start,end)))
+        comparison.append(dict(candidate=cid,**m,**coverage(matched,start,end,expected)))
         matched_timestamp.append(timestamp_metrics(matched.loc[matched.decision_time.ge(start)&matched.decision_time.lt(end)],truth,model['policies'][cid],tr))
     pd.DataFrame(comparison).to_csv(directory/'common_support_events.csv',index=False)
     pd.concat(timestamp).to_csv(directory/'timestamp_metrics.csv',index=False)
     pd.concat(matched_timestamp).to_csv(directory/'common_support_timestamp_metrics.csv',index=False)
+    audits=[]
+    from .grouping import group
+    for cid,system in model['systems'].items():
+        raw=pd.concat([events[c] for c in system['components']],ignore_index=True)
+        _,history=group(raw,system['span_minutes'],model['compatibility'])
+        audit,associations=grouping_audit(raw,history,truth,start,end)
+        audits.append(dict(candidate=cid,**audit))
+        if cid==model['primary']:
+            associations.to_csv(directory/'primary_member_fault_associations.csv',index=False)
+    pd.DataFrame(audits).to_csv(directory/'grouping_audit.csv',index=False)
     # Same monitored channels for marginal routes; the forest uses both jointly.
     # All variants use identical independent truth/opportunity sets.
     topology=pd.read_parquet(output/'topology.parquet');block_rows=[]

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "rows": [],
+  "fields": [
+    "investigation_id",
+    "model_version",
+    "first_confirmation",
+    "review_available_time",
+    "reviewer",
+    "disposition",
+    "evidence_reference",
+    "constituent_event_ids",
+    "follow_up"
+  ]
+}

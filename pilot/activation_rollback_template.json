@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "rows": [],
+  "fields": [
+    "change_id",
+    "activation_time",
+    "previous_version",
+    "candidate_version",
+    "artifact_hashes",
+    "shadow_evidence_reference",
+    "approval_reference",
+    "ongoing_investigation_ids",
+    "rollback_time",
+    "rollback_reason"
+  ]
+}

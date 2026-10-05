@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "rows": [],
+  "fields": [
+    "fault_id",
+    "entity_id",
+    "site_id",
+    "observable_onset",
+    "impact_time",
+    "end_time",
+    "label_available_time",
+    "ascertainment_source",
+    "time_uncertainty_minutes",
+    "precursor_observable",
+    "reviewer"
+  ]
+}

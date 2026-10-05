@@ -16,6 +16,23 @@ def union_seconds(intervals):
     return seconds
 
 
+def intersect_seconds(active, scheduled):
+    """Intersect unions without counting off-schedule time or duplicate channels."""
+    def merge(intervals):
+        out=[]
+        for a,b in sorted((a,b) for a,b in intervals if pd.notna(a) and pd.notna(b) and b>a):
+            if out and a<=out[-1][1]:out[-1]=(out[-1][0],max(b,out[-1][1]))
+            else:out.append((a,b))
+        return out
+    a,b=merge(active),merge(scheduled);i=j=0;seconds=0.
+    while i<len(a) and j<len(b):
+        left,right=max(a[i][0],b[j][0]),min(a[i][1],b[j][1])
+        if right>left:seconds+=(right-left).total_seconds()
+        if a[i][1]<b[j][1]:i+=1
+        else:j+=1
+    return seconds
+
+
 def exposure(expected,start,end):
     total=0.
     for _,part in expected.groupby('entity_id'):
@@ -61,23 +78,35 @@ def match(events,faults,lead_minutes=None):
 def evaluate(events,truth,expected,start,end,lead_minutes=30,complete_truth=True):
     start,end=pd.Timestamp(start),pd.Timestamp(end)
     events=events.copy()
+    truth=truth.copy()
+    for column in ['onset_time','observable_onset_time','impact_time','end_time']:
+        truth[column]=pd.to_datetime(truth[column],utc=True)
     for column in ['confirmation','end_time']:
         events[column]=pd.to_datetime(events[column],utc=True)
+    if events.event_id.duplicated().any() or truth.fault_id.duplicated().any():
+        raise ValueError('Event and fault IDs must be unique')
+    # An assessment cannot use recoveries observed after its availability horizon.
+    events.loc[events.end_time.ge(end), 'end_time'] = pd.NaT
     new=events.loc[events.confirmation.ge(start)&events.confirmation.lt(end)]
     known=truth.observable_onset_time.notna()
     faults=truth.loc[known&truth.observable_onset_time.ge(start)&truth.observable_onset_time.lt(end)]
     physical=truth.loc[truth.onset_time.ge(start)&truth.onset_time.lt(end)]
-    impact=physical.loc[physical.impact_time.notna()]
+    unknown=physical.loc[physical.observable_onset_time.isna()]
+    cohort=pd.concat([faults,unknown],ignore_index=True)
+    impact=cohort.loc[cohort.impact_time.notna()]
     opportunity=impact.loc[impact.observable_onset_time.notna()&(impact.impact_time-impact.observable_onset_time).ge(pd.Timedelta(minutes=lead_minutes))]
     ordinary=match(new,faults);early=match(new,impact,lead_minutes);early_opportunity=match(new,opportunity,lead_minutes)
     tp=len(ordinary);unmatched=len(new)-tp;fn=len(faults)-tp
     days=exposure(expected,start,end)
     active_seconds=0.
-    for _,part in events.groupby('entity_id'):
-        active_seconds+=union_seconds((max(a,start),min(b if pd.notna(b) else end,end)) for a,b in zip(part.confirmation,part.end_time))
-    unknown=physical.loc[physical.observable_onset_time.isna()]
+    for entity,part in events.groupby('entity_id'):
+        monitoring=expected.loc[expected.entity_id.eq(entity)]
+        active_seconds+=intersect_seconds(
+            ((max(a,start),min(b if pd.notna(b) else end,end)) for a,b in zip(part.confirmation,part.end_time)),
+            zip(monitoring.event_time,monitoring.interval_end))
     unmatched_rows=new.loc[~new.event_id.isin(ordinary.event_id)]
-    unknown_workload=sum(any(e.entity_id==f.entity_id and f.onset_time<=e.confirmation<f.end_time for f in unknown.itertuples()) for e in unmatched_rows.itertuples())
+    unknown_intervals=truth.loc[~known&truth.onset_time.lt(end)&truth.end_time.gt(start)]
+    unknown_workload=sum(any(e.entity_id==f.entity_id and f.onset_time<=e.confirmation<f.end_time for f in unknown_intervals.itertuples()) for e in unmatched_rows.itertuples())
     boundary=truth.loc[known&truth.observable_onset_time.lt(start)&truth.end_time.gt(start)]
     ongoing=events.loc[events.confirmation.lt(start)&(events.end_time.isna()|events.end_time.gt(start))]
     merge_risk=0;associations={}
@@ -90,12 +119,16 @@ def evaluate(events,truth,expected,start,end,lead_minutes=30,complete_truth=True
         precision=ratio(tp,len(new)),recall=ratio(tp,len(faults)),f1=ratio(2*tp,2*tp+unmatched+fn),
         investigations=len(new),unmatched=unmatched,unverified=unknown_workload if complete_truth else unmatched,
         scheduled_entity_days=days,nuisance_per_1000_entity_days=1000*ratio(unmatched,days),
-        known_impact_faults=len(impact),unknown_impact_faults=int(physical.impact_time.isna().sum()),
+        investigations_per_1000_entity_days=1000*ratio(len(new),days),
+        precision_interpretation='matched_fraction_all_investigations',
+        known_impact_faults=len(impact),unknown_impact_faults=int(cohort.impact_time.isna().sum()),
         early_tp=len(early),early_recall=ratio(len(early),len(impact)),
         opportunity_faults=len(opportunity),opportunity_early_tp=len(early_opportunity),opportunity_early_recall=ratio(len(early_opportunity),len(opportunity)),
         median_delay_minutes=float(ordinary.delay_minutes.median()),delay_sample=len(ordinary),
         median_lead_minutes=float(ordinary.lead_minutes.median()),lead_sample=int(ordinary.lead_minutes.notna().sum()),
         median_recovery_delay_minutes=float(ordinary.recovery_delay_minutes.median()),recovery_sample=int(ordinary.recovery_delay_minutes.notna().sum()),
+        right_censored_faults=int(faults.end_time.ge(end).sum()),
+        recovery_censored_matches=int(ordinary.recovery_delay_minutes.isna().sum()),
         time_in_alarm_hours=active_seconds/3600,time_in_alarm_fraction=ratio(active_seconds,days*86400),
         administrative_closures=int((events.reason.str.contains('administrative')&events.end_time.ge(start)&events.end_time.lt(end)).sum()),
         boundary_faults=len(boundary),ongoing_events=len(ongoing),merge_risk=merge_risk,
@@ -103,8 +136,34 @@ def evaluate(events,truth,expected,start,end,lead_minutes=30,complete_truth=True
     return result,ordinary,early
 
 
-def coverage(scores,start,end):
+def coverage(scores,start,end,expected=None):
+    """Availability on an independently declared schedule, including absent rows.
+
+    ``expected`` may be a canonical channel schedule or an explicit route/scope
+    decision schedule. Omitting it is only suitable for complete fixture streams.
+    The batch runner requires a common cadence for every joint channel group.
+    """
+    keys=['route','entity_id','scope','decision_time']
+    if scores.duplicated(keys).any():
+        raise ValueError('Duplicate score decisions')
     subset=scores.loc[scores.decision_time.ge(start)&scores.decision_time.lt(end)].copy()
+    if expected is not None:
+        grid=expected.loc[expected.decision_time.ge(start)&expected.decision_time.lt(end)]
+        if {'route','scope'}.issubset(grid.columns):
+            declared=grid[keys].drop_duplicates()
+        else:
+            streams=[]
+            for route,scope in scores[['route','scope']].drop_duplicates().itertuples(index=False,name=None):
+                channels=scope.split('+')
+                part=grid.loc[grid.metric_name.isin(channels)]
+                count=part.groupby(['entity_id','decision_time']).metric_name.nunique()
+                times=count.loc[count.eq(len(channels))].reset_index()[['entity_id','decision_time']]
+                streams.append(times.assign(route=route,scope=scope))
+            declared=pd.concat(streams,ignore_index=True)[keys] if streams else pd.DataFrame(columns=keys)
+        check=subset[keys].merge(declared,on=keys,how='left',indicator=True)
+        if check._merge.ne('both').any():
+            raise ValueError('Score outside the declared decision schedule')
+        subset=declared.merge(subset[keys+['score']],on=keys,how='left',validate='one_to_one')
     subset['valid']=np.isfinite(subset.score)
     # All candidate streams emit a row for each scheduled decision, including abstentions.
     groups=subset.groupby(['entity_id','decision_time']).valid
@@ -122,6 +181,27 @@ def coverage(scores,start,end):
     return dict(any_coverage=float(any_valid.mean()),full_coverage=float(all_valid.mean()),
         schedule_decisions=len(any_valid),valid_any_decisions=int(any_valid.sum()),valid_full_decisions=int(all_valid.sum()),
         longest_score_gap_minutes=longest,invalid_stream_decisions=invalid_decisions)
+
+
+def grouping_audit(events,history,truth,start,end):
+    """Inspect every member confirmation, including faults after the group anchor.
+
+    This is diagnostic association, independent of one-to-one detection credit.
+    """
+    membership=history.loc[history.action.isin(['open','attach'])]
+    rows=[]
+    for member in membership.itertuples(index=False):
+        event=events.loc[events.event_id.eq(member.event_id)].iloc[0]
+        if not start<=event.confirmation<end:
+            continue
+        eligible=truth.loc[truth.entity_id.eq(event.entity_id)&
+            truth.observable_onset_time.le(event.confirmation)&truth.end_time.gt(event.confirmation)]
+        for fault in eligible.fault_id:
+            rows.append(dict(group_id=member.group_id,event_id=member.event_id,
+                             fault_id=fault,confirmation=event.confirmation))
+    associations=pd.DataFrame(rows,columns=['group_id','event_id','fault_id','confirmation'])
+    return dict(merge_risk_groups=int((associations.groupby('group_id').fault_id.nunique()>1).sum()),
+                fragmented_faults=int((associations.groupby('fault_id').group_id.nunique()>1).sum())),associations
 
 
 def timestamp_metrics(scores,truth,policies,trace):

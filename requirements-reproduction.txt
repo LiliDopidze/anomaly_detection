@@ -1,0 +1,16 @@
+# Tested numerical and notebook environment, Python 3.12.8.
+# Research reproduction pins, not a claim that these are the newest releases.
+numpy==1.26.4
+pandas==2.2.2
+scipy==1.13.1
+scikit-learn==1.5.1
+joblib==1.4.2
+pyarrow==21.0.0
+matplotlib==3.9.2
+PyYAML==6.0.1
+stumpy==1.14.1
+numba==0.60.0
+llvmlite==0.43.0
+pytest==7.4.4
+nbformat==5.10.4
+nbclient==0.8.0

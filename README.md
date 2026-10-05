@@ -1,76 +1,51 @@
-# Optical anomaly detector
+# Company agnostic time series anomaly detection
 
-Six explicit stages for sustained optical-degradation detection:
-**adapter → validation → features → detectors → incidents → evaluation**.
+Version 4 implements independent statistical residual, feature-based Isolation Forest, and frozen-normal-bank matrix-profile routes. It is a batch research framework. The synthetic experiment does not establish production effectiveness. Read `RESULTS_V4.md` for the measured decision and `DECISION_CONTRACT.md` for the predeclared requirements.
 
-## Start here
+## Run the experiment
 
-Python 3.10 or newer. From the repository root:
+Use Python 3.12. The exact tested numerical environment is recorded in `requirements-reproduction.txt`. From this development checkout:
 
-```bash
-python -m pip install -e ".[dev,explain]"
-jupyter notebook
+```sh
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-reproduction.txt
+python -m pip install -e . --no-deps
+python -m pytest
+python -m anomaly_detection.pipeline develop --config configs/industry_agnostic.yaml --output outputs/v4_run
+python -m anomaly_detection.pipeline assess --output outputs/v4_run
+python -m anomaly_detection.fixtures --output outputs/v4_fixtures
 ```
 
-For local analysis, run the notebooks in order:
+`develop` generates inputs once, fits on eligible training history, selects on development, writes all trials and freezes the primary policy. Repeating a completed development command reuses its recorded result. `assess` verifies frozen hashes, opens the final temporal period once, and evaluates the fixed primary and comparators. A previously opened final assessment cannot be repeated or used to select a new winner. Outputs and failed runs remain outside tracked code. A stopped or failed assessment remains labelled as opened.
 
-0. `00_generate_and_diagnose.ipynb`: generate and inspect native data; check structure, missingness and development faults.
-1. `01_canonical_eda.ipynb`: adapt, validate and inspect distributions, seasonality and relationships.
-2. `02_feature_distributions.ipynb`: inspect causal features and missingness.
-3. `03_detector_tuning.ipynb`: fit both tiers and tune incident persistence.
-4. `04_evaluation.ipynb`: inspect misses and workload; final assessment defaults off.
-5. `05_end_to_end_demo.ipynb`: reproduce saved scores and see company adaptation.
-6. `06_feature_importance.ipynb`: inspect global/local SHAP and feature correlations.
+The existing seed-42 data distribution has already been explored. The final period is a frozen temporal assessment, not untouched independent evidence. No deployment or field pilot is executed by these commands. Use a new output directory for a genuinely new declared experiment; changing only its name does not restore held-out status.
 
-Or run development from Python:
+## Four notebooks
 
-```python
-from optical_anomaly.pipeline import develop
+Run the notebooks in order from `notebooks/`: `00_data_exploration`, `01_references_and_features`, `02_fit_and_select`, `03_evaluate_and_explain`. Set `ANOMALY_RUN` to the absolute path of an existing result directory to review the delivered experiment. Otherwise they use `outputs/v4_run`. The last notebook reads completed assessment artifacts; the assessment command is deliberately explicit. Previous notebooks remain under `notebooks/historical/` and implement the older protocol.
 
-run = develop("configs/config.yaml")
-```
+## Interface and files
 
-No data download is needed. The generator creates the source measurements and a
-separate truth file. A new experiment needs a new `output` path in the configuration.
-`prepare` reuses an existing dataset only when its saved settings match; `develop`
-refuses to overwrite a fitted model. Final assessment is a separate explicit call:
+| Module | Responsibility |
+| --- | --- |
+| `validation.py`, `adapters.py` | Observation/availability contract, schedule, quality, counters, GPON and non-optical fixture |
+| `references.py`, `features.py` | Frozen median/daily harmonic reference, centred MAD scale, causal four/eight features |
+| `detectors.py` | Separate U-level, U-shift and local forests |
+| `distance_profiles.py` | STUMPY MASS, complete queries, full-overlap exclusions and frozen bank provenance |
+| `incidents.py`, `grouping.py` | Strict confirmation/recovery, gap closure, fixed-anchor investigation grouping |
+| `evaluation.py`, `selection.py` | One-to-one ordinary/early matching, independent exposure, finite development search |
+| `diagnostics.py`, `fixtures.py` | Read-only diagnostic plots, common support, distinct sensitivity fixtures |
+| `pipeline.py` | `fit`, `score`, `save`, `load`; CLI `prepare`, `develop`, `assess` |
 
-```python
-from optical_anomaly.pipeline import final_evaluation
+Use `incidents.detect`, `grouping.group` and `evaluation.evaluate` for the remaining interface operations. Load only trusted joblib artifacts. Scoring does not refit. Each model is local to an entity and declared group; there is no pooled fallback. The supplied experiment monitors the two received-power channels. Sparse FEC counts are not silently treated as Gaussian residuals.
 
-# Only after fixing the model and completing validation error analysis:
-metrics = final_evaluation(run)
-```
+Scores have distinct route and scope, event and decision times, validity reason, window bounds and version. Distance scores also identify eligible support and nearest normal windows. Configuration and source/dependency/data hashes, feature order and selected training rows are saved. `FROZEN.json` binds model, thresholds, enabled system and deployment decision. Event notifications and membership updates retain their original confirmation times.
 
-Once final data has been inspected, it is no longer an untouched test for further
-tuning. Checksums and an opening marker prevent accidental reuse, not deliberate
-filesystem changes. Load joblib model files only from trusted sources.
+The frozen-bank route compares shape and residual level separately at 30/60 minutes. It uses the established [STUMPY MASS primitive](https://stumpy.readthedocs.io/en/latest/api.html#stumpy.mass); our support and overlap rules are additional project policies. This is a directed normal-bank comparison, not DAMP or a retrospective unrestricted self-join. Isolation Forest uses `-score_samples`, verified against [scikit-learn documentation](https://scikit-learn.org/1.5/modules/generated/sklearn.ensemble.IsolationForest.html).
 
-## Repository structure
+## Boundaries
 
-```text
-configs/config.yaml                 # One readable experiment configuration
-notebooks/                          # Seven ordered local data-science notebooks
-src/optical_anomaly/
-    generator.py                    # Expanded telemetry, static topology and fault truth
-    optics.py                       # GPON-inspired directional FEC and invariants
-    adapter.py                      # Canonical definitions and explicit adaptation
-    sources.py                      # Synthetic source mapping
-    diagnostics.py                  # Native-data EDA and qualification checks
-    validation.py                   # DataValidator: causal resampling, explicit gaps
-    splitting.py                    # TemporalSplit: train/calibration/validation/test
-    mathematics.py                  # Small independently tested formulas
-    features.py                     # FeatureEngineer: normalisation and shape features
-    multivariate.py                 # Five nested telemetry feature sets
-    workflow.py                     # Canonical storage and per-ONT feature replay
-    detectors.py                    # StatisticalDetector and IsolationForestDetector
-    incidents.py                    # IncidentManager: persistent hysteresis state
-    evaluation.py                   # Evaluator: one-to-one matching and metrics
-    explanations.py                 # Validation-only SHAP; no feature removal
-    pipeline.py                     # Fit/calibrate/tune/save/final orchestration
-    __init__.py
-tests/                              # Mathematics, causality, state, matching, integration
-METHOD.md                           # rationale and limitations
-pyproject.toml
-README.md
-```
+The initial scope is regular numeric telemetry. Schedules and observation timestamps must be timezone-aware, with one immutable decision deadline per scheduled observation. Late inputs abstain at that deadline. There is no arbitrary streaming-chunk API, live service, automatic bank update, fault-probability interpretation, root-cause inference, MATLAB parity claim, covariance challenger or learned clustering.
+
+`MIGRATION_V4.md` records the historical source and audit corrections. `PILOT_AND_MAINTENANCE.md` specifies operator review, independent fault ascertainment, shadow replacement and rollback. `METHODOLOGY_V4.txt` and `IMPLEMENTATION_PROMPT_V4.md` retain the requested specifications. The legacy `optical_anomaly` package remains unchanged for generator parity and historical reproduction.
