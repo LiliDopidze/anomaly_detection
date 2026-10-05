@@ -5,17 +5,6 @@ controlled development and software verification; it does not establish field
 accuracy. The current model retains all 52 configured features. Telemetry-set
 comparisons and SHAP are diagnostic reports, not automatic feature-selection rules.
 
-References below distinguish support for a measurement or mathematical method
-from evidence for a particular parameter. Numerical simulation parameters are
-assumptions unless explicitly identified as standard-defined. No cited paper
-validates this complete generator or exact feature combination.
-
-Inline `Source` comments identify a measurement definition or mathematical method;
-`Assumption` comments identify a value that needs operator data or a declared
-experimental policy. For example, `correlation_hours: 0.5` is not an ITU limit.
-Each generated run saves the original commented `config.yaml` alongside
-`settings.json`, so the numerical settings retain their rationale.
-
 ## Generated data
 
 Defaults are 96 ONTs, 90 days and five-minute samples. Static membership gives
