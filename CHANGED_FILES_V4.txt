@@ -1,0 +1,46 @@
+Compared with remote base 3333e789590ded14dd313ef42ffd32fd073b68a7
+A	DECISION_CONTRACT.md
+A	IMPLEMENTATION_PROMPT_V4.md
+A	METHODOLOGY_V4.txt
+A	MIGRATION_V4.md
+A	PILOT_AND_MAINTENANCE.md
+M	README.md
+A	configs/industry_agnostic.yaml
+A	notebooks/00_data_exploration.ipynb
+A	notebooks/01_references_and_features.ipynb
+A	notebooks/02_fit_and_select.ipynb
+A	notebooks/03_evaluate_and_explain.ipynb
+R100	notebooks/00_generate_and_diagnose.ipynb	notebooks/historical/00_generate_and_diagnose.ipynb
+R100	notebooks/01_canonical_eda.ipynb	notebooks/historical/01_canonical_eda.ipynb
+R100	notebooks/02_feature_distributions.ipynb	notebooks/historical/02_feature_distributions.ipynb
+R100	notebooks/03_detector_tuning.ipynb	notebooks/historical/03_detector_tuning.ipynb
+R100	notebooks/04_evaluation.ipynb	notebooks/historical/04_evaluation.ipynb
+R100	notebooks/05_end_to_end_demo.ipynb	notebooks/historical/05_end_to_end_demo.ipynb
+R100	notebooks/06_feature_importance.ipynb	notebooks/historical/06_feature_importance.ipynb
+A	pilot/activation_rollback_template.json
+A	pilot/fault_ascertainment_template.json
+A	pilot/operator_review_template.json
+M	pyproject.toml
+A	requirements-reproduction.txt
+A	src/anomaly_detection/__init__.py
+A	src/anomaly_detection/adapters.py
+A	src/anomaly_detection/detectors.py
+A	src/anomaly_detection/diagnostics.py
+A	src/anomaly_detection/distance_profiles.py
+A	src/anomaly_detection/evaluation.py
+A	src/anomaly_detection/features.py
+A	src/anomaly_detection/fixtures.py
+A	src/anomaly_detection/grouping.py
+A	src/anomaly_detection/incidents.py
+A	src/anomaly_detection/pipeline.py
+A	src/anomaly_detection/references.py
+A	src/anomaly_detection/selection.py
+A	src/anomaly_detection/validation.py
+A	tests/v4/test_contract.py
+A	tests/v4/test_evaluation_audit.py
+A	tests/v4/test_events.py
+A	tests/v4/test_isolation.py
+A	tests/v4/test_replay.py
+A	tests/v4/test_routes.py
+A	RESULTS_V4.md
+A	CHANGED_FILES_V4.txt
