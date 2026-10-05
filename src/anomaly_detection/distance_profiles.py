@@ -62,7 +62,7 @@ class NormalBank:
             valid &= (segment[:len(windows)]==segment[self.m-1:]) & (segment[self.m-1:]>=0)
             if self.mode=="shape": valid &= sds>self.floor
             time=part.event_time.astype('int64').to_numpy()
-            fingerprint=hashlib.sha256(values.tobytes()+time.tobytes()+valid.tobytes()+f'{self.m}|{self.mode}|{self.floor}'.encode()).hexdigest()
+            fingerprint=hashlib.sha256(values.tobytes()+time.tobytes()+valid.tobytes()+f'{key}|{self.m}|{self.mode}|{self.floor}'.encode()).hexdigest()
             self.banks[key]=dict(values=values,means=means,sds=sds,valid=valid,
                 starts=time[:len(windows)],ends=time[self.m-1:],
                 rows=part.row_id.tolist(),segment=segment[:len(windows)],hash=fingerprint,
@@ -89,7 +89,7 @@ class NormalBank:
         if count<2: return {**info,'reason':'insufficient_disjoint_bank'}
         if self.mode=="shape":
             distances=stumpy.mass(q,b['values'],M_T=b['means'],Σ_T=b['sds'],
-                T_subseq_isconstant=b['sds']<=self.floor,Q_subseq_isconstant=np.array([False]))
+                T_subseq_isconstant=(b['sds']<=self.floor)&np.isfinite(b['means']),Q_subseq_isconstant=np.array([False]))
         else:
             distances=stumpy.mass(q,b['values'],normalize=False,T_subseq_isfinite=b['valid'])
         distances=np.asarray(distances,float)/np.sqrt(self.m)

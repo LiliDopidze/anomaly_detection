@@ -51,10 +51,15 @@ class References:
             scale = max(float(1.4826*np.median(np.abs(r-centre))), spec.floor)
             self.models[key] = dict(origin=origin, coefficient=coefficient, centre=centre,
                 scale=scale, kind=kind, rows=good.row_id.tolist())
-            residual = pd.Series((r-centre)/scale)
+            residual = pd.Series((r-centre)/scale,index=good.event_time).asfreq(f'{spec.cadence_minutes}min')
+            lag1=residual.autocorr(1) if residual.iloc[:-1].std()>0 and residual.iloc[1:].std()>0 else np.nan
+            daily_lag=int(24*60/spec.cadence_minutes)
+            daily=residual.autocorr(daily_lag) if len(residual)>daily_lag+3 and residual.std()>1e-12 else np.nan
             self.diagnostics.append({**diag, "status": "fitted", "kind": kind,
                 "blocked_improvement": improvement, "residual_centre": centre, "scale": scale,
-                "lag1": residual.autocorr(1) if residual.std()>0 else np.nan, "q01": residual.quantile(.01), "q99": residual.quantile(.99),
+                "lag1": lag1, "lag_daily":daily, "q01": residual.quantile(.01), "q99": residual.quantile(.99),
+                "skew":residual.skew(),"excess_kurtosis":residual.kurtosis(),
+                "first_half_sd":residual.iloc[:len(residual)//2].std(),"last_half_sd":residual.iloc[len(residual)//2:].std(),
                 "ols_contamination_robust": False})
         return self
 
