@@ -1,0 +1,299 @@
+Company Agnostic Time Series Anomaly Detection
+Detailed methodology and implementation specificationVersion 4 • 5 October 2026
+This methodology defines a reusable framework for identifying unusual time-series behaviour and organising the resulting evidence into incidents that people can investigate. The recommended experiment implements three separate routes: a statistical residual baseline, feature-based Isolation Forest, and matrix-profile-based subsequence detection. Each route receives its own evaluation. A small event-level hybrid is considered only after those comparisons; a separate grouping layer consolidates related alerts. Clustering and covariance models are targeted extensions, not initial requirements.
+The objective is useful detection at an acceptable investigation workload, with measured warning lead where a precursor is observable. An anomaly is a statistical departure from the chosen normal reference. It is not automatically a fault, a business problem or evidence of a particular cause.
+The framework is company agnostic through its data contract, reusable mathematics and evaluation procedure. Each application still needs metric definitions, representative training data, channel groups, operating context and locally justified alert settings. No universal cross-industry accuracy is claimed.
+Version 4 makes matrix-profile-based detection a required experimental route while keeping deployment evidence-dependent. It reduces the initial model inventory, defines the implementation sequence and distinguishes published method evidence from project-specific decisions. This is a design and implementation specification; predictive performance remains to be measured.
+1 Scientific rationale and scope
+Detection and investigation are different tasks
+A univariate detector asks whether one metric departs from its expected behaviour. A multivariate detector asks whether a combination of metrics is unusual. Alert grouping asks which already detected symptoms should be investigated together. Grouping cannot detect a relationship failure if no underlying detector produces evidence.
+For example, a temperature value may be normal across all operating conditions but unusually high for the current load. A joint model or a temperature baseline conditioned on load can capture this relationship. Several independently unusual temperatures on the same machine may instead need one investigation; that is a grouping problem.
+Anodot describes per-metric normal modelling with seasonality, followed by grouping related anomalies into incidents [1, 2]. This is useful architectural guidance. Those articles do not supply a reproducible specification, independent comparative results, or proof that grouping detects marginally normal relationship failures. We adopt the separation of responsibilities, not an assertion of equivalence to its proprietary system.
+Comparative research motivates an empirical choice of detectors. Schmidl and colleagues evaluated 71 algorithms on 976 time series and documented differing strengths and weaknesses [3]. Garg and colleagues found strong results from channel-wise modelling and showed that score construction could matter more than the underlying model on their datasets [4]. Neither study establishes the best method for this project.
+Component
+Role in the initial framework
+Evidence required for adoption
+Univariate residual detector
+Required baseline for each eligible metric
+Useful sensitivity and manageable workload
+Directional CUSUM
+Candidate for sustained small changes
+Additional early detections at acceptable recovery delay
+Isolation Forest
+Required feature-based route, univariate or joint by configured scope
+Useful detection beyond the statistical baseline
+Shrinkage Mahalanobis
+Optional targeted challenger
+A demonstrated relationship failure that justifies another model
+Incident grouping
+Separate operational layer
+Fewer duplicate investigations without harmful merges
+Matrix-profile-based detection
+Required separate subsequence experiment using a frozen normal bank
+Independent performance, complementary detections and acceptable cost
+Learned clustering
+Deferred unless a specific failure motivates it
+Stable groups or regimes and an evaluated operational gain
+No deep model, automatic peer fallback, causal localisation system, dashboard or service is required for the first implementation. Keep the initial supported data scope to regularly sampled numeric telemetry; counts, intermittent activity and bounded rates require explicit suitability checks rather than an assumption that all metrics share a Gaussian distribution.
+What MATLAB contributes, and what it does not establish
+MathWorks documents both model-based detection and distance-based subsequence analysis. Its timeSeriesIforestAD workflow constructs, trains and scores a windowed detector, with configurable feature extraction and decision stride [12]. Its timeSeriesSpcAD wrapper offers individual and EWMA statistical process control [13]. The distance guide describes distance profiles, matrix profiles, motifs and discords [14]. These support a modular comparison, not a requirement to ensemble every method.
+The proposed four-feature representation, robust residual reference, CUSUM policy and normal-bank eligibility rules are project choices. They are not claimed to reproduce hidden MATLAB feature extraction or Anodot internals. A multichannel interface alone does not establish that a method learns useful cross-channel dependence. MATLAB example thresholds and window lengths are demonstrations, not validated defaults for this application. Pin the MATLAB release and add-on if reproducing that workflow; the Python implementation uses explicitly defined features and established libraries.
+The main design risks are more operational than algorithmic: unsuitable normal history, future leakage, loss of anomaly information through normalisation or window summaries, and a growing alert workload. The implementation below makes these risks testable before adding model complexity.
+2 Process flow and decision points
+The development process follows six stages. First, validate inputs and define the monitoring schedule and fault truth. Second, explore training data and choose a small set of baselines, features and channel groups. Third, fit references and candidate models on eligible training history. Fourth, select detector and incident policies using a chronological development period. Fifth, freeze all settings and evaluate the final test. Sixth, run a monitored pilot and review drift, coverage and investigations before a controlled replacement of the model.
+At every stage, failure is a valid result. Insufficient support leads to abstention or a narrower declared scope. No feasible alert policy leads to a report of the trade-off, rather than an automatically more complicated model. Changing a design after test inspection requires new independent evidence for a fresh performance claim.
+
+Figure 1. Each enabled detector receives only information available at the decision time. All three main routes are evaluated separately; operational routes are enabled only through development evidence. Raw scores remain separate; confirmed events enter a versioned hybrid policy and then causal grouping. Data-quality status is a separate output.
+3 Data contract and observation quality
+Use a canonical long table with entity_id, metric_name, event_time, available_time, value and quality status. A companion schedule states when each entity and metric is expected to be monitored. The metric registry records units, gauge/count/counter type, aggregation, cadence, allowed transforms, adverse direction, expected range, missingness rules and positive scale floors. Entity IDs are keys, not numeric predictors.
+Event time records when a measurement applies. Availability time records when it could actually be used. At decision time a, include only observations available by a. For a trailing window ending at event time t, its decision cannot precede the latest availability time among its required inputs. Preserve both times and never rewrite a historical emitted alert because late data arrived. Any retrospective recomputation must be separately labelled.
+Reject ambiguous duplicates. Convert counters using elapsed time, with explicit reset and wraparound handling; an unknown increment is not zero. Rates require compatible numerator and denominator intervals and a valid denominator. Aggregate only complete source intervals using the declared sum, mean or other metric-specific rule. Avoid future interpolation and centred smoothing.
+Optical meanings belong in the GPON adapter: compatible transmit and receive readings, loss proxies, FEC denominators and physical validation. The generic core must also work with a small non-optical fixture. This demonstrates interface portability only. Reuse the current generator unchanged for historical comparison; additional diagnostic fixtures do not replace that benchmark.
+Missingness and support
+The initial policy requires complete short windows for feature and distance scoring. A gap resets recursive states and triggers re-warm-up for the affected route. The point residual route can resume once a valid observation and fitted reference are available. A missing channel blocks a joint detector that requires it, but must not suppress valid univariate channels. Do not silently substitute a different feature vector into the fitted joint model.
+Missingness is neither normal behaviour nor recovery. Report quality incidents separately from behaviour anomalies. Unknown entities without adequate local reference history abstain initially. A pooled fallback would be a new candidate requiring its own evidence.
+Define minimum training duration, valid observations, independent operating cycles, mode coverage and maximum gaps before fitting. There is no universal sufficient sample count: thousands of overlapping windows may contain little independent information. If all model features are constant, fail joint fitting clearly. A constant metric may still support a useful univariate change check when the registry supplies a defensible nonzero resolution or noise floor.
+4 Modelling expected normal behaviour
+For one entity and metric, let x(t) be the observed value and y(t)=g(x(t)) its declared transformation. Identity is the default. A logarithmic transform is considered only for a compatible domain, and never as an automatic treatment for arbitrary negative values. Fit the reference using representative normal training data. Keep simulator latent states, fault labels and future observations out of predictors.
+Begin with a training median for a stable metric. If training evidence shows recurring structure, compare a small seasonal model with the median baseline. A known operational state or contemporaneously available exogenous variable may be included when it describes legitimate normal conditions. Do not condition away the fault signal using a downstream symptom without testing the consequence.
+A possible seasonal reference is
+
+Here time and period P use the same units; u contains permitted context; periods and harmonic counts are chosen from a bounded training-led shortlist. Fourier terms can represent multiple seasonal periods [5]. This project does not implement full dynamic harmonic regression by default. Ordinary least squares is not robust to contaminated training. If contamination is material, compare a documented robust fit or improve the training eligibility process.
+Centre and scale the training residuals explicitly:
+
+
+The fitted expected value in transformed units is m+b. The factor 1.4826 makes MAD comparable to standard deviation under a normal distribution; it does not make residuals normal. The positive metric-specific floor prevents unstable scaling when noise is tiny. Freeze the transform, reference, residual centre and scale within each evaluation fold.
+Inspect residual autocorrelation, seasonal patterns, tails and scale by operating condition. A constant scale may be unsuitable when variability depends strongly on load or expected level. In that case evaluate a small regime-specific scale or a distribution appropriate to the metric. Sparse counts and small-denominator proportions are examples where a median/MAD score may be a weak baseline. Mark unsupported metrics instead of presenting a universal Gaussian detector.
+Do not divide a window mean’s scale by the square root of its sample count unless the dependence assumptions are justified. Thresholds below are selected empirically; neither z nor a descriptive reference band carries a guaranteed future false-alarm probability.
+5 Univariate detection and sustained change
+Immediate residual departures
+The baseline uses a directional residual score:
+
+A threshold on this score answers whether the current observation is unusual relative to its expected behaviour. Persistence and hysteresis are selected separately in the alert policy. For point spikes, the candidate policy must include a one-decision opening; requiring persistence everywhere would deliberately exclude brief anomalies.
+Accumulated directional change
+A second univariate candidate uses one-sided CUSUM recursions on the regular-grid residual sequence:
+
+Start both at zero at a segment boundary; k is a fixed positive allowance in residual units. Use the relevant direction, or their maximum for a declared two-sided CUSUM. This within-detector maximum defines the two-sided statistic; it is not score fusion across different methods. NIST describes CUSUM as useful for small sustained mean shifts [6]. The project’s thresholds and recovery rules require empirical evaluation under the actual temporal dependence.
+CUSUM is a candidate, not a mandatory second alert stream for every metric. A single large residual may also trigger it. Its accumulated state can prolong recovery after a fault ends, so measure time in alarm and recovery delay. Initially do not reset it on every alert; continue the specified recurrence, resetting only at segment boundaries or a separately declared lifecycle event. Any alternative reset policy is a distinct, tested configuration.
+For intuition, under independent unit-variance normal residuals with a positive mean shift δ, the per-observation log-likelihood ratio is δz−δ²/2. Dividing by δ gives z−δ/2, motivating k=δ/2. This derivation does not supply operating guarantees when residuals are autocorrelated, non-normal or estimated. Cadence changes alter accumulated evidence and require policy reselection.
+All recursive calculations use the full relevant contiguous history or an exactly equivalent saved state. A short rolling buffer does not reproduce CUSUM or exponential smoothing. Evaluate whether U-level alone or U-level plus U-shift is useful before adding joint detection; retain reason codes and independent scores for each route.
+6 Feature-based Isolation Forest and joint detection
+Scope and feature representation
+Define small groups of related channels from operational meaning and training evidence. For the initial implementation, fit each joint model per entity and declared channel group. Require sufficient local support. A pooled model across entities would require an explicit population and weighting contract and is outside the default. Compare within-entity residual relationships, including plausible lags where relevant; shared raw seasonality is insufficient evidence of a meaningful group.
+Begin the new implementation with four features per channel: short mean, short standard deviation, OLS slope and short-minus-long. The original eight-feature representation below remains a historical control where available, not a mandatory permanent input. For a right-closed complete short window (t−W_s,t], define the following features of z. The long window is (t−W_l,t], restricted to the available contiguous segment, with at least short-window support. W_l is greater than W_s. Record the actual long-history duration.
+Feature
+Exact meaning
+Purpose
+Short level
+Arithmetic mean of short-window residuals
+Sustained offset
+Variability
+Population standard deviation with divisor n
+Unusual local variability
+Smoothed slope
+EWMA of successive residual differences per elapsed hour
+Smoothed rate of change
+Regression slope
+OLS slope against elapsed hours within the short window
+Local linear trend
+Long level
+Mean of available permitted long history
+Persistent departure
+Short minus long
+Short level minus long level
+Recent level change
+Persistence fraction
+Fraction beyond directional residual boundary b₀
+Repeated departures
+CUSUM
+Declared directional statistic from Section 5
+Accumulated change
+For the smoothed slope, use elapsed hours and a positive half-life H:
+
+Initialise from the first valid difference. The short-window OLS slope is
+
+Reject a zero denominator. Persistence uses z>b₀, z<−b₀ or |z|>b₀ with b₀>0; equality is not a breach.
+Eight features per channel produce 8d columns for d channels. Short-minus-long is exactly dependent on the two means. Shrinkage stabilises covariance but does not remove redundant weighting. Use the compact profile as the default and compare the historical eight-feature profile only as a bounded ablation with matched channels, training rows and tuning budgets; no automatic feature search is required. CUSUM and the other summaries can remain visible diagnostics even when excluded from the joint model.
+Complete short windows can dilute brief or phase-sensitive relationship failures. Retain the point residual route for spikes. If a relationship fixture demonstrates that window summaries remove the relevant signal, evaluate a declared instantaneous residual-vector candidate as a later ablation, not an unrecorded feature change.
+Primary feature-based route: Isolation Forest
+Isolation Forest isolates observations by recursive random partitioning; unusually short paths provide its original anomaly measure [15]. Here observations are causal feature vectors, not individual timestamps stripped of context. Fit per entity and declared channel group, using a recorded, training-only row selection and fixed random seed. Temporal structure enters through the features; the forest itself does not remember sequence order.
+Start with a single declared tree/subsample configuration, using verified existing settings where reproduction matters. If no existing configuration applies, 100 trees and a per-tree sample size of min(256, number of eligible rows) are reasonable starting candidates, not optimality claims. Record training stride because dense overlapping windows overweight long repeated regimes. Do not automatically rebalance operating modes without an explicit target population.
+In scikit-learn use A = -score_samples so larger values indicate greater novelty [8]. Select operational thresholds separately; contamination is not an estimate of the real fault rate. Scores are not calibrated fault probabilities. Features that are constant throughout training cannot furnish useful isolation splits; the residual route must cover changes in an otherwise constant metric. A frozen feature scaler is useful for a shared numerical contract, although ordinary positive affine scaling is not intrinsically required by axis-aligned isolation trees. Do not clip future extremes without a separately evaluated reason.
+Run this route independently of marginal alerts: a joint anomaly must not require a univariate trigger. Test relationship-only faults explicitly. Axis-aligned partitions and summary features can miss narrow departures from correlation or phase relationships. A multivariate input is a capability to test, not proof that every dependence change is detected. Per-feature explanations are diagnostic associations, not causal responsibility.
+Optional covariance challenger
+Add shrinkage Mahalanobis only when a documented relationship failure motivates it. It is not a fourth compulsory route. If used, compare on the same vectors, training row identities, opportunities and tuning budget as the forest.
+Fit a feature mean and standard deviation on eligible training vectors, with declared positive floors. This feature scaling is distinct from metric residual scaling. Do not clip future extremes by default. Let v be the scaled vector, μ its training mean, S its empirical covariance, and p its dimension. Use Ledoit–Wolf shrinkage [7]:
+
+Estimate λ from training. Compute q through a stable factorisation or linear solve; do not explicitly invert an unstable empirical covariance. Require positive definiteness and finite scores. If a numerical ridge is necessary, record its scale-relative size. Retain constant columns under the declared floors, test future departures, and reject zero-information training.
+The score measures distance from the learned normal combinations. Shrinkage is numerical regularisation, not robust contamination control. Mixed regimes, bounded persistence and skewed CUSUM values may violate Gaussian assumptions. Select cutoffs empirically and make no chi-square false-alarm claim. For a fixed Gaussian model, negative log-density equals q/2 plus a constant, so both rank observations identically.
+For two centred unit-variance normal residuals with correlation ρ and |ρ|<1, the unregularised illustrative distance is
+
+With ρ=0.99 and (z₁,z₂)=(1,−1), q=200 although each marginal departure is modest. This illustrates a relationship failure. It is not a production threshold or a claim that the fitted, regularised feature model yields the same number.
+Do not implement a general model zoo to accommodate this extension. Prefer an explicit conditional baseline for a known load-response relationship when it is more interpretable and performs adequately.
+7 Separate matrix-profile-based detection
+Implement and evaluate this route separately even if it is ultimately excluded from deployment. Subsequence matching tests whether a recent sequence resembles any eligible normal sequence. It complements summary features when order and shape matter. Matrix profiles provide nearest-neighbour distances and indices, with motifs and discords describing repeated and unusual subsequences [9]. The operational candidate uses a directed query-to-training-bank comparison, consistent with AB-join semantics [10]. This is reference-based subsequence novelty detection using matrix-profile primitives; it is not the conventional unrestricted full-series self-join discord calculation.
+Let q_t contain m complete samples ending at event time t, and let B be a frozen bank of normal-training windows from the same entity and metric. Require m=W/Δ to be an integer of at least three. Define two separately evaluated distances:
+
+
+Shape mode uses the transformed measurement sequence and population window standard deviations. Level mode uses the frozen standardised residuals from Section 4 without per-window recentering. For nonconstant windows, shape distance equals √(2(1−corr(q,r))) and lies between zero and two. Positive affine copies have zero shape distance; sustained level offsets and amplitude changes can therefore disappear once a whole window lies inside the new regime.
+Shape mode excludes near-constant reference windows and abstains on near-constant queries under a declared variance floor; level mode can retain constant windows. Implement both modes as distinct candidates, evaluate them independently, and choose mode and duration on development data under a bounded budget. Distances above are RMS distances; a library returning Euclidean distance must be divided by the square root of m. The division aids interpretation but does not make different window lengths equally calibrated. Do not average or maximise their scores. A motif is not necessarily healthy, and a discord is not necessarily a fault.
+Build B from eligible training windows only. Never form windows across gaps or concatenate separate periods into an artificial sequence. Exclude shared raw observations between query and reference, including queries crossing the train boundary. For equal-length windows in one segment this requires start-index separation of at least m. Require the eligible bank to contain at least two mutually non-overlapping reference windows after query exclusion; this is a conservative project support floor, not a mathematical necessity or evidence of representative normality. Other overlapping eligible bank windows may remain candidates.
+Generate training distance cutoffs using overlap-excluded queries, not self-match zeros. A library-returned nearest neighbour that is invalid must be replaced by the next eligible match. Keep bank hashes, source times, support and nearest-match provenance. Test an established implementation against a small direct distance calculation; custom exclusion rules may affect computational cost.
+Full-series self-joins are retrospective exploration. Future observations can change old nearest neighbours, so those profiles cannot support claimed causal warning lead. Repeated faults must not enter the normal bank automatically. Evaluate it as a standalone detector against the statistical and forest routes before any hybrid decision. Deploy it alone or in a selected combination only when its workload, detection and resource trade-offs justify that choice. It need not beat a preselected hybrid merely to receive a fair experiment.
+Causal profile semantics and computational scope
+A standard self-join profile assigns each subsequence its distance to a nearest nontrivial subsequence in the same series. A high value indicates novelty relative to that comparison set; it does not establish harmfulness. A left profile restricts neighbours to the past. DAMP studies efficient left-discord discovery and explains why repeated abnormal patterns can mask one another in an unrestricted profile [16]. Our frozen normal-bank policy differs from DAMP: it deliberately prevents later repeated faults from becoming eligible neighbours within a model version. Its vulnerability is an unrepresentative or contaminated bank.
+Score a query only when its final observation is available. Do not date an alert at the query start. A trailing window may detect a partial anomaly before a whole anomalous window exists, but there is no guaranteed delay equal to the window length. Measure actual confirmation delay in replay.
+Begin with exact distances on a bounded pilot. With Q queries, B bank windows and length m, a direct reference oracle costs O(QBm); it is a correctness check, not the intended large-scale engine. Use an established profile/distance implementation for production-sized experiments and verify its join direction, normalisation and exclusion conventions. Do not silently concatenate disjoint reference segments to call a library. If resource limits are exceeded, reduce the bank by a fixed training-only coverage rule and measure the accuracy/cost change before considering a streaming algorithm.
+8 Alert lifecycle and incident grouping
+Independent detector events
+Each detector has its own score, thresholds and state. Select an opening threshold θ_open and lower recovery threshold θ_close. Inactive events open after N_open consecutive valid decisions strictly above θ_open. Active events recover after N_close consecutive valid decisions strictly below θ_close. Values between thresholds retain state but break the relevant confirmation run. Equality is not a breach or recovery.
+At decision stride δ, N consecutive decisions span (N−1)δ. Emit at confirmation, never at the first breach or the window start. N=1 has zero confirmation delay. Missing decisions break confirmation and do not establish recovery. After a declared maximum gap, close administratively if needed and label that reason. Report long-lived events rather than hiding them through merging.
+Hybrid evidence policy
+After independent comparisons, a hybrid may include the selected statistical, forest and/or matrix-profile route. Any enabled route may produce an event. Agreement is not required because relationship-only failures may lack a marginal trigger. Raw scores remain separate and are never averaged across incompatible scales. Freeze the enabled routes and thresholds as one complete policy before test evaluation.
+Adding routes creates more opportunities for false alerts. For individual false-alert events E_j, P(∪E_j)≤ΣP(E_j), regardless of independence; under independence with equal probability α the union is 1−(1−α)^M. In this application individual probabilities are not known from training quantiles. Consequently select and evaluate the complete system on held-out development data and scheduled exposure; do not claim a formal error-rate guarantee from the formula.
+Causal grouping for investigation
+Initially group within an entity. Optional cross-entity grouping requires an explicit operational group or validated relationship and a separate group-level evaluation. Use metadata rather than a learned clustering algorithm as the first implementation.
+Process emitted detector events in availability-time order with a deterministic tie rule. An event may join an existing active investigation only when its scope and configured symptom compatibility agree and its confirmation time is within a fixed maximum span G of the group’s first confirmation. Compare against the fixed anchor, not the last arrival, to prevent chains from merging unrelated events indefinitely. Choose the eligible group with the earliest anchor, then stable ID. Otherwise create a new group.
+Issue the investigation at the first constituent confirmation. Do not delay it while waiting for related alerts. Later members attach as updates. Preserve raw alert IDs, original emission times, individual recovery states and group membership history; future evidence must not rewrite earlier notifications. The initial group recovers when all members recover. If any member closes through missingness, distinguish administrative or mixed closure from confirmed recovery. Events beyond the anchor horizon form new groups even if an older group remains active.
+Grouping parameters consume development-selection budget. Report raw detector events, hybrid events before grouping and grouped investigations. Check incorrectly merged faults and fragmented faults explicitly. Reduced group count does not prove improved detection. Group membership expresses association for investigation, never a proven causal diagnosis.
+9 Experimental design and model selection
+Use chronological training, development and final test periods. For the current synthetic generator, 55/20/25 proportions are only a proposed starting point after verifying that the first 55 percent is intended healthy history. Use fixed timestamp boundaries and boundary-event rules. Previously inspected test data must be labelled as development evidence, not made independent by renaming it.
+Fit references, scalers, joint models, banks and any learned groups on training only. Development data selects detector thresholds, persistence, feature profile and grouping settings. Past observations may cross split boundaries as causal context, but no parameter is refitted from that context. Replay recursive state over the required history; do not reset merely because an evaluation partition begins.
+Generate a small threshold candidate grid from training-score quantiles and a bounded development search. For matrix-profile scores, use overlap-excluded training queries; never use a bank window matched to itself. Quantiles supply candidate cutoffs rather than future error probabilities. Deduplicate ties, record every trial and predeclare any edge-extension rule. Model and window alternatives consume the same documented budget. Compare route operating curves and select each route under the same investigation budget; identical numerical thresholds are not comparable across scores. Include matched-channel and matched-opportunity comparisons, alongside the intended full-scope system results.
+Experiment
+Comparison question
+Historical reproduction
+Can the recorded source version and original protocol be reproduced?
+Statistical candidates
+Does CUSUM improve on residual detection at acceptable workload and recovery?
+Feature-based Isolation Forest
+Does the compact representation help; does the historical eight-feature control add value?
+Matrix-profile candidates
+How do shape and residual-level distances perform independently at justified durations?
+Three-route comparison
+Which fault types, misses, workload and delays distinguish the three routes?
+Selected combinations
+Does a predeclared pair, or a justified three-route policy, improve the feasible trade-off?
+Before/after grouping
+Does grouping reduce investigation burden without hiding misses or merging faults?
+Conditional extensions
+Does a specific diagnosed failure justify covariance, lag features or clustering?
+Run these as a staged shortlist, not a full Cartesian search. Independent route selection precedes the first hybrid comparison. Retain matched-channel controls for distance scoring. Freeze candidate configuration and the primary deployment choice on development data; use final test to assess that choice and fixed comparators. Selecting a new winner from test results requires additional independent evidence.
+Before looking at results, define ordinary recall, required-lead recall, coverage, workload, delay and time-in-alarm requirements together. Choose the simplest feasible configuration under a fixed tie rule. Historical proposals—95 percent recall, at most two percentage points recall or lead-recall loss, one point coverage loss, 50 percent nuisance reduction, and five investigations per 1,000 entity-days—are project hypotheses, not industry standards. Record their applicability and denominator before running; do not relax them after outcomes.
+A practical predeclared selection rule is: first retain configurations meeting minimum coverage and workload limits; then maximise event recall (or required-lead recall if that is the declared primary objective); finally break ties by lower delay and lower computational/model complexity. Specify tie tolerances before selection. Keep a Pareto table when no candidate dominates. A model with better point-level ranking can still be worse operationally after persistence and grouping.
+If fault labels are incomplete, use operator-reviewed alert samples and a monitored pilot. Unmatched alerts are unverified workload. Recall cannot be reliably estimated without sufficiently complete event ascertainment. Do not turn an unsupervised fitting procedure into a claim of label-free performance validation.
+10 Evaluation and mathematical definitions
+Scheduled coverage and timestamp diagnostics
+Let S be the fixed set of scheduled entity-decision pairs, K its known-truth subset, and V_r the valid-score subset for route r. Compute timestamp confusion matrices only on K∩V_r, and display all exclusions. For the hybrid, use the union of scheduled candidate decision times fixed in advance and a declared route-validity rule. Do not count an abstention as a healthy prediction.
+
+Report both any-route availability and availability of all required capabilities: a valid point detector does not imply that relationship monitoring is available. Use identical eligible schedule subsets for paired comparisons, alongside full operational coverage. Separate raw threshold decisions from active-incident-state metrics. Undefined denominators remain undefined with counts shown.
+Events and warning lead
+Define each fault independently with entity, observable onset o, impact time p when known, and end e. Use half-open fault intervals [o,e). A new alert is eligible for a same-entity fault only if its confirmation falls in [o,e); pre-existing active incidents are reported separately and do not silently gain credit. For faults already active at a split boundary, use a declared ongoing-event report rather than treating them as new incidents. The simulator’s injection time is not automatically observable onset.
+Apply deterministic maximum-cardinality one-to-one matching between eligible alert events and faults, with a predeclared tie rule favouring earlier confirmation and then stable IDs. Retain duplicate alerts as unmatched workload. Grouped investigations are matched separately under the same scope rule. One group cannot receive credit for multiple independent faults merely because it contains several symptoms.
+
+There is no natural event-level true-negative count. Under complete synthetic truth, unmatched incidents are false positives, including duplicates. With incomplete real truth, report unmatched investigations as unverified. Do not use point adjustment that credits every anomalous timestamp after one successful alert; its inflation risk is demonstrated by Kim and colleagues [11].
+For matched confirmation a, define lead=p−a and delay=a−o. Lead may be negative after impact. Only claim early warning when impact and onset have independent, defensible definitions. For required lead L, form a second matching graph restricted to a≤p−L; calculate early TP from its maximum-cardinality matching. This avoids making early recall depend on an arbitrary ordinary-matching tie.
+Report early recall across all impacting faults, and separately across the fixed opportunity subset with known times and p−o≥L. Do not remove missed faults or faults with unavailable detector scores from the relevant denominators. Display excluded unknown-time events. Detected-only lead and delay summaries must show sample size and misses; otherwise a detector missing difficult cases may appear faster.
+Workload and grouped investigations
+
+Scheduled entity-days equal the total duration of the union of monitoring intervals per entity divided by 24 hours. Extra metrics do not multiply exposure and missing scores do not shrink it. Report all investigations as well as unmatched investigations, time in alarm, recovery delay and administrative closures. Measure time in alarm using the union of active intervals at the declared scope.
+For grouping, count groups eligible for more than one distinct truth fault as merge-risk cases and faults associated with multiple groups as fragmentation. Inspect these cases with the underlying alerts. If grouping spans entities, introduce distinct site/group truth and exposure; do not reuse entity-level counts as if the evaluation unit were unchanged.
+Robustness and uncertainty
+Use paired resampling over defensible independent sites/entities and contiguous time blocks, keeping candidate predictions paired. A site-wide event makes its entities dependent. Do not bootstrap overlapping rows as independent observations. Show raw event and exposure counts; limited independent events imply limited precision, regardless of the number of timestamps.
+Test spikes, short and sustained shifts, gradual degradation, relationship-only failures, benign mode changes, gaps, repeated faults, and contaminated normal training. Use supported 0.5, 1 and 2 percent contamination scenarios as sensitivity experiments rather than arbitrary production defaults. Separate fixtures from the unchanged generator benchmark. Add independent real datasets from more than one operating context before making broad transfer claims. Required warning lead is unattainable when the measured data contain no observable precursor.
+11 Clustering and model maintenance
+When clustering is justified
+Alert grouping is the first priority and starts with transparent rules. Peer clustering can later help organise comparable entities or propose channel groups when scale makes manual configuration impractical. Fit it on training-only behaviour and metadata, inspect stability over time, and preserve semantically incompatible groups. A peer label is not permission to apply an unsupported pooled reference.
+Regime clustering is a different extension. Consider it only when training diagnostics show distinct normal modes that a simple contextual baseline cannot explain. Prefer observed operating state when available. If clustering is tested, freeze training-derived transforms and clusters, set minimum mode support, and abstain or flag unsupported assignments. A cluster can represent a fault; frequency does not establish health. Do not use future segments to label historical operating modes.
+No clustering algorithm is prescribed without a data-supported objective. Learned grouping must improve the same held-out workload, recall, delay and merge-quality measures. This avoids adding clustering merely because the framework contains many metrics.
+Controlled adaptation
+Freeze all artifacts during an experiment and deployment version. Monitor input quality, score coverage, residual level/scale, normal-mode support, alert workload and reviewed outcomes. A distribution shift is a review signal; it is not automatic evidence that the new behaviour should become normal.
+For a replacement, define an eligible historical interval using information actually available at that time, inspect it for unresolved incidents, refit, and replay the complete candidate lifecycle chronologically. Compare to the current version in shadow operation before activation. Store the activation time and retain rollback artifacts. If automated updates are later introduced, evaluate the full update policy in historical replay; a frozen-model test cannot validate an adaptive system.
+At a model-version boundary, replay sufficient contiguous context under the new artifacts to initialise features and states. Preserve the external record of ongoing investigations and document how new-route events attach or restart. Never silently clear an unresolved operational incident because model parameters changed.
+12 Step-by-step implementation and verification
+Use a small Python package and batch causal replay first. Reuse existing repository modules before refactoring. Do not build a live service, dashboard, plugin framework or automated model search. Each step below has a concrete output and a completion gate; complete earlier gates before interpreting later performance.
+Step 1 — Reproduce and define the decision
+Inspect repository status, source revision, dependencies, configuration and tests. Preserve the original generator, its random draws and its truth. Reproduce the historical benchmark in isolation and record any discrepancy. Define the monitored population, adverse directions, event onset/impact/end, warning target, decision cadence and investigation budget. Output: a run manifest, benchmark reproduction and a one-page decision contract. Gate: inputs and historical counts reconcile.
+Step 2 — Build the canonical data and schedule
+Implement the adapter and Section 3 validation. Separate observations, monitoring schedule and truth. Produce availability-aware, regular segments and explicit invalidity reasons. Keep optical semantics in the GPON adapter and demonstrate one non-optical fixture. Output: validated canonical tables and quality report. Gate: counter, denominator, duplicate, gap and time-order fixtures pass.
+Step 3 — Freeze the experimental boundaries
+Choose chronological training/development/test timestamps, healthy-training eligibility, boundary-event handling and the finite candidate budget. Define minimum history and mode support before fitting. Save the final test access status: an already inspected period is not fresh. Output: immutable split and candidate manifests. Gate: later test changes cannot alter selection inputs.
+Step 4 — Fit expected behaviour and verify residuals
+Fit the simplest suitable normal reference and robust scale on eligible training history. Inspect residuals against time, load and operating mode. Introduce only a bounded seasonal/contextual alternative when diagnostics justify it. Output: serialised per-metric reference artifacts, support report and residual plots. Gate: hand calculations, constant-scale floors and future-mutation checks agree.
+Step 5 — Implement the statistical route
+Implement directional residual scores and a separately identifiable CUSUM candidate. Add lifecycle confirmation, recovery and gap handling using actual decision times. Include one-decision opening for spikes. Output: scores, validity, events and state traces. Gate: spike, step, ramp, equality and missingness fixtures produce the specified behaviour.
+Step 6 — Implement the Isolation Forest route
+Build the four-feature vectors with explicit channel/column order and causal windows. Fit a deterministic forest; retain the historical eight-feature profile only as a bounded comparison. Do not gate it on residual alerts. Output: fitted model, row identities, feature report and independent event stream. Gate: feature arithmetic, save/load parity and a relationship-only fixture are checked; a failed detection is reported, not concealed.
+Step 7 — Implement the matrix-profile route separately
+Construct the frozen normal bank, maintaining segment IDs and source indices. Implement shape and residual-level candidates using eligible nearest neighbours. Verify against direct distances on small arrays, including constant windows, overlap exclusions, repeated faults and split-boundary queries. Output: separate scores/events, nearest-normal-match plots, bank provenance and cost measurements. Gate: oracle agreement and causal-prefix invariance; no self-match calibration or future reference leakage.
+Step 8 — Select policies on development data
+Score all three routes independently and construct bounded operating curves under common workload and coverage definitions. Compare complementary successes and misses before proposing combinations. Evaluate only a small named set of combinations; tune and report the complete lifecycle and causal grouping. Output: separate-route and full-system decision tables, diagnostic plots and a selected policy. Gate: every candidate trial is logged; chosen complexity has a stated measurable benefit, or the simpler design wins.
+Step 9 — Freeze, assess and report
+Freeze model artifacts, bank, features, thresholds, confirmation, grouping, dependencies and primary decision. Run the final chronological assessment once for that claim. Report event counts, coverage, workload, delay, lead, time in alarm and appropriate uncertainty with the fixed comparators. Output: reproducible results and a deployment recommendation, including a no-go result when warranted. Gate: no post-test tuning is presented as held-out performance.
+Step 10 — Pilot and maintain deliberately
+Run a monitored pilot with reviewed investigations and independent fault ascertainment. Watch support, quality, workload and missed events. Refit only through the versioned replay/shadow/activation process in Section 11. Output: review log, activation/rollback procedure and revised evidence assessment. Gate: synthetic success alone does not authorise a claim of real-world effectiveness.
+Keep modules close to existing responsibilities: adapters, validation, references/features, detectors, distance profiles, incident state, grouping, evaluation and plotting. Use four notebooks: data exploration; references and features; fitting and policy selection; frozen evaluation and explanation. A fit, score, detect, group, evaluate, save and load interface suffices. Scoring never refits; plots never mutate models. Arbitrary streaming-chunk equivalence is a separate engineering contract, not an implied capability.
+Configuration records metric mapping, support, channel groups, feature profile, splits, estimator settings and the versioned hybrid/grouping policy. Every score/event retains detector ID, entity and channel scope, event and availability times, validity reason, model version and provenance. Matrix-profile outputs also retain eligible-bank support and neighbour identity.
+Verification area
+Required evidence
+Adapter and quality
+Units, duplicates, counters, denominators and missingness fixtures reconcile
+Mathematics
+Hand-worked residuals, features, CUSUM and distances agree; test covariance only if implemented
+Causality
+With fitted artifacts fixed, future mutations cannot change earlier scores, alerts or grouping decisions
+Fit boundaries
+Post-training mutations do not change fitted references, models or bank
+Selection isolation
+Test mutations cannot change development-selected configuration
+Replay
+Save/load, prefix/full replay and execution order preserve scores and emitted events
+Lifecycle
+Equality, one-decision opening, stride, gaps, recovery and administrative closure
+Grouping
+Anchor-span limit, deterministic assignment, no notification delay and no future rewrites
+Evaluation
+One-to-one matching, early matching, duplicates, boundaries and exposure arithmetic
+Portability
+One non-optical fixture with no GPON field requirement
+Test dependent columns, near-zero scales and all-constant fitting explicitly. Use tolerances appropriate to the operation and conditioning; require exact keys, masks and counts. Pin dependencies and record configuration, source revision, training row identities and data hashes. Avoid building elaborate infrastructure solely to enforce one-time test opening; an explicit run manifest, separate entry point and recorded data-access discipline are sufficient if they meet the actual environment’s controls.
+The historical benchmark remains unchanged. Work on development/industry-agnostic, preserving unrelated work and main. Reproduce the recorded source version in isolation before comparing. Consolidate only after useful comparisons run. Preserve failures, unsupported scenarios and computational cost in the decision record; no target failure justifies altering truth, changing the generator to favour a model or tuning against the final test.
+13 Decisions and boundaries of this revision
+Decision
+Justification and boundary
+Three separate main experiments
+Statistical, feature-based forest and subsequence novelty address different signals; comparison establishes whether that complementarity is useful
+Matrix-profile implementation required
+The requested route receives a real independent evaluation; deployment remains conditional
+Compact feature profile first
+Limits redundancy and dimensionality; the old eight-feature profile remains an auditable comparator
+Mahalanobis conditional
+Useful for some dependence failures, but not another compulsory model
+No automatic ensemble
+More routes create more alert opportunities; evaluate the whole policy under a fixed workload contract
+Clustering deferred
+Separate detection, regime modelling and investigation grouping; introduce a learned component only for a demonstrated need
+MATLAB as implementation evidence
+Borrow supported workflow concepts, without attributing our features, bank policy or results to MATLAB
+Company-agnostic interface, local validation
+Generic contracts transfer; performance and normality assumptions require application-specific evidence
+This specification and the accompanying version 4 Codex prompt supersede conflicting earlier instructions. They authorise implementation and controlled comparison, not an assertion that the models have already passed evaluation.
+14 References and limits of attribution
+The sources below support individual methods, evaluation concerns or architectural ideas. They do not validate this complete framework or establish its performance. Equations, grouping rules, feature profiles, acceptance criteria and implementation choices described as project decisions must be tested locally. Sources were reviewed on 5 October 2026; web documentation is version-dependent.
+[1] Gueta Y. Searching for Actionable Signals A Closer Look at Time Series Data Anomaly Detection. Anodot. Vendor description of per-metric normal behaviour and seasonality. Used for architectural context, not independent performance evidence.https://www.anodot.com/blog/closer-look-time-series-anomaly-detection/
+[2] Gueta Y. Anomaly Detection Techniques in Focus Multivariate and Univariate. Anodot. Describes grouping related metric anomalies after detection. The article does not specify this project’s joint detector or grouping algorithm.https://www.anodot.com/blog/anomaly-detection-techniques-focus-multivariate-univariate/
+[3] Schmidl S, Wenig P, Papenbrock T. Anomaly Detection in Time Series A Comprehensive Evaluation. PVLDB 15(9), 1779–1797, 2022. Broad empirical comparison supporting controlled local evaluation. DOI 10.14778/3538598.3538602.https://www.vldb.org/pvldb/vol15/p1779-wenig.pdf
+[4] Garg A, Zhang W, Samaran J, Savitha R, Foo CS. An Evaluation of Anomaly Detection and Diagnosis in Multivariate Time Series. IEEE TNNLS 33(6), 2508–2517, 2022. Evidence about channel-wise models, scoring choices and evaluation on the studied datasets. DOI 10.1109/TNNLS.2021.3105827.https://arxiv.org/abs/2109.11428
+[5] Hyndman RJ, Athanasopoulos G. Forecasting Principles and Practice, third edition, Section 10.5 Dynamic harmonic regression. OTexts, 2021. Supports Fourier representations of seasonality. The limited reference model here does not imply that an ARIMA error model has been implemented.https://otexts.com/fpp3/dhr.html
+[6] NIST SEMATECH e Handbook of Statistical Methods, Section 6.3.2.3 CUSUM Control Charts. Supports cumulative mean-shift monitoring and allowance/threshold interpretation. Classical operating properties do not automatically transfer to estimated autocorrelated residuals.https://www.itl.nist.gov/div898/handbook/pmc/section3/pmc323.htm
+[7] Scikit-learn LedoitWolf documentation. Documents shrinkage towards a scaled identity matrix and cites Ledoit and Wolf, A Well-Conditioned Estimator for Large-Dimensional Covariance Matrices, Journal of Multivariate Analysis 88(2), 365–411, 2004. Used for the estimator definition, not contamination robustness.https://scikit-learn.org/stable/modules/generated/sklearn.covariance.LedoitWolf.html
+[8] Scikit-learn IsolationForest documentation. Supports the implementation interface and score_samples direction. Pin the installed version and verify its behaviour.https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.IsolationForest.html
+[9] Yeh CC et al. Matrix Profile I All Pairs Similarity Joins for Time Series A Unifying View That Includes Motifs Discords and Shapelets. ICDM, 1317–1322, 2016. Foundation for nearest-neighbour subsequence profiles. DOI 10.1109/ICDM.2016.0179.https://sites.google.com/site/icdmstamp
+[10] STUMPY Finding Conserved Patterns Across Two Time Series. Documents directed AB joins. This project’s full-overlap exclusions, frozen bank, support rules and alert lifecycle are additional design choices.https://stumpy.readthedocs.io/en/latest/Tutorial_AB_Joins.html
+[11] Kim S, Choi K, Choi HS, Lee B, Yoon S. Towards a Rigorous Evaluation of Time-Series Anomaly Detection. AAAI 36(7), 7194–7201, 2022. Demonstrates inflation risks from point-adjusted evaluation. DOI 10.1609/aaai.v36i7.20680.https://ojs.aaai.org/index.php/AAAI/article/view/20680
+[12] MathWorks. timeSeriesIforestAD and Train and Test Machine Learning Anomaly Detector. Official windowed Isolation Forest workflow and configurable options. Introduced R2026a; reviewed documentation displays R2026b. Requires the named Time Series Anomaly Detection for MATLAB add-on; verify local dependencies. Does not prescribe this project’s features or tuning choices. https://www.mathworks.com/help/predmaint/ref/timeseriesiforestad.html
+[13] MathWorks. timeSeriesSpcAD. Official individual/EWMA process-control detector documentation. The CUSUM equations in this methodology come from the separate statistical design, not a claim that this wrapper implements CUSUM. https://www.mathworks.com/help/predmaint/ref/timeseriesspcad.html
+[14] MathWorks. Detecting Anomalies in Time Series Using Distance Methods. Official guide to subsequence distance, profiles, motifs and discords. Supports numerical primitives, not universal detection of every anomaly type. https://www.mathworks.com/help/predmaint/ug/detecting-anomalies-in-time-series-using-distance-based-methods.html
+[15] Liu FT, Ting KM, Zhou ZH. Isolation Forest. ICDM, 413–422, 2008. Original isolation-based anomaly detection method. DOI 10.1109/ICDM.2008.17. Temporal features and incident policy in this project are additional choices. https://cs.nju.edu.cn/zhouzh/zhouzh.files/publication/icdm08b.pdf
+[16] Lu Y, Wu R, Mueen A, Zuluaga MA, Keogh E. Matrix Profile XXIV: Scaling Time Series Anomaly Detection to Trillions of Datapoints and Ultra-fast Arriving Data Streams. KDD, 2022. Primary DAMP/left-discord work; linked version is the authors’ expanded paper. DOI 10.1145/3534678.3539271. The frozen-bank implementation proposed here is distinct from DAMP. https://www.cs.ucr.edu/~eamonn/DAMP_long_version.pdf
+The source review is focused on the decisions in this framework, rather than an exhaustive review of all anomaly-detection literature. Research and official documentation support components; the complete pipeline still requires the chronological, event-based evaluation specified above.
