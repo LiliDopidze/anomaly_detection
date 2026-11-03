@@ -86,7 +86,7 @@ def test_expanded_adapter_and_count_aggregation():
     )
     adapted = synthetic_adapter(data.columns.drop(["time", "device"])).transform(data)
     assert "upstream_rx_power_dbm" in set(adapted.metric_name)
-    aggregated = DataValidator("15min").transform(adapted)
+    aggregated = DataValidator("15min", source_interval="5min").transform(adapted)
     counts = aggregated.loc[aggregated.metric_name.eq(field)].set_index("timestamp")
     assert pd.isna(counts.value.iloc[0])
     assert counts.value.iloc[1] == 9

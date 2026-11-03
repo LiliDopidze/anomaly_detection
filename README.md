@@ -22,6 +22,42 @@ For local analysis, run the notebooks in order:
 5. `05_end_to_end_demo.ipynb`: reproduce saved scores and see company adaptation.
 6. `06_feature_importance.ipynb`: inspect global/local SHAP and feature correlations.
 
+### Research foundation branch: notebooks 00 and 01
+
+Start with `configs/foundation.yaml`: six ONTs, three ports and 90 days, plus small
+independent stress experiments. Run **00** to qualify the simulator and **01** to
+audit observations and compare simple baselines. The notebooks contain executed
+outputs, scientific interpretation and limitations. Read [METHOD.md](METHOD.md)
+for the research-backed decisions and [FOUNDATION_REVIEW.md](FOUNDATION_REVIEW.md)
+for validation evidence and remaining modelling blockers.
+
+In WSL, from this checkout's root, create a new environment and select its kernel
+in VS Code (Select Kernel → Python Environments → `.venv/bin/python`):
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+python -m pytest
+code .
+```
+
+For automated execution in that same environment:
+
+```bash
+python tools/execute_foundation.py
+```
+
+The runner saves successful notebook outputs in place. Dependencies are specified
+by compatible lower bounds; the generation manifest records the exact runtime.
+Changing the generator, resolved defaults or runtime requires a fresh output path
+in the experiment config. Existing saved datasets are not silently reused.
+
+Notebooks 02–06 retain their original `configs/config.yaml` workflow and have not
+been redesigned. Their integration tests run, but the foundation experiment's
+new path is not automatically selected by those notebooks. Do not interpret
+compatibility as validation of their operational performance metrics.
+
 Or run development from Python:
 
 ```python
@@ -32,7 +68,7 @@ run = develop("configs/config.yaml")
 
 No data download is needed. The generator creates the source measurements and a
 separate truth file. A new experiment needs a new `output` path in the configuration.
-`prepare` reuses an existing dataset only when its saved settings match; `develop`
+`prepare` reuses an existing dataset only when settings and generation provenance match; `develop`
 refuses to overwrite a fitted model. Final assessment is a separate explicit call:
 
 ```python
@@ -50,11 +86,15 @@ filesystem changes. Load joblib model files only from trusted sources.
 
 ```text
 configs/config.yaml                 # One readable experiment configuration
+configs/foundation.yaml             # Small 00/01 qualification experiment
 notebooks/                          # Seven ordered local data-science notebooks
 src/optical_anomaly/
     generator.py                    # Expanded telemetry, static topology and fault truth
     optics.py                       # GPON-inspired directional FEC and invariants
-    adapter.py                      # Canonical definitions and explicit adaptation
+    contracts.py                    # Generic gauge/count definitions and constraints
+    pon.py                          # PON metric definitions and count groups
+    adapter.py                      # Explicit source mapping; configurable definitions
+    assessment.py                   # Generic sampling and scheduled coverage checks
     sources.py                      # Synthetic source mapping
     diagnostics.py                  # Native-data EDA and qualification checks
     validation.py                   # DataValidator: causal resampling, explicit gaps

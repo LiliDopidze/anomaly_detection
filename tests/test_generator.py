@@ -37,6 +37,7 @@ def test_stationary_noise_empty_and_zero_variance():
         {"fault_duration_median_hours": np.inf},
         {"entities": 1.5},
         {"interval_minutes": True},
+        {"interval_minutes": 7},
         {"seed": -1},
     ],
 )

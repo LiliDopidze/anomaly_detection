@@ -1,44 +1,10 @@
 """Explicit source mapping into the four-column long telemetry schema."""
 
 from dataclasses import dataclass
-from typing import Literal
 import numpy as np
 import pandas as pd
-
-
-@dataclass(frozen=True)
-class MetricDefinition:
-    unit: str
-    kind: Literal["gauge", "interval_count"]
-    description: str
-
-
-# Source: ETSI GS F5G 011 §§8.3–8.4; definitions, not synthetic distributions.
-CANONICAL_METRICS = {
-    "rx_power_dbm": MetricDefinition("dBm", "gauge", "Downstream Rx at ONT"),
-    "upstream_rx_power_dbm": MetricDefinition(
-        "dBm", "gauge", "Upstream Rx at OLT per ONT"
-    ),
-    "ont_tx_power_dbm": MetricDefinition("dBm", "gauge", "ONT transmit power"),
-    "olt_tx_power_dbm": MetricDefinition(
-        "dBm", "gauge", "Shared OLT port transmit power"
-    ),
-    "ont_temperature_c": MetricDefinition("C", "gauge", "ONT temperature"),
-    "olt_temperature_c": MetricDefinition("C", "gauge", "Shared OLT port temperature"),
-    "ber": MetricDefinition("ratio", "gauge", "Downstream pre-FEC BER"),
-    "upstream_ber": MetricDefinition("ratio", "gauge", "Upstream pre-FEC BER"),
-}
-for direction in ("downstream", "upstream"):
-    for kind in ("corrected", "uncorrectable", "total"):
-        # Source: ITU-T G.989.3 Table 14-1. Total means ALL received codewords.
-        # ETSI's upstream-FEC-total-block instead counts errored blocks only.
-        name = f"{direction}_fec_{kind}_codewords"
-        CANONICAL_METRICS[name] = MetricDefinition(
-            "interval_count",
-            "interval_count",
-            f"{direction.title()} {kind} codewords in preceding reporting interval",
-        )
-CANONICAL_UNITS = {name: item.unit for name, item in CANONICAL_METRICS.items()}
+from .contracts import MetricDefinition
+from .pon import CANONICAL_METRICS, CANONICAL_UNITS  # Backward-compatible exports.
 
 
 @dataclass
@@ -56,8 +22,12 @@ class TelemetryAdapter:
     timestamp_column: str = "timestamp"
     entity_column: str = "entity_id"
     timezone: str = "UTC"
+    definitions: dict[str, MetricDefinition] | None = None
 
     def transform(self, native: pd.DataFrame) -> pd.DataFrame:
+        definitions = (
+            CANONICAL_METRICS if self.definitions is None else self.definitions
+        )
         if not self.metrics:
             raise ValueError("Declare at least one source measurement")
         required = {self.timestamp_column, self.entity_column, *self.metrics}
@@ -78,9 +48,9 @@ class TelemetryAdapter:
             raise ValueError("Missing entity identifiers")
         frames = []
         for source, metric in self.metrics.items():
-            if metric not in CANONICAL_UNITS:
+            if metric not in definitions:
                 raise ValueError(f"Unsupported metric: {metric}")
-            definition = CANONICAL_METRICS[metric]
+            definition = definitions[metric]
             if self.kinds.get(metric) != definition.kind:
                 raise ValueError(
                     f"Declare {definition.kind} for {metric}; cumulative counters "
@@ -88,16 +58,18 @@ class TelemetryAdapter:
                 )
             values = pd.to_numeric(native[source], errors="raise").astype(float)
             unit = self.units.get(metric)
-            if CANONICAL_UNITS[metric] == "dBm" and unit in {"mW", "W"}:
+            if definition.unit == "dBm" and unit in {"mW", "W"}:
                 values = 10 * np.log10(
                     values.where(values > 0) * (1000 if unit == "W" else 1)
                 )
-            elif unit != CANONICAL_UNITS[metric]:
+            elif unit != definition.unit:
                 raise ValueError(f"Declare supported units for {metric}")
             values = values.where(np.isfinite(values))
-            if CANONICAL_UNITS[metric] == "ratio":
-                values = values.where(values.between(0, 1))
-            if CANONICAL_UNITS[metric] == "interval_count":
+            if definition.lower is not None:
+                values = values.where(values >= definition.lower)
+            if definition.upper is not None:
+                values = values.where(values <= definition.upper)
+            if definition.kind == "interval_count":
                 values = values.where((values >= 0) & (values == np.floor(values)))
             frames.append(
                 pd.DataFrame(

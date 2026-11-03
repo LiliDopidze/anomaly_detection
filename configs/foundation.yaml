@@ -1,0 +1,55 @@
+# Small, reproducible teaching experiment; numerical choices are not field estimates.
+# See METHOD.md. Keep the original full-scale config for later comparisons.
+generator:
+  seed: 42
+  entities: 6
+  days: 90
+  interval_minutes: 5
+  noise_db: 0.08
+  sensor_noise_db: 0.04
+  correlation_hours: 0.5
+  daily_amplitude_db: 0.25
+  missing_probability: 0.02
+  impact_threshold_dbm: -27.0
+  faults_per_entity: 2
+  impact_intervals: 3
+  downstream_receiver_reference_dbm: -27.0
+  upstream_receiver_reference_dbm: -28.0
+  receiver_offset_halfwidth_db: 1.5
+  fec_log10_noise_sd: 0.15
+  upstream_impact_threshold_dbm: -28.0
+  fault_duration_median_hours: 36.0
+  onts_per_splitter: 2
+  splitters_per_port: 1
+  ports_per_olt: 4
+  fault_probability: 0.7
+  recovery_hours: 2.0
+features:
+  window: 12
+  long_window_hours: 6.0
+  smoothing_hours: 1.0
+  allowance: 0.25
+  seasonal: true
+splits:
+- 0.4
+- 0.55
+- 0.75
+- 1.0
+incidents:
+  max_gap_hours: 6.0
+  high: 0.99
+  low: 0.8
+  opening_candidates:
+  - 2
+  - 3
+  - 6
+  closing_candidates:
+  - 3
+  - 6
+  nuisance_budget_per_1000_days: 5.0
+evaluation:
+  opportunity_intervals: 3
+  minimum_lead_minutes: 30.0
+model:
+  feature_set: temperature
+output: outputs/foundation_00_01

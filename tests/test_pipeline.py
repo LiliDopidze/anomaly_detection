@@ -60,6 +60,7 @@ def test_frozen_end_to_end(tmp_path, monkeypatch):
     assert (
         scores[["statistical", "isolation_forest", "combined"]]
         .stack()
+        .dropna()
         .between(0, 1)
         .all()
     )

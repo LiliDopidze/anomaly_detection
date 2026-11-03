@@ -34,15 +34,37 @@ class GeneratorConfig:
     onts_per_splitter: int = 8  # Scenario membership, not inferred optical loss.
     splitters_per_port: int = 2  # Scenario topology, not a mandated split ratio.
     ports_per_olt: int = 4  # Scenario capacity; last OLT may be partly populated.
+    fault_probability: float = (
+        1.0  # Per entity/port: compatibility default, not prevalence.
+    )
+    fault_scale: float = (
+        1.0  # Intervention strength for weak/strong sensitivity experiments.
+    )
+    fault_scope: str = "entity"  # A shared port intervention affects all its ONTs.
+    recovery_hours: float = 2.0  # Linear repair transition; not fitted repair physics.
+    collection_gap_hours: float = 0.0  # One randomly placed contiguous gap per entity.
+    weekly_amplitude_db: float = 0.0  # Optional normal-operation stress, not a fault.
+    drift_db_per_day: float = (
+        0.0  # Optional expected loss drift; requires context in practice.
+    )
+    noise_end_multiplier: float = 1.0  # Linear change of physical residual scale.
 
     def __post_init__(self) -> None:
         integer_fields = (
-            self.seed, self.entities, self.days, self.interval_minutes,
-            self.faults_per_entity, self.impact_intervals, self.onts_per_splitter,
-            self.splitters_per_port, self.ports_per_olt,
+            self.seed,
+            self.entities,
+            self.days,
+            self.interval_minutes,
+            self.faults_per_entity,
+            self.impact_intervals,
+            self.onts_per_splitter,
+            self.splitters_per_port,
+            self.ports_per_olt,
         )
         if any(type(value) is not int for value in integer_fields):
-            raise ValueError("Seed, sizes, cadence and interval counts must be integers")
+            raise ValueError(
+                "Seed, sizes, cadence and interval counts must be integers"
+            )
         if self.seed < 0:
             raise ValueError("Seed must be nonnegative")
         if not isinstance(self.impact_intervals, int) or self.impact_intervals < 1:
@@ -61,11 +83,23 @@ class GeneratorConfig:
                 self.impact_threshold_dbm,
                 self.upstream_impact_threshold_dbm,
                 self.fault_duration_median_hours,
+                self.recovery_hours,
+                self.collection_gap_hours,
+                self.weekly_amplitude_db,
+                self.drift_db_per_day,
+                self.noise_end_multiplier,
+                self.fault_scale,
             ]
         ).all():
             raise ValueError("Generator parameters must be finite")
         if self.days < 8 or self.entities < 1 or self.interval_minutes < 1:
             raise ValueError("Need >=8 days, >=1 entity and a positive interval")
+        if 1440 % self.interval_minutes:
+            raise ValueError("Synthetic cadence must evenly divide a UTC day")
+        if self.days * 1440 // self.interval_minutes < 150:
+            raise ValueError(
+                "Need at least 150 polls to define separated fault windows"
+            )
         if self.noise_db <= 0 or self.correlation_hours <= 0:
             raise ValueError("Noise and correlation time must be positive")
         if self.daily_amplitude_db < 0:
@@ -80,6 +114,28 @@ class GeneratorConfig:
             raise ValueError("Fault duration must be positive")
         if self.faults_per_entity not in (0, 1, 2):
             raise ValueError("Use zero, one or two separated faults per entity")
+        if not 0 <= self.fault_probability <= 1:
+            raise ValueError("Fault probability must be in [0, 1]")
+        if self.fault_scale <= 0:
+            raise ValueError(
+                "Fault scale must be positive; use faults_per_entity=0 for controls"
+            )
+        if self.fault_scope not in ("entity", "pon_port"):
+            raise ValueError("Fault scope must be entity or pon_port")
+        if (
+            min(
+                self.recovery_hours, self.collection_gap_hours, self.weekly_amplitude_db
+            )
+            < 0
+        ):
+            raise ValueError("Durations and amplitudes must be nonnegative")
+        if (
+            self.collection_gap_hours >= self.days * 24
+            or self.noise_end_multiplier <= 0
+        ):
+            raise ValueError(
+                "Gap must be shorter than the run and noise multiplier positive"
+            )
 
 
 def stationary_noise(
@@ -104,16 +160,16 @@ def stationary_noise(
 def fault_signature(
     kind: str, size: int, step_hours: float, rng: np.random.Generator
 ) -> np.ndarray:
-    """Signed dB perturbation; distribution changes at the first fault sample."""
-    elapsed = np.arange(size) * step_hours
+    """Signed dB perturbation; gradual faults have no fixed onset jump."""
+    elapsed = (np.arange(size) + 1) * step_hours
     if kind == "random_walk":
         # Assumed drift -0.15 dB/hour and diffusion 0.06 dB/sqrt(hour).
         increments = rng.normal(-0.15 * step_hours, 0.06 * np.sqrt(step_hours), size)
-        return -0.2 + np.cumsum(increments)  # Assumed 0.2 dB initial loss.
+        return np.cumsum(increments)
     if kind == "exponential":
-        # Assumed 0.2/0.35 dB scales, 12-hour growth, cap after 36 hours.
+        # Assumed 0.35 dB scale, 12-hour growth, cap after 36 hours.
         # This is exponential attenuation in dB, not a fibre ageing law.
-        return -0.2 - 0.35 * np.expm1(np.minimum(elapsed / 12, 3))
+        return -0.35 * np.expm1(np.minimum(elapsed / 12, 3))
     if kind == "variance_shift":
         # Assumed added 0.5 dB SD and 0.5-hour decay; includes both signs.
         return stationary_noise(size, 0.5, np.exp(-step_hours / 0.5), rng)
@@ -146,7 +202,10 @@ def _port_optics(
     temperature = 35 + 2 * np.sin(2 * np.pi * hours / 24)  # Assumed 35 +/- 2 C.
     temperature += stationary_noise(
         # Assumed 0.5 C SD and six-hour correlation time (360 minutes).
-        size, 0.5, np.exp(-config.interval_minutes / 360), rng
+        size,
+        0.5,
+        np.exp(-config.interval_minutes / 360),
+        rng,
     )
     transmit = 3 + 0.005 * (temperature - 35)  # Assumed 3 dBm, 0.005 dB/C.
     # Assumed 0.03 dB SD and one-hour correlation time.
@@ -172,9 +231,12 @@ def _normal_optics(
     path_loss = rng.uniform(23, 27) + config.daily_amplitude_db * np.sin(
         2 * np.pi * hours / 24 + phase
     )
-    path_loss += stationary_noise(
+    residual = stationary_noise(
         size, config.noise_db, np.exp(-dt / config.correlation_hours), rng
     )
+    path_loss += residual * np.linspace(1, config.noise_end_multiplier, size)
+    path_loss += config.weekly_amplitude_db * np.sin(2 * np.pi * hours / 168 + phase)
+    path_loss += config.drift_db_per_day * hours / 24
     return {
         "rx_dbm": olt_tx - path_loss,
         # Assumed shared fluctuations and 0.4--1.2 dB directional offset.
@@ -209,19 +271,32 @@ def _inject_fault(
 ) -> dict:
     dt = config.interval_minutes / 60
     # Assumed separated development/test scenarios after a healthy baseline.
-    left, right = [(0.57, 0.72), (0.78, 0.96)][number]
-    onset = int(len(times) * rng.uniform(left, left + 0.02))
+    left, right = [(0.56, 0.74), (0.77, 0.98)][number]
+    onset = int(len(times) * rng.uniform(left, right - 0.02))
     # Assumed lognormal duration with log-SD 0.5; not fitted repair statistics.
     duration = rng.lognormal(np.log(config.fault_duration_median_hours), 0.5)
-    stop = min(int(len(times) * right), onset + max(2, int(duration / dt)))
+    available = int(len(times) * right) - onset
+    recovery_size = min(int(np.ceil(config.recovery_hours / dt)), available - 2)
+    active_size = min(max(2, int(np.ceil(duration / dt))), available - recovery_size)
+    recovery_start = onset + active_size
+    stop = recovery_start + recovery_size
     # Balanced experimental cases; this does not estimate fault prevalence.
-    kind = ("random_walk", "exponential", "variance_shift")[(entity + number) % 3]
-    signature = fault_signature(kind, stop - onset, dt, rng)
-    severity = rng.uniform(0.4, 1.4)  # Assumed multiplicative fault severity.
-    delta = signature * severity
+    per_port = config.onts_per_splitter * config.splitters_per_port
+    scope_key = entity if config.fault_scope == "entity" else entity // per_port
+    kind = ("random_walk", "exponential", "variance_shift")[(scope_key + number) % 3]
+    severity = config.fault_scale * rng.uniform(0.4, 1.4)
+    signature = fault_signature(kind, active_size + recovery_size, dt, rng)
+    delta = signature[:active_size] * severity
+    if recovery_size:
+        repair = np.linspace(1, 0, recovery_size + 1)[:-1]
+        if kind == "variance_shift":
+            # Reduce variance rather than freezing a single stochastic excursion.
+            delta = np.r_[delta, severity * repair * signature[active_size:]]
+        else:
+            delta = np.r_[delta, delta[-1] * repair]
     optics["rx_dbm"][onset:stop] += delta
     directional_rng = np.random.default_rng(
-        np.random.SeedSequence([config.seed, entity, 4])
+        np.random.SeedSequence([config.seed, scope_key, 4])
     )
     upstream_multiplier = directional_rng.uniform(0.8, 1.4)  # Assumed coupling.
     optics["upstream_rx_dbm"][onset:stop] += upstream_multiplier * delta
@@ -243,6 +318,10 @@ def _inject_fault(
         "observable_onset_time": times[onset + visible[0]] if len(visible) else pd.NaT,
         "impact_time": times[onset + confirmed] if confirmed is not None else pd.NaT,
         "end_time": times[stop],
+        "recovery_start_time": times[recovery_start],
+        "cause_id": f"{config.fault_scope}-{scope_key:03d}-{number}",
+        "scope": config.fault_scope,
+        "duration_truncated": active_size < int(np.ceil(duration / dt)),
     }
 
 
@@ -253,12 +332,26 @@ def _simulate_entity(
     sensor = np.random.default_rng(np.random.SeedSequence([config.seed, entity, 1]))
     collection = np.random.default_rng(np.random.SeedSequence([config.seed, entity, 2]))
     optics = _normal_optics(config, entity, len(times), physics)
-    # Assumed missing completely at random; no outage-related missingness.
+    # Collection is independent of physics; informative outage loss is not modelled.
     missing = collection.random(len(times)) < config.missing_probability
-    faults = [
-        _inject_fault(config, entity, number, times, optics, missing, physics)
-        for number in range(config.faults_per_entity)
-    ]
+    gap_size = int(np.ceil(config.collection_gap_hours * 60 / config.interval_minutes))
+    if gap_size:
+        start = collection.integers(0, len(times) - gap_size + 1)
+        missing[start : start + gap_size] = True
+    per_port = config.onts_per_splitter * config.splitters_per_port
+    scope_key = entity if config.fault_scope == "entity" else entity // per_port
+    allocation = np.random.default_rng(
+        np.random.SeedSequence([config.seed, scope_key, 5])
+    )
+    faults = []
+    if allocation.random() < config.fault_probability:
+        for number in range(config.faults_per_entity):
+            fault_rng = np.random.default_rng(
+                np.random.SeedSequence([config.seed, scope_key, 6, number])
+            )
+            faults.append(
+                _inject_fault(config, entity, number, times, optics, missing, fault_rng)
+            )
     per_port = config.onts_per_splitter * config.splitters_per_port
     port_start = entity // per_port * per_port
     members = min(per_port, config.entities - port_start)
@@ -315,5 +408,13 @@ def generate(config: GeneratorConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
         "observable_onset_time",
         "impact_time",
         "end_time",
+        "recovery_start_time",
+        "cause_id",
+        "scope",
+        "duration_truncated",
     ]
-    return pd.concat(frames, ignore_index=True), pd.DataFrame(faults, columns=columns)
+    truth = pd.DataFrame(faults, columns=columns)
+    for column in columns:
+        if column.endswith("_time"):
+            truth[column] = pd.to_datetime(truth[column], utc=True)
+    return pd.concat(frames, ignore_index=True), truth

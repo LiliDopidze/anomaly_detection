@@ -1,0 +1,135 @@
+{
+  "base_revision": "3333e789590ded14dd313ef42ffd32fd073b68a7",
+  "branch": "codex/scientific-foundation-00-01",
+  "pytest": {
+    "passed": 133,
+    "elapsed_seconds": 20.49,
+    "scope": "Full suite, including disposable downstream integration; executed locally on macOS, Python 3.13."
+  },
+  "notebooks": {
+    "00_generate_and_diagnose.ipynb": {
+      "executed_cells": 9,
+      "figures": 4,
+      "errors": [],
+      "sha256": "b23a4212f86a241666c68f9cf280364b8c56eaaf785c15efe2a4728bae0afaeb"
+    },
+    "01_canonical_eda.ipynb": {
+      "executed_cells": 8,
+      "figures": 4,
+      "errors": [],
+      "sha256": "abfe12a5110a68ab27288a87780ebb2edd4a732a18502557560b288bb245494f"
+    }
+  },
+  "reference": {
+    "entities": 6,
+    "days": 90,
+    "cadence_minutes": 5,
+    "seed": 42,
+    "expected_training_slots_per_entity": 10368,
+    "rx_coverage_min": 0.9782986111111112,
+    "rx_coverage_max": 0.9810956790123457,
+    "daily_amplitude_db_min": 0.24642817938557893,
+    "daily_amplitude_db_max": 0.25641768191875897,
+    "variance_ratio_min": 0.9572803954821246,
+    "variance_ratio_max": 1.0601039065516586,
+    "residual_lag1_min": 0.6645166564972589,
+    "residual_lag1_max": 0.6890245823155899,
+    "expected_lag1": 0.6771853799124913,
+    "daily_holdout_skill_median": 0.7830970096964291,
+    "weekly_skill_increment_median": -0.0013223443852148353
+  },
+  "sensitivity": {
+    "8-hour collection gap": {
+      "variance_ratio_min": 0.9975,
+      "variance_ratio_max": 1.02105,
+      "coverage_mean": 0.96939,
+      "longest_gap_hours": 8.0
+    },
+    "changing variance": {
+      "variance_ratio_min": 3.60075,
+      "variance_ratio_max": 3.71442,
+      "coverage_mean": 0.98021,
+      "longest_gap_hours": 0.75
+    },
+    "expected drift": {
+      "variance_ratio_min": 4.72651,
+      "variance_ratio_max": 4.75855,
+      "coverage_mean": 0.98021,
+      "longest_gap_hours": 0.75
+    },
+    "reference": {
+      "variance_ratio_min": 0.99976,
+      "variance_ratio_max": 1.02242,
+      "coverage_mean": 0.98021,
+      "longest_gap_hours": 0.75
+    },
+    "weekly cycle": {
+      "variance_ratio_min": 3.3129,
+      "variance_ratio_max": 3.45605,
+      "coverage_mean": 0.98021,
+      "longest_gap_hours": 0.75
+    }
+  },
+  "fault_strength": {
+    "0.1": {
+      "events": 9,
+      "impact_events": 0,
+      "warning_proxy_events": 0
+    },
+    "0.5": {
+      "events": 9,
+      "impact_events": 1,
+      "warning_proxy_events": 1
+    },
+    "1.0": {
+      "events": 9,
+      "impact_events": 2,
+      "warning_proxy_events": 2
+    }
+  },
+  "environment": {
+    "schema_version": 2,
+    "generator": {
+      "seed": 42,
+      "entities": 6,
+      "days": 90,
+      "interval_minutes": 5,
+      "noise_db": 0.08,
+      "sensor_noise_db": 0.04,
+      "correlation_hours": 0.5,
+      "daily_amplitude_db": 0.25,
+      "missing_probability": 0.02,
+      "impact_threshold_dbm": -27.0,
+      "faults_per_entity": 2,
+      "impact_intervals": 3,
+      "downstream_receiver_reference_dbm": -27.0,
+      "upstream_receiver_reference_dbm": -28.0,
+      "receiver_offset_halfwidth_db": 1.5,
+      "fec_log10_noise_sd": 0.15,
+      "upstream_impact_threshold_dbm": -28.0,
+      "fault_duration_median_hours": 36.0,
+      "onts_per_splitter": 2,
+      "splitters_per_port": 1,
+      "ports_per_olt": 4,
+      "fault_probability": 0.7,
+      "fault_scale": 1.0,
+      "fault_scope": "entity",
+      "recovery_hours": 2.0,
+      "collection_gap_hours": 0.0,
+      "weekly_amplitude_db": 0.0,
+      "drift_db_per_day": 0.0,
+      "noise_end_multiplier": 1.0
+    },
+    "source_sha256": {
+      "generator.py": "e40b3df56d4037c11783fbbff638c7d3dd56df3545d7ed62e8d882f269ba57a0",
+      "optics.py": "3f8ecdebb275e273c0588343d49e522bea218889339b3cd5cfd1c0ccccd4c711"
+    },
+    "python": "3.13.2",
+    "packages": {
+      "numpy": "2.5.4",
+      "pandas": "3.1.0",
+      "scipy": "1.18.1",
+      "pyarrow": "26.0.0"
+    }
+  }
+}

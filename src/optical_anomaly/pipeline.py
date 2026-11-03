@@ -1,8 +1,11 @@
 """Small orchestration: fit, calibrate, tune only on validation, seal final test."""
 
 from pathlib import Path
+from dataclasses import asdict
+from importlib.metadata import version
 import hashlib
 import json
+import platform
 import joblib
 import pandas as pd
 import yaml
@@ -114,10 +117,22 @@ def check_calibration_truth(truth: pd.DataFrame, calibration_end: pd.Timestamp) 
 
 
 def prepare(config_path: str | Path) -> Path:
-    """Generate once; preserve existing fixtures only when settings match."""
+    """Generate once; reuse only matching settings, code and resolved defaults."""
     config_text = Path(config_path).read_text()
     settings = yaml.safe_load(config_text)
     config = GeneratorConfig(**settings["generator"])
+    source = Path(__file__).parent
+    provenance = {
+        "schema_version": 2,
+        "generator": asdict(config),
+        "source_sha256": {
+            name: digest(source / name) for name in ("generator.py", "optics.py")
+        },
+        "python": platform.python_version(),
+        "packages": {
+            name: version(name) for name in ("numpy", "pandas", "scipy", "pyarrow")
+        },
+    }
     fractions = settings["splits"]
     if len(fractions) != 4 or not (
         0 < fractions[0] < fractions[1] <= 0.55 < fractions[2] < fractions[3] == 1
@@ -128,6 +143,16 @@ def prepare(config_path: str | Path) -> Path:
         previous = json.loads((run / "settings.json").read_text())
         if previous != settings:
             raise ValueError("Settings changed; choose a new output folder")
+        manifest_path = run / "generation_manifest.json"
+        if not manifest_path.exists():
+            raise ValueError(
+                "Run lacks generation provenance; choose a new output folder"
+            )
+        previous_manifest = json.loads(manifest_path.read_text())
+        if previous_manifest != provenance:
+            raise ValueError(
+                "Generation code, defaults or environment changed; choose a new output folder"
+            )
         check_calibration_truth(
             pd.read_parquet(run / "ground_truth.parquet"),
             run_split(settings).calibration_end,
@@ -147,6 +172,7 @@ def prepare(config_path: str | Path) -> Path:
     (run / "settings.json").write_text(json.dumps(settings, indent=2))
     # Preserve inline evidence and assumptions; JSON does not retain comments.
     (run / "config.yaml").write_text(config_text)
+    (run / "generation_manifest.json").write_text(json.dumps(provenance, indent=2))
     return run
 
 
@@ -208,7 +234,11 @@ def develop(config_path: str | Path) -> Path:
         run / "feature_set_comparison.csv", index=False
     )
     keys = [
-        "detector", "high", "low", "opening_intervals", "closing_intervals",
+        "detector",
+        "high",
+        "low",
+        "opening_intervals",
+        "closing_intervals",
         "max_gap_hours",
     ]
     # Telemetry scope is explicit. Comparison and importance never drop features.

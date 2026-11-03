@@ -14,9 +14,9 @@ def observation_quality(
     fault label; these indicators explain abstention and feature warm-up.
     """
     frames = []
-    for _, group in telemetry.loc[
-        telemetry.metric_name.eq("rx_power_dbm")
-    ].groupby("entity_id"):
+    for _, group in telemetry.loc[telemetry.metric_name.eq("rx_power_dbm")].groupby(
+        "entity_id"
+    ):
         group = group.sort_values("timestamp").reset_index(drop=True)
         observed = pd.Series(np.isfinite(group.value), index=group.index)
         gaps = group.timestamp.diff().ne(pd.Timedelta(minutes=interval_minutes))
@@ -24,9 +24,9 @@ def observation_quality(
         result = group[["entity_id", "timestamp"]].copy()
         result["current_observed"] = observed
         result["recent_observed_fraction"] = observed.rolling(window).mean()
-        result["missing_run_intervals"] = (~observed).groupby(
-            (observed | gaps).cumsum()
-        ).cumsum()
+        result["missing_run_intervals"] = (
+            (~observed).groupby((observed | gaps).cumsum()).cumsum()
+        )
         # Carry only the last timestamp for age calculation, never sensor values.
         last_observation = group.timestamp.where(observed).ffill()
         result["minutes_since_observation"] = (
@@ -273,8 +273,6 @@ def dependence_reports(
     Residual fits are descriptive, never passed to the detector. No p-value or
     automatic feature-selection rule is implied by a correlation coefficient.
     """
-    from .features import daily_design
-
     correlations, autocorrelations = [], []
     for entity, group in telemetry.groupby("entity_id"):
         wide = group.pivot(index="timestamp", columns="metric_name", values="value")
@@ -282,7 +280,9 @@ def dependence_reports(
             wide.index.min(), wide.index.max(), freq=f"{interval_minutes}min"
         )
         wide = wide.reindex(grid)
-        design = daily_design(pd.Series(grid))
+        days = (grid - grid[0]).total_seconds().to_numpy() / 86400
+        phase = 2 * np.pi * days
+        design = np.column_stack([np.ones(len(grid)), np.sin(phase), np.cos(phase)])
         residual = pd.DataFrame(np.nan, index=grid, columns=wide.columns)
         for metric in wide:
             valid = wide[metric].notna()

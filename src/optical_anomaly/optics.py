@@ -31,9 +31,7 @@ def fec_probabilities(ber: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     with np.errstate(divide="ignore"):
         symbol_error = -np.expm1(8 * np.log1p(-ber))
     uncorrectable = binom.sf(CORRECTABLE_SYMBOLS, CODEWORD_BYTES, symbol_error)
-    corrected = np.clip(
-        binom.sf(0, CODEWORD_BYTES, symbol_error) - uncorrectable, 0, 1
-    )
+    corrected = np.clip(binom.sf(0, CODEWORD_BYTES, symbol_error) - uncorrectable, 0, 1)
     return corrected, uncorrectable
 
 
@@ -84,8 +82,11 @@ def error_telemetry(
     result = {}
     for direction, power, threshold, rate, allocation in (
         (
-            "downstream", downstream, receiver_references[0],
-            DOWNSTREAM_BITS_PER_SECOND, np.ones(n),
+            "downstream",
+            downstream,
+            receiver_references[0],
+            DOWNSTREAM_BITS_PER_SECOND,
+            np.ones(n),
         ),
         (
             "upstream",
@@ -148,17 +149,33 @@ def validate_generated(
         prefix = f"{direction}_fec_"
         counts = native[
             [prefix + x + "_codewords" for x in ("corrected", "uncorrectable", "total")]
-        ].dropna()
-        checks[f"{direction}_count_conservation"] = bool(
-            ((counts.iloc[:, 0] + counts.iloc[:, 1]) <= counts.iloc[:, 2]).all()
+        ]
+        available = counts.notna().sum(axis=1)
+        checks[f"{direction}_paired_count_availability"] = bool(
+            available.isin([0, 3]).all()
         )
+        complete = counts.dropna()
+        checks[f"{direction}_count_conservation"] = bool(
+            ((complete.iloc[:, 0] + complete.iloc[:, 1]) <= complete.iloc[:, 2]).all()
+        )
+        present = counts.stack().dropna()
         checks[f"{direction}_nonnegative_integer_counts"] = bool(
-            ((counts >= 0) & (counts == np.floor(counts))).all().all()
+            (
+                np.isfinite(present) & (present >= 0) & (present == np.floor(present))
+            ).all()
         )
     # Schema check only: excluding BER names cannot prove absence of leakage.
-    checks["no_label_leaking_columns"] = not bool(
-        {"ber", "upstream_ber"}.intersection(native.columns)
+    checks["no_truth_or_latent_ber_columns"] = not bool(
+        (set(truth.columns) | {"ber", "upstream_ber"}).intersection(native.columns)
     )
+    if "recovery_start_time" in truth:
+        checks["recovery_inside_fault"] = bool(
+            (
+                truth.recovery_start_time.ge(truth.onset_time)
+                & truth.recovery_start_time.le(truth.end_time)
+            ).all()
+        )
+    checks["unique_fault_ids"] = bool(truth.fault_id.is_unique)
     ordered = truth.sort_values(["entity_id", "onset_time"])
     previous_end = ordered.groupby("entity_id").end_time.shift()
     checks["faults_do_not_overlap"] = bool(
