@@ -1,6 +1,7 @@
-"""Execute Notebook 01 using this interpreter and save successful outputs."""
+"""Execute a project notebook using this interpreter; save only after success."""
 
 import json
+import argparse
 from pathlib import Path
 import sys
 import tempfile
@@ -12,8 +13,12 @@ from jupyter_client.kernelspec import KernelSpecManager
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("notebook", nargs="?", default="01_data_assessment.ipynb",
+                        choices=["01_data_assessment.ipynb", "02_expected_behaviour.ipynb"])
+    args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    path = root / "notebooks/01_data_assessment.ipynb"
+    path = root / "notebooks" / args.notebook
     notebook = nbformat.read(path, as_version=4)
     nbformat.validate(notebook)
     with tempfile.TemporaryDirectory(prefix="assessment-kernel-") as directory:

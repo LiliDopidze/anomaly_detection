@@ -115,7 +115,8 @@ verification rather than automatic conversion. There is no registry, plugin syst
 or automatic model selector.
 
 The prior four-column NAB contract is intentionally replaced on this development
-branch by aligned wide measurements. No downstream notebooks exist on this branch.
+branch by aligned wide measurements. Notebook 02 now builds on this contract;
+detector calibration and event evaluation remain future work for Notebook 03.
 The earlier package version is preserved in history; this is not a drop-in change
 for the NAB loader.
 
@@ -138,3 +139,66 @@ sensor calibration, incomplete incident labels and one inconsistent maintenance
 date remain limitations. There are only four reported incidents from one asset.
 See the executed notebook for measured findings and the proposed next step:
 interpretable expected-behaviour baselines, with and without valve-command context.
+
+## Notebook 02: expected behaviour
+
+Open **[02_expected_behaviour.ipynb](notebooks/02_expected_behaviour.ipynb)** after
+Notebook 01. Its first section explains all 15 signals and their possible
+interpretations. It uses the same cached source and protects the same final period.
+
+```bash
+python -m pytest
+python tools/execute_assessment.py 02_expected_behaviour.ipynb
+```
+
+The existing runner still defaults to Notebook 01. No additional dependencies are
+required. Both notebooks can be executed independently after package installation.
+
+Notebook 02 compares overall and command-conditioned medians and central 90%
+empirical ranges on native observations. It fits 1–14 February and assesses 15–21
+February, then fits 1–21 February and assesses 22–29 February. The full February
+fit is frozen for March–May. Unsupported commands remain unavailable rather than
+silently receiving a global conditional reference. Support screens of 100 finite
+readings on three days are explicit engineering choices, not effective sample sizes.
+
+Oil temperature additionally compares a fixed minute-target reference, persistence
+and a small linear model with temperature lags of one/five minutes and preceding
+minute loading fraction. Minute means become available at bin end; incomplete
+bins, unknown context and collection gaps reset history. Equal calendar grids
+retain unavailable periods in the denominator. Every error comparison uses common
+eligible targets and separately reports each method's availability. Native and
+minute-target errors are not ranked together. Temporal reference ranges are built
+from the two out-of-fit February error samples, then assessed only in development.
+
+Command durations/transitions and TP3–Reservoirs agreement remain complementary
+checks. Complete durations are sampling bounds, subject to censoring and selection
+bias. Short unresolved command combinations can split a run without establishing a
+physical machine transition. Neither a small forecast error nor pressure agreement
+establishes absence of a fault. Empirical range coverage is not an alarm metric.
+
+Implementation additions are intentionally small:
+
+| File | Responsibility |
+| --- | --- |
+| `notebooks/02_expected_behaviour.ipynb` | Executed comparisons, interpretations and Notebook 03 handover |
+| `src/ts_anomaly/baselines.py` | Explicit period fitting/application, common-target comparisons and gap-aware histories |
+| `tests/test_baselines.py` | Hand-calculated references, availability, gaps and future-data independence |
+| `tools/execute_assessment.py` | Existing runner, extended to accept either notebook filename |
+
+The notebook writes parameters, availability/comparison tables, example native
+residuals, minute-temperature residuals, pressure residuals, command diagnostics and
+a source/configuration/version manifest under ignored `outputs/metropt_expected/`.
+The committed notebook contains compact figures and tables, not the raw data.
+
+The results support command references for TP2, H1 and motor current, but show
+little MAE benefit for stored pressure or temperature. The temperature linear model
+does not beat persistence consistently across the February folds, and the empirical
+February error ranges under-cover development observations. These are limitations
+to carry into Notebook 03, not evidence to silently widen limits or retrain on
+reported incidents. No alert thresholds, detection accuracy or early-warning
+performance are claimed.
+
+Validation for this implementation: 33 focused tests pass. Both notebooks execute
+end to end; Notebook 01 and its 17 CSV outputs are unchanged. Notebook 02 contains
+16 executed code cells and seven inspected figures; all 21 generated CSV outputs
+are byte-identical on repeat execution in the documented environment.
