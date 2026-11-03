@@ -43,10 +43,6 @@
       "sha256": "1e1fbc4601321aad8d0f8b3784c8134299379f68f6c1f7777565f8ffd57ab6b1"
     },
     {
-      "path": "labels/combined_labels.json",
-      "sha256": "98724014c162fcfd4be605683517f194051a54e98756c53667bd33ddbc644d9b"
-    },
-    {
       "path": "LICENSE.txt",
       "sha256": "0a0b4d0b10cb1f7ed9ab2993ef93defc03447e6eba9daca1315dd32dae4877e3"
     }

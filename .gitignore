@@ -1,44 +1,25 @@
-# Python
+# Python and local environments
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
-.coverage
-htmlcov/
 .venv/
 venv/
 build/
 dist/
 
-# Jupyter and editors
+# Notebook/editor state
 .ipynb_checkpoints/
 .DS_Store
 .idea/
 .vscode/
 
-# Credentials and local configuration
+# Local credentials
 .env
 .env.*
 *.pem
 *.key
 
-# Data and materialised outputs stay outside Git (local disk, Drive or object storage)
-data/
-Data/
-sources/
-fixtures/
-outputs/
-contracts/
-bootstrap/
-week1_outputs/
-*.parquet
-*.csv
-
-# Local reference documents and one-off tooling are not team deliverables.
-# Team instructions live in README.md and the five notebooks.
-/docs/
-/scripts/
-legacy/attachments/
-
-# Evaluation-only truth is separate from model data.
-/evaluation/
+# Reproducible downloads and generated assessment outputs
+/data/
+/outputs/
