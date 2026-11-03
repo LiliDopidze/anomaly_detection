@@ -16,13 +16,13 @@ def main() -> None:
     path = root / "notebooks/01_data_assessment.ipynb"
     notebook = nbformat.read(path, as_version=4)
     nbformat.validate(notebook)
-    with tempfile.TemporaryDirectory(prefix="nab-kernel-") as directory:
+    with tempfile.TemporaryDirectory(prefix="assessment-kernel-") as directory:
         kernel = Path(directory) / "kernels/python3"
         kernel.mkdir(parents=True)
         (kernel / "kernel.json").write_text(json.dumps({
             "argv": [sys.executable, "-m", "ipykernel_launcher", "-f", "{connection_file}"],
-            "display_name": "NAB assessment", "language": "python",
-            "env": {"MPLCONFIGDIR": str(Path(directory) / "mpl"),
+            "display_name": "Time-series assessment", "language": "python",
+            "env": {"MPLCONFIGDIR": str(root / "outputs/.matplotlib"),
                     "MPLBACKEND": "module://matplotlib_inline.backend_inline"},
         }))
         manager = KernelManager(
@@ -30,7 +30,7 @@ def main() -> None:
             kernel_spec_manager=KernelSpecManager(kernel_dirs=[str(kernel.parent)]),
         )
         client = NotebookClient(
-            notebook, km=manager, timeout=180, record_timing=False,
+            notebook, km=manager, timeout=600, record_timing=False,
             resources={"metadata": {"path": str(root)}},
         )
         try:

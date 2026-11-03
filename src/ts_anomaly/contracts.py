@@ -1,7 +1,6 @@
-"""Measurement definitions and the four-column observation representation."""
+"""Small measurement contract for aligned, wide sensor observations."""
 
 from dataclasses import dataclass
-from math import isfinite
 from typing import Literal
 
 import pandas as pd
@@ -9,47 +8,35 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class MetricDefinition:
-    """Semantics, not a fitted model. None means the unit is undocumented."""
+    """Documented semantics; unknown units and encodings remain explicit."""
 
     description: str
     unit: str | None
-    kind: Literal["gauge", "interval_count"] = "gauge"
-    lower: float | None = None
-    upper: float | None = None
+    kind: Literal["gauge", "state", "pulse"]
+    role: str
+    allowed_values: tuple | None = None
+    note: str = ""
 
     def __post_init__(self) -> None:
-        if self.kind not in ("gauge", "interval_count"):
-            raise ValueError("Cumulative counters need an explicit conversion first")
-        bounds = (self.lower, self.upper)
-        if any(bound is not None and not isfinite(bound) for bound in bounds):
-            raise ValueError("Specified bounds must be finite")
-        if None not in bounds and self.lower > self.upper:
-            raise ValueError("Lower bound exceeds upper bound")
+        if self.kind not in ("gauge", "state", "pulse"):
+            raise ValueError("Unsupported measurement kind")
 
 
-def validate_schema(
-    observations: pd.DataFrame, definitions: dict[str, MetricDefinition]
-) -> None:
-    """Check representation; duplicates, order and value quality are audited later.
+def validate_schema(data: pd.DataFrame, definitions: dict[str, MetricDefinition]) -> None:
+    """Check structure; duplicates and value problems remain for the audit.
 
-    Timestamps may be naive when their timezone is unknown. This does not permit
-    aligning unrelated sources as if they shared an absolute time coordinate.
+    One row is one entity at one recorded time. Naive timestamps are permitted
+    when the source timezone is unknown; they must not be interpreted as UTC.
     """
-    expected = {"timestamp", "entity_id", "metric_name", "value"}
-    if set(observations.columns) != expected or len(observations.columns) != 4:
-        raise ValueError("Expected timestamp, entity_id, metric_name and value only")
-    if observations.empty:
-        raise ValueError("No observations supplied")
-    if not pd.api.types.is_datetime64_any_dtype(observations.timestamp):
-        raise ValueError("Parse timestamps explicitly before validation")
-    if observations.timestamp.isna().any():
+    expected = {"timestamp", "entity_id", *definitions}
+    if set(data.columns) != expected or not data.columns.is_unique:
+        raise ValueError("Columns must be timestamp, entity_id and declared measurements only")
+    if not pd.api.types.is_datetime64_any_dtype(data.timestamp):
+        raise ValueError("Parse timestamps explicitly")
+    if data.timestamp.isna().any():
         raise ValueError("Missing timestamps")
-    for key in ("entity_id", "metric_name"):
-        values = observations[key]
-        if values.isna().any() or values.astype(str).str.strip().eq("").any():
-            raise ValueError(f"Missing {key}")
-    unknown = set(observations.metric_name).difference(definitions)
-    if unknown:
-        raise ValueError(f"Missing metric definitions: {sorted(unknown)}")
-    if not pd.api.types.is_numeric_dtype(observations.value):
-        raise ValueError("Values must be numeric; unknown values should be NaN")
+    if data.entity_id.isna().any() or data.entity_id.astype(str).str.strip().eq("").any():
+        raise ValueError("Missing entity identifiers")
+    for name, definition in definitions.items():
+        if definition.kind != "state" and not pd.api.types.is_numeric_dtype(data[name]):
+            raise ValueError(f"Expected numeric measurements: {name}")

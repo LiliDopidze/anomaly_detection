@@ -6,12 +6,12 @@ build-backend = "setuptools.build_meta"
 name = "time-series-anomaly-blueprint"
 version = "0.1.0"
 description = "Explicit data contracts and exploratory time-series assessment"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-  "matplotlib>=3.8",
-  "numpy>=1.26",
-  "pandas>=2.1",
-  "pyarrow>=15",
+  "matplotlib>=3.9,<4",
+  "numpy>=1.26,<2.4",
+  "pandas>=2.2,<3",
+  "statsmodels>=0.14,<0.15",
 ]
 
 [project.optional-dependencies]

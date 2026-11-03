@@ -1,0 +1,25 @@
+{
+  "dataset": "UCI MetroPT-3, 2020 recording",
+  "doi": "https://doi.org/10.24432/C5VW3R",
+  "license": "CC BY 4.0",
+  "source": {
+    "url": "https://archive.ics.uci.edu/static/public/791/metropt+3+dataset.zip",
+    "archive_sha256": "aab991a970e58210de853bb8078ce0e63abb4d9412fdc5c79792dae3d8e1721a",
+    "files": {
+      "MetroPT3(AirCompressor).csv": "db30ccb4ea402e3c8bf2c99db06e288d4f2a772f6928f9dbe26a920d69793e24",
+      "Data Description_Metro.pdf": "b00fac0e8899854078309bef4adaa480d82ecf14dc81c5097c3646973e824127"
+    }
+  },
+  "start": "2020-02-01 00:00:00",
+  "train_end": "2020-03-01 00:00:00",
+  "test_start": "2020-06-01 00:00:00",
+  "end": "2020-09-01 04:00:00",
+  "timezone": null,
+  "gap_threshold": "15s",
+  "diagnostic_frequency": "1min",
+  "minimum_samples_per_bin": 5,
+  "maximum_acf_lag_minutes": 1440,
+  "coverage_assumption": "Continuous collection over [start, end); occupied one-minute bins are availability, not sample completeness or equipment uptime.",
+  "aggregation_note": "Minute means are diagnostic only; at least five finite readings per sensor are required. No interpolation; digital signals remain at native timestamps.",
+  "split_policy": "February reference; March-May development; June through the recorded end held out. Report-free does not establish healthy operation. Full-timeline checks are restricted to structure and availability."
+}
