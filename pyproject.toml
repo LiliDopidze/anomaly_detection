@@ -24,7 +24,7 @@ dev = ["jupyter>=1.0", "nbclient>=0.10", "pytest>=8.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["optical_anomaly*"]
+include = ["optical_anomaly*", "ts_anomaly*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

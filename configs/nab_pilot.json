@@ -1,0 +1,54 @@
+{
+  "upstream_repository": "https://github.com/numenta/NAB",
+  "upstream_commit": "ea702d75cc2258d9d7dd35ca8e5e2539d71f3140",
+  "experiment_use": "Development only. Both full files are inspected; neither is an untouched test set.",
+  "timezone_policy": "Preserve timezone-unspecified recorded times. Do not invent UTC or align unrelated sources.",
+  "coverage_policy": "Assume a five-minute grid within each observed file span; no external activity schedule is supplied.",
+  "label_policy": "Inclusive benchmark windows, separate from observations; not verified failure onset/recovery intervals.",
+  "series": [
+    {
+      "path": "realKnownCause/machine_temperature_system_failure.csv",
+      "entity_id": "nab_machine_temperature",
+      "metric_name": "component_temperature",
+      "description": "Temperature of an internal component of an industrial machine",
+      "unit": null,
+      "kind": "gauge",
+      "cadence": "5min",
+      "unit_note": "Temperature unit is unspecified in the upstream data README; no C/F conversion.",
+      "context_note": "README discusses a planned shutdown and failures, but describes three anomalies while the annotation file has four windows; do not assign causes to individual windows."
+    },
+    {
+      "path": "realAWSCloudwatch/ec2_cpu_utilization_24ae8d.csv",
+      "entity_id": "nab_ec2_24ae8d",
+      "metric_name": "cpu_utilization",
+      "description": "AWS CloudWatch EC2 CPU utilisation",
+      "unit": null,
+      "kind": "gauge",
+      "cadence": "5min",
+      "unit_note": "CloudWatch normally reports Percent, but this export does not document its statistic or scaling. Preserve reported values and leave the unit unconfirmed.",
+      "context_note": "No workload, maintenance, reporting-delay or detailed incident context is supplied."
+    }
+  ],
+  "files": [
+    {
+      "path": "data/realKnownCause/machine_temperature_system_failure.csv",
+      "sha256": "92bf5b87fc7f9bba8ca0b7ec63ccaac8cb4a1371a258e8c29a10ae9c018d82a4"
+    },
+    {
+      "path": "data/realAWSCloudwatch/ec2_cpu_utilization_24ae8d.csv",
+      "sha256": "ab446fbd8b9f37507eb2fdb06315826d8daeef02e241133ce06e0ee571ba53d9"
+    },
+    {
+      "path": "labels/combined_windows.json",
+      "sha256": "1e1fbc4601321aad8d0f8b3784c8134299379f68f6c1f7777565f8ffd57ab6b1"
+    },
+    {
+      "path": "labels/combined_labels.json",
+      "sha256": "98724014c162fcfd4be605683517f194051a54e98756c53667bd33ddbc644d9b"
+    },
+    {
+      "path": "LICENSE.txt",
+      "sha256": "0a0b4d0b10cb1f7ed9ab2993ef93defc03447e6eba9daca1315dd32dae4877e3"
+    }
+  ]
+}

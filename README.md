@@ -1,4 +1,68 @@
-# Optical anomaly detector
+# Time-series anomaly detection blueprint — NAB pilot
+
+This branch starts a company-agnostic, explicitly configured workflow. The active
+entry point is **[01_data_assessment.ipynb](notebooks/01_data_assessment.ipynb)**.
+It loads two pinned NAB development series, audits the observations and examines
+temporal behaviour. It does not fit models or select algorithms automatically.
+Expected-behaviour modelling will be a separate Notebook 02, after its design is agreed.
+
+## Run Notebook 01
+
+From this repository root in WSL or another Python environment:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+python -m ipykernel install --user --name nab-blueprint --display-name "NAB blueprint"
+code .
+```
+
+Open `notebooks/01_data_assessment.ipynb`, select the **NAB blueprint** kernel and
+run the cells in order. The first load downloads about 0.9 MB of pinned public
+source files into ignored `data/nab/`; later loads verify hashes and use the cache.
+Raw data and generated outputs are not committed. No NAB detector package is installed.
+
+To validate or execute without VS Code:
+
+```bash
+python -m pytest tests/test_nab_blueprint.py
+python tools/execute_nab_assessment.py
+```
+
+The runner uses the calling Python interpreter and saves successful outputs.
+Jupyter requires permission to open local kernel sockets. For Python.org macOS
+installations, an HTTPS certificate error on first download requires completing
+that Python installation's certificate setup; do not disable verification.
+
+## The small active pipeline
+
+| Component | Responsibility |
+|---|---|
+| `configs/nab_pilot.json` | Pinned source files and hashes; metric semantics, cadence assumptions and experiment scope |
+| `src/ts_anomaly/nab.py` | Download and verify NAB files; retain source order and keep annotations separate |
+| `src/ts_anomaly/contracts.py` | Explicit metric definitions and observation schema |
+| `src/ts_anomaly/assessment.py` | Generic quality audit, reversible diagnostic views and elapsed-time lag correlations |
+| `notebooks/01_data_assessment.ipynb` | Questions, plots, interpretations and reproducible hand-off |
+
+A new source needs its own small loader and definitions. The assessment functions
+contain no NAB file names, telecom defaults or model selection rules. Both NAB
+pilot signals are gauges; count/counter modelling and multivariate monitoring are
+not established by this pilot.
+
+Read [NAB_REVIEW.md](NAB_REVIEW.md) for scientific limitations, validation evidence
+and the development-only evaluation protocol. Temperature has conflicting repeated
+timestamps, so the raw export is explicitly **unresolved**, not model-ready.
+
+## Legacy optical implementation
+
+The existing `optical_anomaly` package and notebooks 00–06 below are retained from
+`main` as legacy material; **do not run them as the next stages of the NAB blueprint**.
+The Python distribution retains its existing installation name for compatibility;
+the active source namespace is `ts_anomaly`. No scientific-foundation branch changes
+were merged. Original optical source and notebooks are unchanged by this pilot.
+
+### Original optical workflow
 
 Six explicit stages for sustained optical-degradation detection:
 **adapter → validation → features → detectors → incidents → evaluation**.

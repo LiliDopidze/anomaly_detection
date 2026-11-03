@@ -1,0 +1,66 @@
+{
+  "notebook": "notebooks/01_data_assessment.ipynb",
+  "code_cells_executed": 10,
+  "figures_reviewed": 3,
+  "source_commit": "ea702d75cc2258d9d7dd35ca8e5e2539d71f3140",
+  "runtime": {
+    "python": "3.13.2",
+    "packages": {
+      "numpy": "2.5.4",
+      "pandas": "3.1.0",
+      "matplotlib": "3.11.2",
+      "pyarrow": "26.0.0",
+      "nbformat": "5.11.1",
+      "nbclient": "0.11.0"
+    }
+  },
+  "nab_tests": {
+    "passed": 18,
+    "failed": 0
+  },
+  "full_suite_before_final_version_test": {
+    "passed": 132,
+    "failed": 1,
+    "failing_test": "tests/test_pipeline.py::test_frozen_end_to_end"
+  },
+  "same_failure_reproduced_on_unmodified_main": true,
+  "main_commit": "3333e789590ded14dd313ef42ffd32fd073b68a7",
+  "wsl_tested": false,
+  "model_fitted": false,
+  "data_quality": [
+    {
+      "entity_id": "nab_machine_temperature",
+      "metric_name": "component_temperature",
+      "rows": 22695,
+      "start": "2013-12-02 21:15:00",
+      "end": "2014-02-19 15:25:00",
+      "duplicate_timestamps": 12,
+      "duplicate_rows": 24,
+      "backward_steps": 1,
+      "off_grid_rows": 0,
+      "missing_values": 0,
+      "invalid_nonmissing_values": 0,
+      "expected_slots_in_file_span": 22683,
+      "absent_slots": 0,
+      "usable_fraction_in_file_span": 0.9994709694484857,
+      "longest_unusable_minutes": 60.0
+    },
+    {
+      "entity_id": "nab_ec2_24ae8d",
+      "metric_name": "cpu_utilization",
+      "rows": 4032,
+      "start": "2014-02-14 14:30:00",
+      "end": "2014-02-28 14:25:00",
+      "duplicate_timestamps": 0,
+      "duplicate_rows": 0,
+      "backward_steps": 0,
+      "off_grid_rows": 0,
+      "missing_values": 0,
+      "invalid_nonmissing_values": 0,
+      "expected_slots_in_file_span": 4032,
+      "absent_slots": 0,
+      "usable_fraction_in_file_span": 1.0,
+      "longest_unusable_minutes": 0.0
+    }
+  ]
+}
