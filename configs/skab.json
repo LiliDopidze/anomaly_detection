@@ -217,5 +217,19 @@
       "git_blob_sha": "12475370ef2d4817ce7158dcb42b4664442c8a41",
       "partition": "reserved_test"
     }
-  ]
+  ],
+  "baselines": {
+    "calibration_seconds": [
+      60,
+      180
+    ],
+    "minimum_occupancy": 0.8,
+    "aggregation_interval": "5s",
+    "minimum_bin_observations": 4,
+    "examples": [
+      "valve1/1",
+      "other/10",
+      "other/2"
+    ]
+  }
 }
