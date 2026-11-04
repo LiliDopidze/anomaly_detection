@@ -1,9 +1,11 @@
 # Time-series anomaly detection blueprint — SKAB
 
 The active `time-series` branch contains **Notebook 01: data assessment**,
-**Notebook 02: expected behaviour and time-series baselines**, and
-**Notebook 03: feature engineering and validation**. All use SKAB's physical
-water-circulation testbed recordings. No detector or alert policy is fitted yet.
+**Notebook 02: expected behaviour and time-series baselines**,
+**Notebook 03: feature engineering and validation**, and
+**Notebook 04: anomaly detection and development evaluation**. All use SKAB's physical
+water-circulation testbed recordings. Notebook 04 compares frozen detectors and alert
+policies; its results do not establish deployment readiness.
 
 MetroPT-specific code, configuration and the previous modelling notebook have been removed from the
 active tree. That work remains in Git history at `d8ffd5aaacb5c71a554dd4636e5b73dcef41adb2`.
@@ -38,6 +40,7 @@ python -m pytest
 python tools/execute_assessment.py
 python tools/execute_assessment.py 02_expected_behaviour.ipynb
 python tools/execute_assessment.py 03_feature_engineering.ipynb
+python tools/execute_assessment.py 04_detection_and_validation.ipynb
 ```
 
 The runner uses the active interpreter and saves the notebook only after successful execution.
@@ -159,6 +162,67 @@ Validation: all 67 tests pass. Notebook 03 executes end to end; Notebooks 01 and
 again in memory without changing their tracked bytes. All eight reserved source files remain
 unrequested by the loader. No baseline calculations or existing notebook behaviour changed.
 
+## Notebook 04: anomaly detection and development evaluation
+
+`notebooks/04_detection_and_validation.ipynb` rebuilds Notebook 03 features using its unchanged
+functions, then compares Set A (eight levels) and Set B (all 19 features). It requires scikit-learn,
+now included in the project dependencies. No scaler, PCA or automatic feature selection is fitted.
+
+Three predeclared whole-recording groups rotate separate detector-fitting, cutoff-calibration and
+assessment roles. Candidate-normal fitting/calibration vectors are after elapsed 180 seconds and
+before the first positive anomaly or changepoint annotation. This is annotation-assisted reference
+training. Local 60/180-second sensor calibration remains fixed and label-free. Later label-zero
+recovery intervals are not silently added to the normal training population. The overlapping separate
+normal file is unused by the models. The eight reserved files remain unopened.
+
+Methods and evaluation:
+
+- Transparent maximum marginal empirical rarity, with inclusive ties and finite-sample smoothing.
+  These are descriptive scores, not anomaly probabilities. Out-of-range rarity saturates.
+- Isolation Forest with 200 trees, 256 samples per tree and seed 42; seeds 17/91 check stability.
+  Its continuous score is calibrated externally rather than using its default binary prediction.
+- Separate candidate-normal cutoff percentiles of 95% and 99%; strict exceedance. Immediate and
+  three-consecutive-window alerts issue at actual five-second endpoints and reset on missingness.
+- The primary comparison uses identical complete-vector rows for fitting, cutoff calibration,
+  scoring and **alert history**. Own-availability outcomes are also preserved. Unavailable is never zero.
+- Per-recording average precision, point precision/recall without point adjustment, fully observed
+  episode detection/delay, label-negative alert burden, actual observed exposure and monitoring loss.
+  Gap-censored positive pieces are not invented as complete incidents. A standing alarm cannot
+  claim a later episode. Negative-label alerts are not proven false alarms.
+
+Executed findings with primary 60-second calibration:
+
+- Mean per-recording AP is **0.811 / 0.771** for Isolation Forest on Set A / B, and **0.701 / 0.683**
+  for rarity. AP is available for 25/26 recordings; a constant-score reference averages 0.412.
+  The expanded representation does not improve this comparison overall.
+- Common input availability is **4,864/5,150 (94.45%)**. `other/13` remains unmonitored; 180-second
+  calibration additionally loses `other/2`. These cases remain in system-coverage reporting.
+- At the 99th-percentile cutoff with three-window persistence, both Isolation Forest sets detect
+  **7/20 fully observed episodes**, all in `other`; all 12 fully observed valve episodes are missed.
+  There are also 12 censored positive pieces in six recordings, outside that episode denominator.
+- Set A produces 10 label-negative alert starts over **3.923 observed, monitored label-negative hours**
+  (2.55/hour); Set B produces 9 (2.29/hour). These short exposures cannot validate field alert burden.
+- Rarity's calibration cutoffs reach its score ceiling and it produces **no alerts** at either declared
+  percentile. That failed policy is retained and explained rather than changed after seeing results.
+- On the 24 recordings and 4,689 pure-label bins shared by both calibration durations, level-only
+  Isolation Forest AP changes from 0.807 to 0.851 with 180 seconds. The extra information and support
+  loss are reported explicitly. No best seed, duration or cutoff is automatically selected.
+
+The notebook contains five inspected figures and complete per-recording outputs under
+`outputs/skab_detection/` (ignored): fitted-population/fold audits, local references, feature-support
+reasons, cutoffs, compressed scores/decisions/components, episode results, sensitivity and provenance.
+There are no committed datasets, generated tables or model binaries. It runs independently of earlier
+notebooks' output files. Existing Notebooks 01–03 and their supporting calculations are unchanged.
+
+**Readiness:** keep the level-only comparison and the transparent failure evidence. Investigate
+normal-population and cutoff transfer before selecting a policy or opening the reserved test. These
+results support neither a production detector nor cross-industry effectiveness.
+
+Validation: 86 focused tests pass, including empirical-score calculations, ties, cutoff separation,
+causal alert timing, common-support resets, no point adjustment, gap-censored episodes and exact
+observed exposure. Notebook 04 executes end to end. Notebook 03 is checked again in memory without
+changing its tracked bytes. No reserved recording is requested by the loader.
+
 ## Architecture
 
 | File | Responsibility |
@@ -166,6 +230,10 @@ unrequested by the loader. No baseline calculations or existing notebook behavio
 | `notebooks/01_data_assessment.ipynb` | Questions, orchestration, outputs, interpretation and handover |
 | `notebooks/02_expected_behaviour.ipynb` | Fixed-reference, transfer and limited temporal experiments; interpretations and handover |
 | `notebooks/03_feature_engineering.ipynb` | Feature definitions, diagnostics, sensitivity and unscaled handover |
+| `notebooks/04_detection_and_validation.ipynb` | Whole-recording detector comparison, alert policies, honest evaluation and interpretation |
+| `src/ts_anomaly/detection.py` | Generic marginal rarity, cutoff calibration and causal consecutive-window alerts |
+| `src/ts_anomaly/evaluation.py` | Generic label-window, point, episode and observed-exposure evaluation |
+| `tests/test_detection.py` | Hand-calculated scores, alert timing, unavailable cases and event/exposure integrity |
 | `src/ts_anomaly/features.py` | Generic trailing statistics, single-recording feature assembly and descriptive summaries |
 | `tests/test_features.py` | Mathematical examples, availability timing, gap resets and source protection |
 | `src/ts_anomaly/baselines.py` | Generic empirical references, support, completed windows, persistence and fair comparisons |
@@ -194,7 +262,7 @@ are reserved before value exploration:
 
 These are every fourth file in numeric filename order within each family. The actual valve files
 start at zero, unlike the example numbering in the source data README.
-The loader neither downloads nor opens the reserved files. Keep this reservation throughout Notebooks 02–03 and subsequent development.
+The loader neither downloads nor opens the reserved files. Keep this reservation throughout Notebooks 02–04 and subsequent development.
 
 This is our experiment holdout, not a chronological future test or the official SKAB protocol.
 Development annotations describe initial prefixes and intervention responses retrospectively.
