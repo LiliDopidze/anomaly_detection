@@ -1,0 +1,221 @@
+{
+  "source_repository": "https://github.com/waico/SKAB",
+  "source_commit": "b2c0d46c2971dcbfe71e26087b6d231998bb91c2",
+  "dataset_doi": "https://doi.org/10.34740/KAGGLE/DSV/1693952",
+  "split_rationale": "Whole recordings reserved before value exploration: every fourth numbered recording in numeric filename order within each family (valves start at 0; other starts at 1). This is an experiment holdout, not a chronological future holdout or an official SKAB split. One testbed supplies all recordings.",
+  "nominal_interval": "1s",
+  "gap_threshold": "2s",
+  "example_recording": "valve1/1",
+  "files": [
+    {
+      "recording_id": "anomaly-free/anomaly-free",
+      "path": "data/anomaly-free/anomaly-free.csv",
+      "git_blob_sha": "cbad1cdbe8c64db96e4a750c89af327224987469",
+      "partition": "reference"
+    },
+    {
+      "recording_id": "other/1",
+      "path": "data/other/1.csv",
+      "git_blob_sha": "1d5cb568fbd330367d3af3f57d2ffe37bc3d68b6",
+      "partition": "development"
+    },
+    {
+      "recording_id": "other/10",
+      "path": "data/other/10.csv",
+      "git_blob_sha": "ef35c57b869390be8ca1ddf9a6de518f86cd744c",
+      "partition": "development"
+    },
+    {
+      "recording_id": "other/11",
+      "path": "data/other/11.csv",
+      "git_blob_sha": "9887341c06a845f372f64ddc26cb3b71e2dd94c5",
+      "partition": "development"
+    },
+    {
+      "recording_id": "other/12",
+      "path": "data/other/12.csv",
+      "git_blob_sha": "5f1e94f1ff74992c92c632fee358299dd8a8bc85",
+      "partition": "reserved_test"
+    },
+    {
+      "recording_id": "other/13",
+      "path": "data/other/13.csv",
+      "git_blob_sha": "3a6a89a7c5e63d1a5beb6358748ba1aafed9456c",
+      "partition": "development"
+    },
+    {
+      "recording_id": "other/14",
+      "path": "data/other/14.csv",
+      "git_blob_sha": "c3934e4d80b842fb114711dbf586798d25f5c82e",
+      "partition": "development"
+    },
+    {
+      "recording_id": "other/2",
+      "path": "data/other/2.csv",
+      "git_blob_sha": "dd66fd4413c28890447d062a69759b42c06fbbb1",
+      "partition": "development"
+    },
+    {
+      "recording_id": "other/3",
+      "path": "data/other/3.csv",
+      "git_blob_sha": "42c6ba2e36ff3b7e25e4a90dfa6c25a93dc7ac82",
+      "partition": "development"
+    },
+    {
+      "recording_id": "other/4",
+      "path": "data/other/4.csv",
+      "git_blob_sha": "c453c17da21df13c6609d76df0dbfab2d4a62426",
+      "partition": "reserved_test"
+    },
+    {
+      "recording_id": "other/5",
+      "path": "data/other/5.csv",
+      "git_blob_sha": "f302805c7afb73e215cb9b8af874232720871678",
+      "partition": "development"
+    },
+    {
+      "recording_id": "other/6",
+      "path": "data/other/6.csv",
+      "git_blob_sha": "8fbda89f0245c38fee59bac9e7349394bb660d5d",
+      "partition": "development"
+    },
+    {
+      "recording_id": "other/7",
+      "path": "data/other/7.csv",
+      "git_blob_sha": "326c7b4f2f0beb430674e7328fcbc8daf22d4c9a",
+      "partition": "development"
+    },
+    {
+      "recording_id": "other/8",
+      "path": "data/other/8.csv",
+      "git_blob_sha": "2676697f46974ae32de8c1a9775a89431dc9e0ab",
+      "partition": "reserved_test"
+    },
+    {
+      "recording_id": "other/9",
+      "path": "data/other/9.csv",
+      "git_blob_sha": "5f7ec3c03b535dbafa1ed3d18e0f4679e0c4a69a",
+      "partition": "development"
+    },
+    {
+      "recording_id": "valve1/0",
+      "path": "data/valve1/0.csv",
+      "git_blob_sha": "2ce187800cfc29a3fc533250b62149f68f55c0ee",
+      "partition": "development"
+    },
+    {
+      "recording_id": "valve1/1",
+      "path": "data/valve1/1.csv",
+      "git_blob_sha": "d4ce8f6ed422f22efb2c2679f735fc3dd5ea60c5",
+      "partition": "development"
+    },
+    {
+      "recording_id": "valve1/10",
+      "path": "data/valve1/10.csv",
+      "git_blob_sha": "a441bf8e7038af7cb52cd0e7005e9cbeccceb37e",
+      "partition": "development"
+    },
+    {
+      "recording_id": "valve1/11",
+      "path": "data/valve1/11.csv",
+      "git_blob_sha": "026521ed3d29a0ca86845f3514260973c59d8571",
+      "partition": "reserved_test"
+    },
+    {
+      "recording_id": "valve1/12",
+      "path": "data/valve1/12.csv",
+      "git_blob_sha": "51b0d94b3e53375a2eab9ef5ac85789e6e08afbc",
+      "partition": "development"
+    },
+    {
+      "recording_id": "valve1/13",
+      "path": "data/valve1/13.csv",
+      "git_blob_sha": "fe426d4fc5d495d7c4abcab6d9ddc4fa100ea2a5",
+      "partition": "development"
+    },
+    {
+      "recording_id": "valve1/14",
+      "path": "data/valve1/14.csv",
+      "git_blob_sha": "d1cab0dce9c90c1a47ff844cb6a16e66e2c2ef42",
+      "partition": "development"
+    },
+    {
+      "recording_id": "valve1/15",
+      "path": "data/valve1/15.csv",
+      "git_blob_sha": "dc0813ec1163e1e43ae6947ce99556c90971cedd",
+      "partition": "reserved_test"
+    },
+    {
+      "recording_id": "valve1/2",
+      "path": "data/valve1/2.csv",
+      "git_blob_sha": "70e2f50cbe6463c4dfcc95c6f6d40d67be94e7e5",
+      "partition": "development"
+    },
+    {
+      "recording_id": "valve1/3",
+      "path": "data/valve1/3.csv",
+      "git_blob_sha": "2792f18d7832e79117725da7046a17a5f40f2dee",
+      "partition": "reserved_test"
+    },
+    {
+      "recording_id": "valve1/4",
+      "path": "data/valve1/4.csv",
+      "git_blob_sha": "2cfb48e20657e00562e49ba5658a1ef304750404",
+      "partition": "development"
+    },
+    {
+      "recording_id": "valve1/5",
+      "path": "data/valve1/5.csv",
+      "git_blob_sha": "65418bfb531d7e4ef894a0d6b00eac3a27b0dabd",
+      "partition": "development"
+    },
+    {
+      "recording_id": "valve1/6",
+      "path": "data/valve1/6.csv",
+      "git_blob_sha": "3a3fd32f0f232fcfb31e9268629837a0c8228a58",
+      "partition": "development"
+    },
+    {
+      "recording_id": "valve1/7",
+      "path": "data/valve1/7.csv",
+      "git_blob_sha": "3fb99f907437f4e0419e7737dd2619abe4b14a03",
+      "partition": "reserved_test"
+    },
+    {
+      "recording_id": "valve1/8",
+      "path": "data/valve1/8.csv",
+      "git_blob_sha": "290ba1a262657e06ff04cee5a022655d0068e463",
+      "partition": "development"
+    },
+    {
+      "recording_id": "valve1/9",
+      "path": "data/valve1/9.csv",
+      "git_blob_sha": "4e57a96cb5739ceba6c2ca9318c1d5f43e3b80ff",
+      "partition": "development"
+    },
+    {
+      "recording_id": "valve2/0",
+      "path": "data/valve2/0.csv",
+      "git_blob_sha": "85ec83c9a4c3c2af065387466dc5d5b45758c8d9",
+      "partition": "development"
+    },
+    {
+      "recording_id": "valve2/1",
+      "path": "data/valve2/1.csv",
+      "git_blob_sha": "d2426c2390c2a5b14f973ff418a8becb8938c970",
+      "partition": "development"
+    },
+    {
+      "recording_id": "valve2/2",
+      "path": "data/valve2/2.csv",
+      "git_blob_sha": "a4c1abe69c1caedf0ccc9bd86d62bf421acc2b75",
+      "partition": "development"
+    },
+    {
+      "recording_id": "valve2/3",
+      "path": "data/valve2/3.csv",
+      "git_blob_sha": "12475370ef2d4817ce7158dcb42b4664442c8a41",
+      "partition": "reserved_test"
+    }
+  ]
+}

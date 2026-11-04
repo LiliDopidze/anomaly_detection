@@ -1,204 +1,121 @@
-# Time-series anomaly detection blueprint
+# Time-series anomaly detection blueprint — SKAB
 
-Start with **[01_data_assessment.ipynb](notebooks/01_data_assessment.ipynb)** on the
-`time-series` branch. It assesses the **2020 UCI MetroPT-3** recording before any
-expected-behaviour model or detector is fitted. It replaces the earlier NAB pilot;
-that work remains on `codex/nab-blueprint` and in Git history. `main` is unchanged.
+The active `time-series` branch contains **Notebook 01: data assessment and exploratory analysis**.
+It uses SKAB's physical water-circulation testbed recordings. No detector or alert policy is fitted yet.
 
-## Run in WSL / VS Code
+MetroPT-specific code, configuration and the previous modelling notebook have been removed from the
+active tree. That work remains in Git history at `d8ffd5aaacb5c71a554dd4636e5b73dcef41adb2`.
+Generic measurement contracts and assessment functions are retained.
 
-Use Python 3.11 or newer (the clean execution was verified with Python 3.13).
-From your WSL terminal, clone into a new directory so an existing checkout is safe:
+## Run in WSL
+
+Use a new directory to keep an existing checkout unchanged:
 
 ```bash
-git clone --branch time-series --single-branch https://github.com/LiliDopidze/anomaly_detection.git ~/projects/anomaly_detection_metropt
-cd ~/projects/anomaly_detection_metropt
+cd ~/projects
+git clone --branch time-series --single-branch https://github.com/LiliDopidze/anomaly_detection.git anomaly_detection_skab
+cd anomaly_detection_skab
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
-python -m ipykernel install --user --name time-series --display-name "Time-series assessment"
 code .
 ```
 
-Open Notebook 01 and select **Time-series assessment**. Run cells in order. The
-first load downloads the official archive (218 MB); allow several minutes.
-The CSV and supplied PDF are cached under ignored `data/metropt/` and their SHA-256
-hashes are verified on every run. Cached runs do not need network access.
-Budget roughly 1 GB of free disk and a few GB of RAM for a comfortable notebook run.
-On Python.org macOS, complete its certificate-installation step if HTTPS reports a
-certificate error; do not disable verification.
+Python 3.11 or newer is required. In VS Code, open `notebooks/01_data_assessment.ipynb`,
+select this project's `.venv` Python interpreter, and run the cells in order.
+Install the VS Code Python and Jupyter extensions if needed.
+
+The loading cell downloads only development/reference CSVs from the official repository and verifies
+their pinned Git blob identities. Later runs validate the cache. Initial download requires internet
+access and working system TLS certificates, but no Kaggle credentials.
+
+To execute without the editor:
 
 ```bash
 python -m pytest
 python tools/execute_assessment.py
 ```
 
-The runner executes with the calling Python interpreter and saves notebook outputs
-only after success. Jupyter requires local kernel communication. Assessment CSVs
-and a source/configuration/version manifest are written to ignored
-`outputs/metropt_assessment/`. Compact figures and tables remain in the committed
-notebook; raw data, archives, caches and generated CSVs are not committed.
+The runner uses the active interpreter and saves the notebook only after successful execution.
 
-Verified environment: Python 3.13.2, NumPy 2.3.5, pandas 2.3.3, Matplotlib 3.11.2,
-statsmodels 0.14.6 and nbclient 0.11.0. Dependency ranges in `pyproject.toml` keep
-the tested NumPy/pandas/statsmodels compatibility boundaries. The executed notebook
-also displays its versions; each local run writes them to its manifest.
+## Notebook contents
 
-## What Notebook 01 establishes
+1. Provenance, experiment partitions and all eight measurement definitions.
+2. Acquisition order, duplicates, cadence, gaps, occupied seconds and measurement quality.
+3. Separate annotation audit and initial-prefix support.
+4. Native time plots and distributions for a declared example.
+5. Differences between candidate normal references across recordings.
+6. Gap-aware autocorrelation and aggregation-support sensitivity.
+7. Sensor relationships and a measurement-by-measurement handover to Notebook 02.
 
-1. The meaning, units, representation and analytical role of every signal.
-2. Timestamp order, duplicates, irregular intervals and collection gaps.
-3. Coverage under an explicitly assumed continuous collection schedule.
-4. Continuous distributions and digital values, transitions and run durations.
-5. Dependence on contiguous minute aggregates, aggregation sensitivity, changes
-   across development and exploratory hour/weekday summaries.
-6. Valve-command context and relationships among pressure, current and temperature.
-7. A measurement-by-measurement handover to Notebook 02.
+Figures and tables are embedded in the executed notebook. Small diagnostic tables and a provenance
+manifest go to `outputs/skab_assessment/`; source files are cached under `data/skab/`.
+Both directories are Git-ignored. No raw datasets are committed.
 
-The source has seven analogue and eight digital channels. Digital source names
-are not silently corrected (for example, `DV_eletric`). Pulse encoding is not
-inferred to be a cumulative counter. Negative near-zero pressures remain recorded
-values, not automatically invalid measurements.
-
-## Scientific boundaries
-
-| Period (recorded time; timezone unknown) | Use |
-| --- | --- |
-| 2020-02-01 inclusive to 2020-03-01 exclusive | Reference / later model fitting |
-| 2020-03-01 inclusive to 2020-06-01 exclusive | Development / later calibration |
-| 2020-06-01 inclusive to 2020-09-01 04:00 exclusive | Reserved final evaluation |
-
-The source actually ends at 2020-09-01 03:59:50. The last four hours are retained
-for the availability audit rather than silently discarded or reinterpreted as a
-timezone offset. The loader returns **no sensor values from the reserved period**;
-its full-timeline output contains only timestamps, entity/source identifiers and
-missing-cell counts. The final period has not been used for distributions,
-correlations, operating-state inspection or model selection.
-
-A 15-second continuity threshold accommodates approximately 10-second native
-sampling. State runs stop at larger intervals and missing values. A run's observed
-span and upper duration bound assume no hidden switches between samples; they are
-not exact physical dwell times. Boundary/gap-censored runs are identified, and
-excluded from complete-run duration summaries.
-
-Continuous diagnostics use one-minute observation means with at least five finite
-samples per bin; a 4/5/6-sample sensitivity check shows the effect of this choice.
-This is diagnostic aggregation, not a finished causal feature pipeline. No bins
-are interpolated, and digital signals remain at native timestamps. ACF uses the
-longest uninterrupted valid segment, no more than one quarter of its length in
-lags, and no IID significance bands. Hourly profiles do not prove seasonality.
-
-Valve states use COMP and DV_eletric only. Off and unloaded operation remain pooled;
-current does not define the states used to compare current. LPS is an existing
-alarm comparison, not an independent failure label. Maintenance incidents are
-separate from observations, with source errors preserved rather than guessed away.
-
-## Files and reuse
+## Architecture
 
 | File | Responsibility |
 | --- | --- |
-| `notebooks/01_data_assessment.ipynb` | Analysis, figures, actual findings and handover |
-| `src/ts_anomaly/metropt.py` | Source reader, sensor dictionary, valve interpretation and reports |
-| `src/ts_anomaly/contracts.py` | Small wide-table contract and measurement definitions |
-| `src/ts_anomaly/assessment.py` | Generic sampling, coverage, distributions, runs, ACF and relationships |
-| `configs/metropt.json` | Source hashes, boundaries and explicit diagnostic assumptions |
-| `tests/test_assessment.py` | Hand-checkable statistical and integrity examples |
-| `tools/execute_assessment.py` | Execute and save Notebook 01 with the active interpreter |
+| `notebooks/01_data_assessment.ipynb` | Questions, orchestration, outputs, interpretation and handover |
+| `src/ts_anomaly/contracts.py` | Generic measurement definitions and table validation |
+| `src/ts_anomaly/assessment.py` | Generic sampling, distributions, runs, aggregation, ACF and relationships |
+| `src/ts_anomaly/skab.py` | SKAB meanings, units, source loading and separate annotations |
+| `configs/skab.json` | Pinned source, file identities, partitions and timing choices |
+| `tests/test_assessment.py` | Hand-checkable statistical and temporal calculations |
+| `tests/test_skab.py` | Source contracts, annotation isolation and reserved-file protection |
+| `tools/execute_assessment.py` | Notebook execution using the selected Python interpreter |
 
-For another dataset, supply a reader, metric definitions, operating context and
-boundaries. Use the generic assessment functions on those inputs; no MetroPT names
-appear in them. Functions needing one entity explicitly say so or check it. The
-wide contract suits aligned sensors; asynchronous sources need explicit alignment
-before using joint diagnostics. Gauge, state and unresolved pulse representations
-are supported here. Additional count/counter semantics require source-specific
-verification rather than automatic conversion. There is no registry, plugin system
-or automatic model selector.
+Generic methods contain no SKAB sensor names. Here, `entity_id` is an analytical recording key,
+not a separate physical machine. For another dataset, supply its definitions and reader and reuse
+the assessment functions where their assumptions hold. No plugin framework is needed.
 
-The prior four-column NAB contract is intentionally replaced on this development
-branch by aligned wide measurements. Notebook 02 now builds on this contract;
-detector calibration and event evaluation remain future work for Notebook 03.
-The earlier package version is preserved in history; this is not a drop-in change
-for the NAB loader.
+## Boundaries
 
-## Evidence and limits
+The source has 34 labelled experiments and one separate normal recording. Eight complete experiments
+are reserved before value exploration:
 
-[UCI MetroPT-3, Davari et al., DOI 10.24432/C5VW3R](https://doi.org/10.24432/C5VW3R)
-is released under **CC BY 4.0**. Definitions and incident records are paraphrased
-from that source and its accompanying PDF; the exported CSV remains unchanged.
-This is the 2020 recording, not the 2022 MetroPT release. The source PDF and web
-metadata differ in row count and sampling-rate descriptions; the assessment uses
-the pinned file and actual timestamps.
+- `valve1/3`, `valve1/7`, `valve1/11`, `valve1/15`
+- `valve2/3`
+- `other/4`, `other/8`, `other/12`
 
-Method references: [statsmodels ACF](https://www.statsmodels.org/stable/generated/statsmodels.tsa.stattools.acf.html),
-[scikit-learn leakage guidance](https://scikit-learn.org/stable/common_pitfalls.html#data-leakage),
-and [pandas datetime semantics](https://pandas.pydata.org/docs/reference/api/pandas.to_datetime.html).
+These are every fourth file in numeric filename order within each family. The actual valve files
+start at zero, unlike the example numbering in the source data README.
+The loader neither downloads nor opens the reserved files. Keep this reservation in Notebook 02.
 
-This dataset supports development of an analytical blueprint, not a claim of
-cross-company performance. Unknown timezone, oil-level polarity, pulse encoding,
-sensor calibration, incomplete incident labels and one inconsistent maintenance
-date remain limitations. There are only four reported incidents from one asset.
-See the executed notebook for measured findings and the proposed next step:
-interpretable expected-behaviour baselines, with and without valve-command context.
+This is our experiment holdout, not a chronological future test or the official SKAB protocol.
+Development annotations describe initial prefixes and intervention responses retrospectively.
+Future test labels must not select training windows. Later evaluation must distinguish transfer
+of a fixed model from a model allowed a predeclared initial calibration period.
 
-## Notebook 02: expected behaviour
+Annotations are not predictors. Multiple changepoint markers can describe one intervention; gaps
+can split one positive-label run. Neither automatically indicates a new failure.
+The separate normal file has no point labels, and the reader does not invent them.
 
-Open **[02_expected_behaviour.ipynb](notebooks/02_expected_behaviour.ipynb)** after
-Notebook 01. Its first section explains all 15 signals and their possible
-interpretations. It uses the same cached source and protects the same final period.
+## Verified findings and limits
 
-```bash
-python -m pytest
-python tools/execute_assessment.py 02_expected_behaviour.ipynb
-```
+The pinned development partition contains 37,892 rows across 27 recordings:
 
-The existing runner still defaults to Notebook 01. No additional dependencies are
-required. Both notebooks can be executed independently after package installation.
+- No duplicate timestamps within recordings, backwards steps, missing measurement cells or non-finite values.
+- 35 intervals longer than two seconds; the largest is 247 seconds.
+- Initial annotated-development prefixes contain 104–577 observations.
+- Initial flow medians span 32–128 L/min; the separate normal file's median is 125.677 L/min.
+  These reference populations are not automatically interchangeable.
+- In the declared `valve1/1` prefix, the longest uninterrupted one-second segment has only 24 samples.
+  Five-second aggregation supplies a longer diagnostic view, with support sensitivity reported.
 
-Notebook 02 compares overall and command-conditioned medians and central 90%
-empirical ranges on native observations. It fits 1–14 February and assesses 15–21
-February, then fits 1–21 February and assesses 22–29 February. The full February
-fit is frozen for March–May. Unsupported commands remain unavailable rather than
-silently receiving a global conditional reference. Support screens of 100 finite
-readings on three days are explicit engineering choices, not effective sample sizes.
+These are descriptive findings, not detector performance. One testbed and short experiments cannot
+validate cross-industry generalisation, daily/weekly seasonality, long-term drift or field alert burden.
 
-Oil temperature additionally compares a fixed minute-target reference, persistence
-and a small linear model with temperature lags of one/five minutes and preceding
-minute loading fraction. Minute means become available at bin end; incomplete
-bins, unknown context and collection gaps reset history. Equal calendar grids
-retain unavailable periods in the denominator. Every error comparison uses common
-eligible targets and separately reports each method's availability. Native and
-minute-target errors are not ranked together. Temporal reference ranges are built
-from the two out-of-fit February error samples, then assessed only in development.
+Execution was checked with Python 3.13.2, NumPy 2.3.5, pandas 2.3.3, Matplotlib 3.11.2,
+statsmodels 0.14.6 and nbclient 0.11.0. The run manifest records versions and source identities.
+Dependency ranges in `pyproject.toml` are compatibility ranges, not a fully locked environment.
 
-Command durations/transitions and TP3–Reservoirs agreement remain complementary
-checks. Complete durations are sampling bounds, subject to censoring and selection
-bias. Short unresolved command combinations can split a run without establishing a
-physical machine transition. Neither a small forecast error nor pressure agreement
-establishes absence of a fault. Empirical range coverage is not an alarm metric.
+## Sources
 
-Implementation additions are intentionally small:
+- Katser & Kozitsin (2020), [Skoltech Anomaly Benchmark](https://doi.org/10.34740/KAGGLE/DSV/1693952).
+- [Pinned SKAB repository](https://github.com/waico/SKAB/tree/b2c0d46c2971dcbfe71e26087b6d231998bb91c2):
+  sensor definitions and source licensing.
+- [Experiment descriptions](https://github.com/waico/SKAB/blob/b2c0d46c2971dcbfe71e26087b6d231998bb91c2/data/README.md).
+- [statsmodels ACF documentation](https://www.statsmodels.org/v0.14.6/generated/statsmodels.tsa.stattools.acf.html).
 
-| File | Responsibility |
-| --- | --- |
-| `notebooks/02_expected_behaviour.ipynb` | Executed comparisons, interpretations and Notebook 03 handover |
-| `src/ts_anomaly/baselines.py` | Explicit period fitting/application, common-target comparisons and gap-aware histories |
-| `tests/test_baselines.py` | Hand-calculated references, availability, gaps and future-data independence |
-| `tools/execute_assessment.py` | Existing runner, extended to accept either notebook filename |
-
-The notebook writes parameters, availability/comparison tables, example native
-residuals, minute-temperature residuals, pressure residuals, command diagnostics and
-a source/configuration/version manifest under ignored `outputs/metropt_expected/`.
-The committed notebook contains compact figures and tables, not the raw data.
-
-The results support command references for TP2, H1 and motor current, but show
-little MAE benefit for stored pressure or temperature. The temperature linear model
-does not beat persistence consistently across the February folds, and the empirical
-February error ranges under-cover development observations. These are limitations
-to carry into Notebook 03, not evidence to silently widen limits or retrain on
-reported incidents. No alert thresholds, detection accuracy or early-warning
-performance are claimed.
-
-Validation for this implementation: 33 focused tests pass. Both notebooks execute
-end to end; Notebook 01 and its 17 CSV outputs are unchanged. Notebook 02 contains
-16 executed code cells and seven inspected figures; all 21 generated CSV outputs
-are byte-identical on repeat execution in the documented environment.
+Our split, gap threshold and aggregation support are explicit analytical choices, not official mandates.

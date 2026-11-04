@@ -1,7 +1,5 @@
 """Small examples with hand-checkable temporal and statistical answers."""
 
-import json
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -13,9 +11,6 @@ from ts_anomaly.assessment import (
     split_development, state_runs,
 )
 from ts_anomaly.contracts import MetricDefinition, validate_schema
-from ts_anomaly.metropt import (
-    METRICS, fetch_metropt, incident_records, operating_state, read_metropt, sha256_file,
-)
 
 
 DEFINITIONS = {
@@ -150,60 +145,6 @@ def test_relationship_counts_use_finite_pairs_and_constant_is_undefined():
     assert result.pairs.tolist() == [3, 3]
     assert result.pearson.iloc[0] == pytest.approx(1)
     assert pd.isna(result.pearson.iloc[1])
-
-
-def test_operating_states_do_not_use_motor_current():
-    data = pd.DataFrame({'COMP': [0, 1, 1, np.nan], 'DV_eletric': [1, 0, 1, 0], 'Motor_current': [0., 4., 7., 9.]})
-    states = operating_state(data)
-    assert states.tolist() == ['load_command', 'off_or_unloaded_command', 'unresolved', 'unresolved']
-    pd.testing.assert_series_equal(states, operating_state(data.assign(Motor_current=999)))
-
-
-def test_loader_protects_heldout_values_and_preserves_unknown_timezone(tmp_path):
-    data = pd.DataFrame(0., index=range(3), columns=list(METRICS))
-    data.insert(0, 'timestamp', ['2020-02-01 00:00:00', '2020-05-31 23:59:59', '2020-06-01 00:00:00'])
-    path = tmp_path / 'source.csv'
-    data.to_csv(path)
-    development, timeline = read_metropt(path, before='2020-06-01')
-    assert len(development) == 2 and len(timeline) == 3
-    assert development.timestamp.dt.tz is None
-    assert not set(METRICS).intersection(timeline.columns)
-    data.loc[2, list(METRICS)] = 9999
-    data.to_csv(path)
-    changed, changed_timeline = read_metropt(path, before='2020-06-01')
-    pd.testing.assert_frame_equal(development, changed)
-    pd.testing.assert_frame_equal(timeline, changed_timeline)
-
-
-def test_cache_verifies_contents_and_never_overwrites_corruption(tmp_path):
-    name = 'MetroPT3(AirCompressor).csv'
-    path = tmp_path / name
-    path.write_text('example')
-    source = {'files': {name: sha256_file(path)}}
-    assert fetch_metropt(source, tmp_path, download=False) == path
-    path.write_text('corrupt')
-    with pytest.raises(ValueError, match='Checksum'):
-        fetch_metropt(source, tmp_path, download=False)
-    assert path.read_text() == 'corrupt'
-    path.unlink()
-    with pytest.raises(FileNotFoundError):
-        fetch_metropt(source, tmp_path, download=False)
-
-
-def test_incidents_remain_separate_and_source_error_is_preserved():
-    events = incident_records()
-    assert len(events) == 4 and events.incident_id.is_unique
-    assert events.start.lt(events.end).all()
-    assert '30Apr' in events.maintenance_text.iloc[1]
-    assert events.source_issue.iloc[1]
-    assert all('incident' not in name for name in METRICS)
-
-
-def test_pinned_boundaries_match_agreed_protocol():
-    config = json.loads((Path(__file__).resolve().parents[1] / 'configs/metropt.json').read_text())
-    assert config['train_end'] == '2020-03-01 00:00:00'
-    assert config['test_start'] == '2020-06-01 00:00:00'
-    assert config['timezone'] is None
 
 
 def test_state_runs_all_missing_and_single_observation():
