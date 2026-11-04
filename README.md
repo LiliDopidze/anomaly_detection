@@ -1,7 +1,8 @@
 # Time-series anomaly detection blueprint — SKAB
 
-The active `time-series` branch contains **Notebook 01: data assessment** and
-**Notebook 02: expected behaviour and time-series baselines**. Both use SKAB's physical
+The active `time-series` branch contains **Notebook 01: data assessment**,
+**Notebook 02: expected behaviour and time-series baselines**, and
+**Notebook 03: feature engineering and validation**. All use SKAB's physical
 water-circulation testbed recordings. No detector or alert policy is fitted yet.
 
 MetroPT-specific code, configuration and the previous modelling notebook have been removed from the
@@ -36,6 +37,7 @@ To execute without the editor:
 python -m pytest
 python tools/execute_assessment.py
 python tools/execute_assessment.py 02_expected_behaviour.ipynb
+python tools/execute_assessment.py 03_feature_engineering.ipynb
 ```
 
 The runner uses the active interpreter and saves the notebook only after successful execution.
@@ -100,9 +102,62 @@ provenance are written to `outputs/skab_baselines/` (ignored by Git). The output
 sample time from completed-window availability, forecast issuance from scoring eligibility, and
 local calibration from independent external transfer. Residuals remain in original units.
 
-Notebook 01 was executed again in memory without changing its tracked bytes. All 52 tests pass,
+At Notebook 02 delivery, Notebook 01 was executed again in memory without changing its tracked bytes. Its 52-test suite passed,
 including hand-calculated references, boundary/future/annotation independence, support failures,
 window timing, raw-gap resets, comparison exclusions and reserved-file protection.
+
+## Notebook 03: feature engineering and validation
+
+`notebooks/03_feature_engineering.ipynb` produces 19 unscaled candidate features:
+8 level departures, 4 native-time slopes, 5 native-window IQRs and 2 thermal history errors.
+Set A contains the eight level departures; Set B contains all 19. No detector, anomaly score,
+threshold, scaler or label-based selection is fitted. The optional vibration relationship is
+omitted because Notebook 02 did not establish a generally stable relationship.
+
+Level departures subtract the median of **eligible five-second calibration means**, matching the
+representation of the subsequent target. Calibration uses fixed half-open 60/180-second windows,
+80% nominal-second occupancy and at least one eligible aggregate; counts remain visible for audit.
+Primary supported calibrations contain 11–12 means, not 11–12 independent observations.
+Levels begin on wholly post-calibration bins. Slopes and IQRs use native readings in `[t-30s,t)`;
+slopes use actual elapsed minutes. Five-second means require four finite readings. All features
+are timestamped at completed endpoints, with no interpolation or cross-recording history.
+
+The existing baseline functions are reused unchanged. Additional feature-level checks reject
+internal or left-edge gaps over two seconds and stale right edges, using no future reading.
+The thermal history error also requires consecutive supported means and raw continuity. Valid zeros
+remain distinct from unavailable values. Support rows include counts, occupancy, edge ages,
+gap sizes and reasons; history rows describe target support plus separate previous-bin and
+connection fields.
+
+Observed development results on the common post-180-second population:
+
+- Sixty-second calibration supports 25/26 recordings; 180 seconds supports 24/26. `other/13`
+  fails both occupancy rules and `other/2` additionally fails at 180 seconds. Temporal features
+  remain available where their own support permits, even without a calibrated median.
+- Of 5,150 requested endpoints, Set A is complete at 4,885 and Set B at 4,864. Exported tables
+  preserve all endpoints and individual feature availability; complete cases are not imposed.
+- After the 247-second gap in `other/2`, illustrated level, history and 30-second features recover
+  5, 10 and 30 seconds after the first returning reading, respectively.
+- Current slope is sensitive to time scale: median within-recording rank correlations with the
+  30-second version are 0.294 for 10 seconds and 0.417 for 60 seconds. This supports reporting
+  sensitivity, not choosing a window by its response to labelled events.
+- In `valve1/1`, median post-calibration temperature departure is −1.775 °C while median history
+  error is +0.0037 °C. Recent stability can coexist with a sustained departure from the initial level.
+
+The notebook includes five inspected figures, the 19-feature dictionary, per-recording summaries,
+calibration/window sensitivity, within-recording block correlations and an eight-signal handover.
+Generated values and availability tables (compressed CSV), detailed support, calibration metadata,
+source identities, settings and checksums are written to `outputs/skab_features/`, which is ignored
+by Git. No raw data or generated feature tables are committed. Run Notebook 03 independently after
+installing the existing dependencies; it does not require generated outputs from Notebook 02.
+
+Notebook 04 must fit scaling and data-dependent selection inside training partitions, split whole
+recordings, handle the normal/`other/5` source overlap, and compare candidate sets on stated common
+populations while reporting unavailable cases. Reliability here is not evidence of detection value.
+
+Validation: all 67 tests pass. Notebook 03 executes end to end; Notebooks 01 and 02 also executed
+again in memory without changing their tracked bytes. All eight reserved source files remain
+unrequested by the loader. No baseline calculations or existing notebook behaviour changed.
 
 ## Architecture
 
@@ -110,6 +165,9 @@ window timing, raw-gap resets, comparison exclusions and reserved-file protectio
 | --- | --- |
 | `notebooks/01_data_assessment.ipynb` | Questions, orchestration, outputs, interpretation and handover |
 | `notebooks/02_expected_behaviour.ipynb` | Fixed-reference, transfer and limited temporal experiments; interpretations and handover |
+| `notebooks/03_feature_engineering.ipynb` | Feature definitions, diagnostics, sensitivity and unscaled handover |
+| `src/ts_anomaly/features.py` | Generic trailing statistics, single-recording feature assembly and descriptive summaries |
+| `tests/test_features.py` | Mathematical examples, availability timing, gap resets and source protection |
 | `src/ts_anomaly/baselines.py` | Generic empirical references, support, completed windows, persistence and fair comparisons |
 | `tests/test_baselines.py` | Statistical calculations, calibration and forecast information boundaries |
 | `src/ts_anomaly/contracts.py` | Generic measurement definitions and table validation |
@@ -136,7 +194,7 @@ are reserved before value exploration:
 
 These are every fourth file in numeric filename order within each family. The actual valve files
 start at zero, unlike the example numbering in the source data README.
-The loader neither downloads nor opens the reserved files. Keep this reservation in Notebook 02.
+The loader neither downloads nor opens the reserved files. Keep this reservation throughout Notebooks 02–03 and subsequent development.
 
 This is our experiment holdout, not a chronological future test or the official SKAB protocol.
 Development annotations describe initial prefixes and intervention responses retrospectively.

@@ -231,5 +231,30 @@
       "other/10",
       "other/2"
     ]
+  },
+  "features": {
+    "window": "30s",
+    "window_sensitivity_seconds": [
+      10,
+      30,
+      60
+    ],
+    "slope_measurements": [
+      "Current",
+      "Temperature",
+      "Thermocouple",
+      "Volume Flow RateRMS"
+    ],
+    "variability_measurements": [
+      "Accelerometer1RMS",
+      "Accelerometer2RMS",
+      "Current",
+      "Voltage",
+      "Volume Flow RateRMS"
+    ],
+    "history_measurements": [
+      "Temperature",
+      "Thermocouple"
+    ]
   }
 }
