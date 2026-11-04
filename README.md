@@ -40,13 +40,16 @@ The runner uses the active interpreter and saves the notebook only after success
 
 ## Notebook contents
 
-1. Provenance, experiment partitions and all eight measurement definitions.
-2. Acquisition order, duplicates, cadence, gaps, occupied seconds and measurement quality.
-3. Separate annotation audit and initial-prefix support.
-4. Native time plots and distributions for a declared example.
-5. Differences between candidate normal references across recordings.
-6. Gap-aware autocorrelation and aggregation-support sensitivity.
-7. Sensor relationships and a measurement-by-measurement handover to Notebook 02.
+1. Original source folders, file counts and plain explanations of the testbed and all eight signals,
+   before introducing our project-specific partitions.
+2. Measurement and annotation examples, with the population of each analysis stated explicitly.
+3. Sampling, gaps, occupied seconds and measurement quality, including their different denominators.
+4. Annotation timeline, initial support and incomplete event boundaries caused by gaps or file edges.
+5. Native time plots and distributions for a declared example, `valve1/1`.
+6. Initial medians and within-recording interquartile ranges, compared with the separate normal file.
+7. Gap-aware autocorrelation, aggregation-support sensitivity and a linear-trend sensitivity check
+   across all 26 development recordings.
+8. Sensor relationships with exact comparison periods and a measurement-by-measurement handover.
 
 Figures and tables are embedded in the executed notebook. Small diagnostic tables and a provenance
 manifest go to `outputs/skab_assessment/`; source files are cached under `data/skab/`.
@@ -66,7 +69,8 @@ Both directories are Git-ignored. No raw datasets are committed.
 | `tools/execute_assessment.py` | Notebook execution using the selected Python interpreter |
 
 Generic methods contain no SKAB sensor names. Here, `entity_id` is an analytical recording key,
-not a separate physical machine. For another dataset, supply its definitions and reader and reuse
+not a separate physical machine; notebook tables display it as `recording_id`.
+For another dataset, supply its definitions and reader and reuse
 the assessment functions where their assumptions hold. No plugin framework is needed.
 
 ## Boundaries
@@ -93,15 +97,24 @@ The separate normal file has no point labels, and the reader does not invent the
 
 ## Verified findings and limits
 
-The pinned development partition contains 37,892 rows across 27 recordings:
+The opened reference and development recordings contain 37,892 rows across 27 files:
 
 - No duplicate timestamps within recordings, backwards steps, missing measurement cells or non-finite values.
 - 35 intervals longer than two seconds; the largest is 247 seconds.
+  Two-second intervals reduce one-second occupancy without exceeding the gap threshold.
+  Occupancy describes the observed file span, not equipment uptime.
 - Initial annotated-development prefixes contain 104–577 observations.
+  A prefix ends before either annotation first becomes positive; later label-zero readings are excluded.
+  Gap-separated positive pieces are not necessarily distinct incidents.
 - Initial flow medians span 32–128 L/min; the separate normal file's median is 125.677 L/min.
   These reference populations are not automatically interchangeable.
 - In the declared `valve1/1` prefix, the longest uninterrupted one-second segment has only 24 samples.
-  Five-second aggregation supplies a longer diagnostic view, with support sensitivity reported.
+  Aggregating the whole prefix supplies 119 contiguous five-second means with at least four readings
+  per bin. Their timestamps denote completed-window availability; no values are interpolated.
+- Across 26 development recordings, median lag-five-second ACF is 0.953 for motor temperature
+  and 0.954 for fluid temperature. After removing a straight-line trend within each selected segment,
+  these medians are 0.909 and 0.940. Simple linear drift does not fully explain this persistence;
+  neither this check nor high ACF establishes stationarity or predictive performance.
 
 These are descriptive findings, not detector performance. One testbed and short experiments cannot
 validate cross-industry generalisation, daily/weekly seasonality, long-term drift or field alert burden.
@@ -109,6 +122,8 @@ validate cross-industry generalisation, daily/weekly seasonality, long-term drif
 Execution was checked with Python 3.13.2, NumPy 2.3.5, pandas 2.3.3, Matplotlib 3.11.2,
 statsmodels 0.14.6 and nbclient 0.11.0. The run manifest records versions and source identities.
 Dependency ranges in `pyproject.toml` are compatibility ranges, not a fully locked environment.
+The reviewed notebook executes 17 code cells and embeds seven figures. All 35 focused tests pass,
+including occupancy, gap censoring, aggregation boundaries, annotation isolation and detrended ACF.
 
 ## Sources
 

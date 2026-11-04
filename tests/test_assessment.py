@@ -160,3 +160,57 @@ def test_relationships_reject_pooling_different_entities():
     data = pd.DataFrame({'entity_id': ['a', 'b'], 'x': [1., 2.], 'y': [3., 4.]})
     with pytest.raises(ValueError, match='one entity'):
         relationship_report(data, [('x', 'y')])
+
+
+def test_two_second_interval_reduces_occupancy_without_being_a_flagged_gap():
+    times = pd.Series(pd.to_datetime(['2024-01-01 00:00:00', '2024-01-01 00:00:02']))
+    data = pd.DataFrame({'timestamp': times, 'entity_id': 'example'})
+    summary, _, gaps = sampling_report(data, '2s')
+    coverage = bin_coverage(times, times.iloc[0], times.iloc[-1] + pd.Timedelta('1s'), '1s')
+    assert summary.gaps.iloc[0] == 0 and gaps.empty
+    assert coverage.occupied.tolist() == [True, False, True]
+    assert coverage.occupied.mean() == pytest.approx(2 / 3)
+
+
+def test_gap_splits_one_positive_label_stretch_into_censored_pieces():
+    times = pd.to_datetime(['2024-01-01 00:00:00', '2024-01-01 00:00:01',
+                            '2024-01-01 00:00:02', '2024-01-01 00:00:10',
+                            '2024-01-01 00:00:11', '2024-01-01 00:00:12'])
+    runs = state_runs(pd.Series([0, 1, 1, 1, 1, 0], index=times), '2s')
+    positive = runs.loc[runs.value.eq(1)]
+    assert positive.samples.tolist() == [2, 2]
+    assert positive.left_censored.tolist() == [False, True]
+    assert positive.right_censored.tolist() == [True, False]
+
+
+def test_five_second_means_preserve_boundary_membership_and_support():
+    times = pd.date_range('2024-01-01', periods=10, freq='s').delete([2, 6, 7])
+    data = pd.DataFrame({'timestamp': times, 'entity_id': 'example',
+                         'x': [0., 1., 3., 4., 5., 8., 9.]})
+    means, counts = aggregate_gauges(data, ['x'], '5s', 4)
+    assert counts.x.tolist() == [4, 3]
+    assert means.x.iloc[0] == 2
+    assert pd.isna(means.x.iloc[1])
+    availability = means.index + pd.Timedelta('5s')
+    assert availability[0] == pd.Timestamp('2024-01-01 00:00:05')
+
+
+def test_detrended_acf_matches_known_residual_and_ignores_other_segments():
+    # This residual has zero sum and zero linear trend, so its ACF is known.
+    residual = np.tile([1., -1., -1., 1.], 4)
+    series = pd.Series(100 + 2 * np.arange(16) + residual,
+                       index=pd.date_range('2024-01-01', periods=16, freq='5s'))
+    result, info = segment_acf(series, '5s', 3, remove_linear_trend=True)
+    expected = np.dot(residual[1:], residual[:-1]) / np.dot(residual, residual)
+    assert result.acf.iloc[1] == pytest.approx(expected, abs=1e-12)
+    extended = pd.concat([series, pd.Series([1e9], index=[pd.Timestamp('2024-01-02')])])
+    changed, changed_info = segment_acf(extended, '5s', 3, remove_linear_trend=True)
+    pd.testing.assert_frame_equal(result, changed)
+    assert info == changed_info
+
+
+@pytest.mark.parametrize('values', [np.arange(16) * .1 + 20, np.ones(16), np.zeros(16)])
+def test_exact_trend_or_constant_has_undefined_detrended_acf(values):
+    series = pd.Series(values, index=pd.date_range('2024-01-01', periods=16, freq='5s'))
+    result, _ = segment_acf(series, '5s', 3, remove_linear_trend=True)
+    assert result.acf.isna().all()

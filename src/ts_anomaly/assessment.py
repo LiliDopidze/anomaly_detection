@@ -179,16 +179,29 @@ def longest_regular_segment(series: pd.Series, frequency: str) -> pd.Series:
     return series.loc[valid & groups.eq(sizes.idxmax())]
 
 
-def segment_acf(series: pd.Series, frequency: str, max_lag: int):
-    """Demeaned ACF on one regular segment, without IID significance bands."""
+def segment_acf(series: pd.Series, frequency: str, max_lag: int, remove_linear_trend=False):
+    """Descriptive ACF on the longest regular segment, without significance bands.
+
+    Optional least-squares detrending uses that segment only. This sensitivity
+    check neither establishes stationarity nor supplies a causal forecasting fit.
+    """
     segment = longest_regular_segment(series, frequency)
     if max_lag < 1:
         raise ValueError("Maximum lag must be positive")
     lags = min(max_lag, len(segment) // 4)
-    if len(segment) < 8 or segment.nunique() < 2:
+    values = segment.to_numpy(dtype=float)
+    if remove_linear_trend and len(segment) >= 2:
+        elapsed = (segment.index - segment.index[0]).total_seconds().to_numpy()
+        design = np.column_stack([np.ones(len(segment)), elapsed])
+        coefficients = np.linalg.lstsq(design, values, rcond=None)[0]
+        residual = values - design @ coefficients
+        # An exactly linear series leaves only round-off, whose ACF is undefined.
+        tolerance = 32 * np.finfo(float).eps * np.max(np.abs(values))
+        values = np.zeros_like(residual) if np.ptp(residual) <= tolerance else residual
+    if len(segment) < 8 or np.ptp(values) == 0:
         correlation = np.full(lags + 1, np.nan)
     else:
-        correlation = acf(segment.to_numpy(), nlags=lags, fft=True, adjusted=False, missing="raise")
+        correlation = acf(values, nlags=lags, fft=True, adjusted=False, missing="raise")
     result = pd.DataFrame({"lag_steps": np.arange(lags + 1), "acf": correlation})
     result["lag_minutes"] = result.lag_steps * pd.Timedelta(frequency).total_seconds() / 60
     return result, {"start": segment.index.min(), "end": segment.index.max(), "samples": len(segment)}

@@ -123,3 +123,12 @@ def test_manifest_covers_actual_source_tree_and_freezes_whole_experiments():
                         "valve2/3", "other/4", "other/8", "other/12"}
     assert settings["example_recording"] not in reserved
     assert len(settings["source_commit"]) == 40
+
+
+def test_initial_period_stops_at_changepoint_before_anomaly_label(tmp_path):
+    path, _ = write_recording(tmp_path)
+    data, labels = read_recording(path, 'valve1/1')
+    labels.loc[1, 'changepoint'] = 1
+    before = initial_normal(data, labels)
+    assert len(before) == 1
+    assert labels.anomaly.iloc[1] == 0

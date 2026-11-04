@@ -9,6 +9,14 @@ import pandas as pd
 from .contracts import MetricDefinition, validate_schema
 
 
+FAMILIES = {
+    "anomaly-free": "Separate recording described as normal operation; no point annotations.",
+    "valve1": "Experiments restricting water entering the pump (inlet valve).",
+    "valve2": "Experiments restricting water leaving the pump (outlet valve).",
+    "other": "Other interventions: fluid changes, rotor imbalance, cavitation or warmer water.",
+}
+
+
 METRICS = {
     "Accelerometer1RMS": MetricDefinition(
         "Vibration acceleration, sensor 1 (RMS)", "g", "gauge", "measurement",
