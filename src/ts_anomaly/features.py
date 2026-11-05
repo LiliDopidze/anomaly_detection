@@ -40,7 +40,7 @@ def trailing_statistics(series, endpoints, window="30s", minimum_occupancy=.8,
             first_age = (observed_times[0] - start).total_seconds()
             last_age = (end - observed_times[-1]).total_seconds()
             if len(observed) > 1:
-                largest_gap = np.max(np.diff(observed_times.asi8)) / 1e9
+                largest_gap = (observed_times[1:] - observed_times[:-1]).total_seconds().max()
             if left > 0 and observed_times[0] > start:
                 leading_gap = (observed_times[0] - times[left - 1]).total_seconds()
                 largest_gap = max(largest_gap, leading_gap)

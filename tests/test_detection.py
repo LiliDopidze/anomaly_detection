@@ -5,7 +5,9 @@ import pandas as pd
 import pytest
 from sklearn.ensemble import IsolationForest
 
-from ts_anomaly.detection import fit_rarity, rarity_scores, calibrate_threshold, causal_alerts
+from ts_anomaly.detection import (
+    fit_departure_reference, departure_scores, calibrate_threshold, causal_alerts,
+)
 from ts_anomaly.evaluation import (
     label_windows, point_metrics, observed_episodes, decision_labels, exposure_seconds, episode_metrics,
 )
@@ -18,37 +20,75 @@ def series(values, seconds=None):
     return pd.Series(values, index=START + pd.to_timedelta(seconds, unit='s'), dtype=float)
 
 
-def test_empirical_tail_scores_ties_and_constant_reference():
-    reference = fit_rarity(pd.DataFrame({'x': [0, 1, 2, 3], 'constant': [2] * 4}))
-    data = pd.DataFrame({'x': [-1, 0, 1, 10], 'constant': [2, 2, 3, 2]})
-    scores, components = rarity_scores(reference, data)
-    assert components.x.tolist() == pytest.approx([.6, .2, 0, .6])
-    assert components.constant.tolist() == pytest.approx([0, 0, .6, 0])
-    assert scores.tolist() == pytest.approx([.6, .2, .6, .6])
-    # Tail saturation is retained explicitly; severity outside the range is not invented.
-    assert components.x.iloc[0] == components.x.iloc[-1]
+def test_median_iqr_and_maximum_departure_are_hand_calculable():
+    reference = fit_departure_reference(pd.DataFrame({'x': [0, 2, 4, 6], 'y': [0, 4, 8, 12]}))
+    assert reference['median'].tolist() == [3, 6]
+    assert reference.iqr.tolist() == [3, 6]
+    assert reference.observations.eq(4).all() and reference.supported.all()
+    data = pd.DataFrame({'x': [-3, 0, 3, 6, 9, 15], 'y': [6, 6, 18, 6, 6, 6]})
+    scores, components = departure_scores(reference, data)
+    assert components.x.tolist() == [2, 1, 0, 1, 2, 4]
+    assert components.y.tolist() == [0, 0, 2, 0, 0, 0]
+    assert scores.tolist() == [2, 1, 2, 1, 2, 4]
+
+
+def test_departures_keep_growing_beyond_both_fitted_extremes():
+    reference = fit_departure_reference(pd.DataFrame({'x': [0, 2, 4, 6]}))
+    upper, _ = departure_scores(reference, pd.DataFrame({'x': [9, 15, 33]}))
+    lower, _ = departure_scores(reference, pd.DataFrame({'x': [-3, -9, -27]}))
+    assert upper.tolist() == lower.tolist() == [2, 4, 10]
+    calibration, _ = departure_scores(reference, pd.DataFrame({'x': [3, 6, 9]}))
+    threshold = calibrate_threshold(calibration, .99).threshold
+    assert threshold == pytest.approx(1.98)
+    decisions = causal_alerts(series(upper.to_numpy(), [5, 10, 15]), threshold, 3)
+    assert decisions.alarm.tolist() == [0, 0, 1]  # The strict cutoff remains attainable.
+
+
+def test_zero_iqr_is_unavailable_even_when_the_reference_is_not_constant():
+    reference = fit_departure_reference(pd.DataFrame(
+        {'constant': [2] * 5, 'tied': [0, 0, 0, 0, 1], 'variable': [0, 1, 2, 3, 4]}))
+    assert reference.distinct.tolist() == [1, 2, 5]
+    assert reference.supported.tolist() == [False, False, True]
+    scores, components = departure_scores(
+        reference, pd.DataFrame({'constant': [2, 3], 'tied': [0, 9], 'variable': [2, 4]}))
+    assert components[['constant', 'tied']].isna().all().all()
+    assert components.variable.tolist() == [0, 1]
+    assert scores.isna().all()  # Unsupported features cannot silently disappear from the maximum.
+    with pytest.raises(ValueError, match='finite calibration'):
+        calibrate_threshold(scores)
+
+
+def test_departures_do_not_depend_on_measurement_units():
+    fit = pd.DataFrame({'x': [0, 2, 4, 6], 'y': [2, 4, 6, 8]})
+    values = pd.DataFrame({'x': [-10, 2, 20], 'y': [5, 8, 15]})
+    expected = departure_scores(fit_departure_reference(fit), values)
+    # Independent affine unit changes preserve dimensionless departure magnitudes.
+    scale, offset = pd.Series({'x': .001, 'y': 100}), pd.Series({'x': 10, 'y': -30})
+    actual = departure_scores(fit_departure_reference(fit * scale + offset), values * scale + offset)
+    pd.testing.assert_series_equal(actual[0], expected[0])
+    pd.testing.assert_frame_equal(actual[1], expected[1])
 
 
 def test_missing_components_do_not_become_normal_scores():
-    reference = fit_rarity(pd.DataFrame({'x': [0, 1, 2], 'y': [0, 1, 2]}))
-    scores, components = rarity_scores(reference, pd.DataFrame({'x': [10, np.nan, 0], 'y': [np.inf, 1, 0]}))
+    reference = fit_departure_reference(pd.DataFrame({'x': [0, 1, 2], 'y': [0, 1, 2]}))
+    scores, components = departure_scores(reference, pd.DataFrame({'x': [10, np.nan, 0], 'y': [np.inf, 1, 0]}))
     assert scores.iloc[:2].isna().all() and pd.notna(scores.iloc[2])
     assert pd.notna(components.x.iloc[0]) and pd.isna(components.y.iloc[0])
     with pytest.raises(ValueError, match='Feature names'):
-        rarity_scores(reference, pd.DataFrame({'y': [1], 'x': [1]}))
+        departure_scores(reference, pd.DataFrame({'y': [1], 'x': [1]}))
     with pytest.raises(ValueError, match='nonempty'):
-        fit_rarity(pd.DataFrame({'x': [np.nan]}))
+        fit_departure_reference(pd.DataFrame({'x': [np.nan]}))
 
 
-def test_rarity_application_is_frozen_and_future_independent():
-    fitted = fit_rarity(pd.DataFrame({'x': [1, 2, 3, 4]}))
-    saved = fitted['x'].copy()
+def test_departure_application_is_frozen_future_and_annotation_independent():
+    fitted = fit_departure_reference(pd.DataFrame({'x': [1, 2, 3, 4]}))
+    saved = fitted.copy(deep=True)
     first = pd.DataFrame({'x': [0, 2, 100], 'annotation': [0, 0, 1]})
-    before = rarity_scores(fitted, first[['x']])[0]
+    before = departure_scores(fitted, first[['x']])[0]
     first.loc[2, 'x'] = -1000
     first.annotation = 1
-    after = rarity_scores(fitted, first[['x']])[0]
-    np.testing.assert_array_equal(fitted['x'], saved)
+    after = departure_scores(fitted, first[['x']])[0]
+    pd.testing.assert_frame_equal(fitted, saved)
     pd.testing.assert_series_equal(before.iloc[:2], after.iloc[:2])
 
 

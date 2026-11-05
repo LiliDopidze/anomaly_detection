@@ -1,34 +1,38 @@
-"""Empirical feature rarity and causal alert decisions; no source-specific names."""
+"""Median/IQR feature departures and causal alerts; no source-specific names."""
 
 import numpy as np
 import pandas as pd
 
 
-def fit_rarity(values: pd.DataFrame) -> dict:
-    """Freeze sorted marginal references from explicitly selected complete rows."""
-    if values.empty or not np.isfinite(values.to_numpy()).all():
-        raise ValueError('Fit on nonempty, finite, explicitly selected reference rows')
-    return {name: np.sort(values[name].to_numpy(dtype=float)) for name in values}
+def fit_departure_reference(values: pd.DataFrame) -> pd.DataFrame:
+    """Freeze marginal medians and IQRs from explicitly selected complete rows.
 
-
-def rarity_scores(reference: dict, values: pd.DataFrame):
-    """Inclusive empirical tails with finite-sample smoothing; these are not p-values.
-
-    Two-sided rarity is 1-min(1, 2*min(lower_tail, upper_tail)). Both unusually
-    high and low feature values matter. Ties retain their full tail mass.
-    Values beyond reference extremes share a maximum score: no tail extrapolation.
-    The maximum marginal rarity is available only for a complete feature vector.
+    Zero IQR is unsupported, including tied but nonconstant references. No scale
+    is inferred from application data and no epsilon or fallback scale is added.
     """
-    if list(values) != list(reference):
+    if values.empty or not values.columns.is_unique or not np.isfinite(values.to_numpy()).all():
+        raise ValueError('Fit on nonempty, finite, explicitly selected reference rows')
+    quartiles = values.quantile([.25, .5, .75])
+    reference = pd.DataFrame({'median': quartiles.loc[.5],
+                              'iqr': quartiles.loc[.75] - quartiles.loc[.25],
+                              'observations': len(values), 'distinct': values.nunique()})
+    reference['supported'] = np.isfinite(reference.iqr) & reference.iqr.gt(0)
+    reference.index.name = 'feature'
+    return reference
+
+
+def departure_scores(reference: pd.DataFrame, values: pd.DataFrame):
+    """Return maximum absolute median departure / fitted IQR, and its components.
+
+    Scores are unbounded magnitudes, not probabilities or normal-distribution
+    z-scores. Every requested feature must have a finite value and supported
+    fitted spread; otherwise the vector score remains unavailable.
+    """
+    if list(values) != list(reference.index):
         raise ValueError('Feature names and order must match the fitted reference')
-    components = pd.DataFrame(index=values.index, columns=values.columns, dtype=float)
-    for name, sorted_values in reference.items():
-        observed = values[name].where(np.isfinite(values[name]))
-        n = len(sorted_values)
-        lower = (1 + np.searchsorted(sorted_values, observed, side='right')) / (n + 1)
-        upper = (1 + n - np.searchsorted(sorted_values, observed, side='left')) / (n + 1)
-        tail = np.minimum(1, 2 * np.minimum(lower, upper))
-        components[name] = pd.Series(1 - tail, index=values.index).where(observed.notna())
+    scale = reference.iqr.where(reference.supported)
+    components = values.sub(reference['median'], axis='columns').abs().div(scale, axis='columns')
+    components = components.where(np.isfinite(components))
     score = components.max(axis=1).where(components.notna().all(axis=1)).rename('score')
     return score, components
 

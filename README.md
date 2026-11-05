@@ -164,8 +164,8 @@ unrequested by the loader. No baseline calculations or existing notebook behavio
 
 ## Notebook 04: anomaly detection and development evaluation
 
-`notebooks/04_detection_and_validation.ipynb` rebuilds Notebook 03 features using its unchanged
-functions, then compares Set A (eight levels) and Set B (all 19 features). It requires scikit-learn,
+`notebooks/04_detection_and_validation.ipynb` rebuilds Notebook 03 features with resolution-independent
+gap checks, then compares Set A (eight levels) and Set B (all 19 features). It requires scikit-learn,
 now included in the project dependencies. No scaler, PCA or automatic feature selection is fitted.
 
 Three predeclared whole-recording groups rotate separate detector-fitting, cutoff-calibration and
@@ -177,8 +177,11 @@ normal file is unused by the models. The eight reserved files remain unopened.
 
 Methods and evaluation:
 
-- Transparent maximum marginal empirical rarity, with inclusive ties and finite-sample smoothing.
-  These are descriptive scores, not anomaly probabilities. Out-of-range rarity saturates.
+- Maximum absolute feature departure from its fitted median, divided by its fitted IQR.
+  Medians and spreads use only the detector-fitting recordings. Scores grow beyond fitted extremes;
+  they are not probabilities or Gaussian z-scores. Zero IQR (including nonconstant tied data) makes
+  the component and complete-vector score unavailable, with no epsilon or fallback scale.
+  All current fitted references have positive IQRs; their medians, spreads and support are exported.
 - Isolation Forest with 200 trees, 256 samples per tree and seed 42; seeds 17/91 check stability.
   Its continuous score is calibrated externally rather than using its default binary prediction.
 - Separate candidate-normal cutoff percentiles of 95% and 99%; strict exceedance. Immediate and
@@ -192,9 +195,9 @@ Methods and evaluation:
 
 Executed findings with primary 60-second calibration:
 
-- Mean per-recording AP is **0.811 / 0.771** for Isolation Forest on Set A / B, and **0.701 / 0.683**
-  for rarity. AP is available for 25/26 recordings; a constant-score reference averages 0.412.
-  The expanded representation does not improve this comparison overall.
+- Mean per-recording AP is **0.811 / 0.771** for unchanged Isolation Forest on Set A / B, and
+  **0.856 / 0.847** for median/IQR departures. AP is available for 25/26 recordings; a constant-score
+  reference averages 0.412. Expanded features do not improve mean ranking for either method.
 - Common input availability is **4,864/5,150 (94.45%)**. `other/13` remains unmonitored; 180-second
   calibration additionally loses `other/2`. These cases remain in system-coverage reporting.
 - At the 99th-percentile cutoff with three-window persistence, both Isolation Forest sets detect
@@ -202,26 +205,43 @@ Executed findings with primary 60-second calibration:
   There are also 12 censored positive pieces in six recordings, outside that episode denominator.
 - Set A produces 10 label-negative alert starts over **3.923 observed, monitored label-negative hours**
   (2.55/hour); Set B produces 9 (2.29/hour). These short exposures cannot validate field alert burden.
-- Rarity's calibration cutoffs reach its score ceiling and it produces **no alerts** at either declared
-  percentile. That failed policy is retained and explained rather than changed after seeing results.
+- Median/IQR departures detect **6/20 / 8/20** complete episodes with the same 99th-percentile,
+  three-window policy. Set B detects two valve1 episodes. Both sets produce **7 label-negative alert
+  starts (1.78/hour)**, but spend **4.09% / 4.48%** of labelled-normal exposure in alert, versus
+  **1.95% / 1.61%** for Isolation Forest. Fewer starts do not mean shorter alert duration.
+- The new-alert-start episode metric is boundary-sensitive: in `other/5`, delaying a departure alert
+  from 16:16:40 to 16:16:50 moves it inside the annotation starting at 16:16:48. The resulting event
+  credit is not evidence that waiting improves early warning. Point coverage remains separately reported.
+- The former bounded empirical-rarity score produced no alerts because its cutoffs reached its
+  ceiling. It is replaced, not retuned by changing strict `>` to `>=`; the old result remains in Git
+  history. Current cutoffs range from 11.34 to 21.66 IQRs, and reference transfer remains a limitation.
 - On the 24 recordings and 4,689 pure-label bins shared by both calibration durations, level-only
   Isolation Forest AP changes from 0.807 to 0.851 with 180 seconds. The extra information and support
   loss are reported explicitly. No best seed, duration or cutoff is automatically selected.
 
 The notebook contains five inspected figures and complete per-recording outputs under
 `outputs/skab_detection/` (ignored): fitted-population/fold audits, local references, feature-support
-reasons, cutoffs, compressed scores/decisions/components, episode results, sensitivity and provenance.
+reasons, fitted `departure_references.csv`, cutoffs, compressed scores/decisions and
+`departure_components.csv.gz`, episode results, sensitivity and provenance.
 There are no committed datasets, generated tables or model binaries. It runs independently of earlier
-notebooks' output files. Existing Notebooks 01–03 and their supporting calculations are unchanged.
+notebooks' output files. Notebooks 01–03 retain their tracked bytes. The only shared feature change computes gaps from
+elapsed timedeltas rather than assuming nanosecond storage; native SKAB feature support and
+Isolation Forest results were verified unchanged against the preceding execution.
 
 **Readiness:** keep the level-only comparison and the transparent failure evidence. Investigate
 normal-population and cutoff transfer before selecting a policy or opening the reserved test. These
 results support neither a production detector nor cross-industry effectiveness.
 
-Validation: 86 focused tests pass, including empirical-score calculations, ties, cutoff separation,
-causal alert timing, common-support resets, no point adjustment, gap-censored episodes and exact
-observed exposure. Notebook 04 executes end to end. Notebook 03 is checked again in memory without
-changing its tracked bytes. No reserved recording is requested by the loader.
+Validation: **97 tests pass**, including median/IQR calculations, increasing scores beyond both
+fitted extremes, zero-spread unavailability, frozen references, timestamp-resolution invariance,
+gap recovery, causal alert timing, no point adjustment and observed exposure. Notebook 04 executes
+end to end; all five figures were inspected. A file-access guard allowed only the 26 development
+recordings and the separate normal file, and blocked any other source CSV. The normal file is
+loaded but unused by the models. No reserved recording was requested or opened.
+
+Interface change: `fit_departure_reference` and `departure_scores` replace `fit_rarity` and
+`rarity_scores`; exported method names now use `departure`. No dependencies, data splits, feature
+settings, Isolation Forest parameters or alert rules changed.
 
 ## Architecture
 
@@ -231,7 +251,7 @@ changing its tracked bytes. No reserved recording is requested by the loader.
 | `notebooks/02_expected_behaviour.ipynb` | Fixed-reference, transfer and limited temporal experiments; interpretations and handover |
 | `notebooks/03_feature_engineering.ipynb` | Feature definitions, diagnostics, sensitivity and unscaled handover |
 | `notebooks/04_detection_and_validation.ipynb` | Whole-recording detector comparison, alert policies, honest evaluation and interpretation |
-| `src/ts_anomaly/detection.py` | Generic marginal rarity, cutoff calibration and causal consecutive-window alerts |
+| `src/ts_anomaly/detection.py` | Generic median/IQR departures, cutoff calibration and causal consecutive-window alerts |
 | `src/ts_anomaly/evaluation.py` | Generic label-window, point, episode and observed-exposure evaluation |
 | `tests/test_detection.py` | Hand-calculated scores, alert timing, unavailable cases and event/exposure integrity |
 | `src/ts_anomaly/features.py` | Generic trailing statistics, single-recording feature assembly and descriptive summaries |

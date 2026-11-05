@@ -121,6 +121,34 @@ def test_gap_at_window_edge_and_exact_recovery():
     assert result.iloc[1].reason == 'available' and result.iloc[1].slope == 0
 
 
+@pytest.mark.parametrize('unit', ['s', 'ms', 'us', 'ns'])
+def test_internal_gap_seconds_do_not_depend_on_timestamp_resolution(unit):
+    data = recording(np.ones(7), [0, 1, 2, 3, 4, 8, 9])
+    signal = data.set_index('timestamp').x
+    signal.index = signal.index.as_unit(unit)
+    result = trailing_statistics(signal, [START + pd.Timedelta('10s')],
+                                 window='10s', minimum_occupancy=.6).iloc[0]
+    assert result.occupancy == .7
+    assert result.largest_gap_s == 4
+    assert result.reason == 'collection_gap'
+    assert pd.isna(result.slope) and pd.isna(result.iqr)
+
+
+@pytest.mark.parametrize('unit', ['s', 'ms', 'us', 'ns'])
+def test_feature_values_and_gap_recovery_are_resolution_independent(unit):
+    seconds = np.r_[np.arange(64), np.arange(66, 120)]
+    data = recording(3 + 2 * seconds, seconds)
+    expected, expected_support, _ = engineer(data)
+    data['timestamp'] = data.timestamp.dt.as_unit(unit)
+    actual, support, _ = engineer(data)
+    actual.index = actual.index.as_unit('ns')
+    pd.testing.assert_frame_equal(actual, expected)
+    pd.testing.assert_frame_equal(support[['feature', 'reason', 'available']],
+                                  expected_support[['feature', 'reason', 'available']])
+    assert pd.isna(actual.loc[START + pd.Timedelta('95s'), 'x__slope'])
+    assert actual.loc[START + pd.Timedelta('100s'), 'x__slope'] == pytest.approx(120)
+
+
 def test_stale_right_edge_uses_no_future_reading():
     data = recording(np.ones(35))
     data.loc[data.timestamp.between(START + pd.Timedelta(seconds=27),
